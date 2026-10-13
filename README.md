@@ -36,7 +36,7 @@ Hive 是一个共享的市场数据服务：由一个常驻 Worker 负责轮询�
 
 ```
 apps/
-  web/        Vercel 上的读取 API（Next.js App Router）
+  web/        Vercel 上的读取 API 与移动端看板（Next.js App Router + PWA）
   worker/     Railway 上的 OKX 轮询 Worker（Dockerfile、railway.json）
 packages/
   core/       共享逻辑：OKX 客户端、K 线解析、ATR、鉴权、告警规则校验与评估
@@ -57,6 +57,8 @@ scripts/
 | `SUPABASE_URL` | web | Supabase 项目地址，形如 `https://<project-ref>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | web | service role key，仅服务端使用 |
 | `HIVE_API_TOKEN` | web | Agent 使用的 Bearer 令牌。未配置时 API 返回 500（fail closed）。生成：`openssl rand -hex 32` |
+| `HIVE_DASHBOARD_PASSWORD` | web | 看板登录密码，仅在服务端读取。未配置时无法登录。 |
+| `HIVE_SESSION_SECRET` | web | 看板会话 Cookie 的 HMAC 签名密钥，至少 32 字符。生成：`openssl rand -hex 32`。更换后所有已登录会话失效。 |
 | `SUPABASE_DB_URL` | worker | 直连 Postgres 的连接串。**必须使用 Session pooler（5432）或直连**，不能用 Transaction pooler（6543），因为 Worker 依赖会话级 advisory lock |
 | `SUPABASE_DB_CA_CERT` | worker | 可选。数据库端点的 PEM 证书，配置后启用证书校验；未配置时接受未校验的 TLS 连接 |
 | `HIVE_SYMBOLS` | worker | 可选。逗号分隔的基础符号，默认 `BZ,SNDK,MU,META,NVDA,QQQ,MRNA,TSM,XAU,BTC` |
@@ -132,8 +134,12 @@ HIVE_POLL_INTERVAL_SECONDS=15 pnpm --filter @hive/worker start
 SUPABASE_URL=https://<project-ref>.supabase.co \
 SUPABASE_SERVICE_ROLE_KEY=... \
 HIVE_API_TOKEN=local-dev-token \
+HIVE_DASHBOARD_PASSWORD=local-dev-password \
+HIVE_SESSION_SECRET=$(openssl rand -hex 32) \
 pnpm --filter @hive/web dev
 ```
+
+看板在 `http://localhost:3000/` 访问，会先跳转到 `/login`。开发模式不注册 Service Worker，离线与安装行为需要用 `pnpm --filter @hive/web build && pnpm --filter @hive/web start` 验证。
 
 ## 部署
 
@@ -148,7 +154,7 @@ pnpm --filter @hive/web dev
 
 1. 导入本仓库，**Root Directory 设置为 `apps/web`**。
 2. `apps/web/vercel.json` 已指定安装与构建命令（在仓库根目录执行 `pnpm install --frozen-lockfile`，构建 `@hive/web...` 及其依赖）。
-3. 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`HIVE_API_TOKEN`。
+3. 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`HIVE_API_TOKEN`、`HIVE_DASHBOARD_PASSWORD`、`HIVE_SESSION_SECRET`。
 4. **不要添加 Vercel Cron**（Hobby 计划只支持每日一次）。分钟级任务请放在 pg_cron 或 Worker。
 
 ### Railway（apps/worker）
@@ -158,6 +164,43 @@ pnpm --filter @hive/web dev
 3. **Region 选择 Southeast Asia（Singapore）**。
 4. 环境变量：`SUPABASE_DB_URL`（Session pooler），以及可选的 `HIVE_SYMBOLS`、`HIVE_POLL_INTERVAL_SECONDS`、`SUPABASE_DB_CA_CERT`。
 5. 确保只运行一个副本即可。即使多个副本启动，advisory lock 也只会让其中一个轮询，其余待命，因此可以安全地重启或滚动发布。
+
+## 看板（PWA）
+
+访问 `https://<your-app>.vercel.app/` 会跳转到 `/login`。输入 `HIVE_DASHBOARD_PASSWORD` 后，服务端写入 `hive_session` Cookie：`httpOnly`、`Secure`、`SameSite=Lax`，有效期 7 天，内容为 HMAC-SHA256 签名的过期时间。Cookie 中不包含任何用户数据。中间件负责拦截所有页面，`/login`、`/offline`、`/manifest.webmanifest`、`/sw.js`、`/icons/*` 不需要登录。`/api/*` 不经过看板登录，仍然只使用 Bearer 令牌。
+
+面板由 `apps/web/src/modules/registry.ts` 统一注册，导航与 PWA 快捷方式都从这里生成：
+
+- **数据源健康**：与 `/api/health` 使用同一套判定逻辑（`src/modules/health/mapper.ts`）
+- **行情**：`quotes_latest` 最新价，以及 `candles` 中 `1D`（UTC 日线）的最近 60 根 K 线。红涨绿跌，可切换标的。
+- **新闻**：`news_events` 按事件聚合 `news_items`。只有 http(s) 链接会渲染为超链接。
+- **告警**：`alerts` 最近 50 条。
+
+数据只在服务端读取，使用 `SUPABASE_SERVICE_ROLE_KEY`。各面板的 `query.ts` 都以 `import "server-only"` 开头，若被客户端组件引用，构建会直接失败。
+
+### 安装到主屏幕
+
+- **Android / 桌面 Chrome、Edge**：页面底部出现「安装」提示，也可以在浏览器菜单中选择「安装应用」。
+- **iOS Safari**：点按「分享」，再选择「添加到主屏幕」。iOS 不提供安装事件，页面会显示这段提示。
+- 清单为 `app/manifest.ts`，包含 192 / 512 普通图标与 maskable 图标（`public/icons/`），主题色 `#d97706`，并为每个面板提供快捷方式。
+
+### 离线行为
+
+Service Worker（`public/sw.js`，仅生产环境注册）只缓存**应用壳**：`/_next/static/` 下内容哈希的静态资源、图标、清单和离线页 `/offline`。页面导航始终优先走网络，离线时返回离线页。`/api/*` 不会被拦截或缓存，看板数据也不会写入 Service Worker 的缓存，因此退出登录后磁盘上不残留业务数据。
+
+### 新增一个面板
+
+1. 在 `apps/web/src/modules/registry.ts` 的 `PANELS` 中追加一项，例如：
+
+   ```ts
+   { id: "funding", title: "资金费率", icon: "chart", href: "/funding", order: 50 },
+   ```
+
+   `href` 必须是 `/${id}`；`icon` 只能取 `PANEL_ICONS` 中的值（`pulse`、`chart`、`news`、`bell`）。
+
+2. 创建 `apps/web/app/(dashboard)/funding/page.tsx`，用 `requirePanel("funding")` 读取标题，并通过 `PanelFrame`、`EmptyState`、`ErrorState` 渲染。
+3. 把数据读取放在 `src/modules/funding/query.ts`（文件顶部 `import "server-only"`），把纯转换逻辑放在 `mapper.ts`，并为 `mapper.ts` 编写单测。
+4. 运行 `pnpm --filter @hive/web test`。注册表测试会检查 `href`、图标、排序是否合法，以及对应的 `page.tsx` 是否存在。导航和 PWA 快捷方式会自动更新。
 
 ## API（供 Agent 调用）
 
@@ -196,6 +239,8 @@ Agent 集成建议：
 - service role key 与 `HIVE_API_TOKEN` 只能放在服务端环境变量中。API 对令牌比较使用常量时间比较，且令牌未配置时拒绝所有请求。
 - 所有表开启 RLS；匿名与 `authenticated` 角色没有直接表权限。webhook 签名密钥存放在 Supabase Vault 中。
 - `.env*` 已加入 `.gitignore`，只提交 `.env.example`。
+- 看板登录：密码比较使用定长 SHA-256 摘要后的常量时间比较；失败时固定延迟 500 ms；会话 Cookie 由 HMAC 签名（使用独立的 `HIVE_SESSION_SECRET`，而不是从密码派生，避免离线猜测密码）；登录跳转只接受同源相对路径。中间件和看板布局各校验一次会话。
+- 已知限制：看板登录没有按 IP 的限流。若需要，请在 Vercel Firewall 中为 `/login` 配置速率限制。
 
 ## CI
 
