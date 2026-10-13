@@ -73,7 +73,7 @@ async function main(): Promise<void> {
     const started = Date.now();
     try {
       const result = await runPollCycle({ client: okx, store, targets, log });
-      log(`cycle ok=${result.successes} failed=${result.failures}`);
+      log(`cycle ok=${result.successes} failed=${result.failures} dbErrors=${result.writeErrors}`);
       rateLimitBackoffMs = result.rateLimited
         ? Math.min(Math.max(rateLimitBackoffMs * 2, MIN_RATE_LIMIT_BACKOFF_MS), MAX_RATE_LIMIT_BACKOFF_MS)
         : 0;
