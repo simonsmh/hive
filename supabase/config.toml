@@ -1,7 +1,14 @@
-# Minimal Supabase CLI config. Only what the okx-collector Edge Function needs is declared here;
-# everything else uses CLI defaults. The function authenticates pg_net calls with its own
-# COLLECTOR_SECRET, so the platform JWT check is disabled for it.
+# Minimal Supabase CLI config. Only what the Edge Functions need is declared here; everything else
+# uses CLI defaults. Each function authenticates pg_cron/pg_net calls with its own shared secret
+# (COLLECTOR_SECRET for okx-collector, EDGE_CRON_SECRET for the others), so the platform JWT check is
+# disabled for them.
 project_id = "hive"
 
 [functions.okx-collector]
+verify_jwt = false
+
+[functions.jin10-poller]
+verify_jwt = false
+
+[functions.webhook-dispatcher]
 verify_jwt = false
