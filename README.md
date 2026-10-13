@@ -111,9 +111,9 @@ psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/tests/verify.sql
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm build         # core -> web (next build) -> worker；apps 依赖 core 的 dist，必须先构建
 pnpm lint          # eslint
 pnpm typecheck     # tsc（core / web / worker）
-pnpm build         # core -> web (next build) -> worker
 pnpm test          # vitest（core / worker / web）
 ```
 
@@ -201,7 +201,7 @@ Agent 集成建议：
 
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行两个作业：
 
-1. **node**：`pnpm install --frozen-lockfile`、`pnpm lint`、`pnpm typecheck`、`pnpm build`（core → web → worker）、`pnpm test`。
+1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
 2. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 阶段 2 计划
