@@ -4,3 +4,4 @@ export * from "./symbols.js";
 export * from "./atr.js";
 export * from "./auth.js";
 export * from "./alerts.js";
+export * from "./collector.js";
