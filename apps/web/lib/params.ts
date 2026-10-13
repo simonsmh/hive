@@ -54,3 +54,10 @@ export function parseTimestamp(raw: string | null, name: string): string | null 
   if (Number.isNaN(value.getTime())) throw new ParamError(`${name} must be epoch milliseconds or an ISO-8601 timestamp`);
   return value.toISOString();
 }
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseUuid(raw: string, name: string): string {
+  if (!UUID_PATTERN.test(raw)) throw new ParamError(`${name} must be a UUID`);
+  return raw.toLowerCase();
+}

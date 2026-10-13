@@ -1,4 +1,4 @@
-import { isAuthorized } from "@hive/core";
+import { isAuthorized, SubscriptionInputError } from "@hive/core";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -11,6 +11,20 @@ export class ParamError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ParamError";
+  }
+}
+
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotFoundError";
+  }
+}
+
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConflictError";
   }
 }
 
@@ -45,11 +59,24 @@ export async function handle(run: () => Promise<Response>): Promise<Response> {
     return await run();
   } catch (error) {
     if (error instanceof ParamError) return errorResponse(400, error.message);
+    if (error instanceof SubscriptionInputError) return jsonResponse({ error: "invalid subscription", problems: error.problems }, 400);
+    if (error instanceof NotFoundError) return errorResponse(404, error.message);
+    if (error instanceof ConflictError) return errorResponse(409, error.message);
     if (error instanceof ConfigError) {
       console.error(`[api] ${error.message}`);
       return errorResponse(500, "server misconfigured");
     }
     console.error("[api] unhandled error", error);
     return errorResponse(500, "internal error");
+  }
+}
+
+/** Parses a JSON request body. Malformed JSON is a client error (400), not a server error. */
+export async function readJsonBody(request: Request): Promise<unknown> {
+  const text = await request.text();
+  try {
+    return text.trim() === "" ? {} : JSON.parse(text);
+  } catch {
+    throw new ParamError("body must be valid JSON");
   }
 }
