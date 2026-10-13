@@ -32,15 +32,25 @@ export default async function AlertsPage() {
   );
 }
 
+function kindBadgeClass(alert: AlertView): string {
+  if (alert.kind === "source_recovered") return "badge badge-ok";
+  if (alert.kind === "source_stale") return "badge badge-bad";
+  return "badge badge-accent";
+}
+
 function AlertItem({ alert }: { alert: AlertView }) {
   return (
     <li className="list-item">
       <div className="list-item-head">
-        <span className={alert.kind === "source_stale" ? "badge badge-bad" : "badge badge-accent"}>{alert.kindLabel}</span>
+        <span className={kindBadgeClass(alert)}>{alert.kindLabel}</span>
         {alert.symbol ? <span className="badge">{alert.symbol}</span> : null}
+        {alert.resolved ? <span className="badge badge-ok">已恢复</span> : null}
         <span className="muted">{formatBeijingTime(alert.triggeredAt)}</span>
       </div>
-      <p>{alert.summary}</p>
+      <p>
+        {alert.summary} <span className="meta">严重程度 {alert.severityLabel}</span>
+      </p>
+      {alert.resolved && alert.resolvedAt ? <p className="meta">恢复时间 {formatBeijingTime(alert.resolvedAt)}</p> : null}
       {alert.details.length > 0 ? (
         <dl className="alert-details">
           {alert.details.map((detail, index) => (

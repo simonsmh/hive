@@ -3,6 +3,7 @@ import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/P
 import { formatBeijingTime, formatCredibility } from "@/src/modules/format";
 import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
+import { sourceLabel } from "@/src/modules/sources";
 import { groupNewsByEvent, type NewsEventView } from "@/src/modules/news/mapper";
 import { NEWS_EVENT_LIMIT, loadRecentNews } from "@/src/modules/news/query";
 
@@ -48,7 +49,7 @@ function EventItem({ event }: { event: NewsEventView }) {
         <ul className="news-items">
           {event.items.map((item) => (
             <li key={item.id} className="meta">
-              <span className="badge">{item.source}</span>
+              <span className="badge">{sourceLabel(item.source)}</span>
               {item.url ? (
                 <a href={item.url} target="_blank" rel="noopener noreferrer">
                   {item.title}

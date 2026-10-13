@@ -7,7 +7,7 @@ export const ALERT_LIMIT = 50;
 export async function loadRecentAlerts(): Promise<AlertRow[]> {
   const { data, error } = await getDb()
     .from("alerts")
-    .select("id, kind, symbol, payload, triggered_at")
+    .select("id, kind, symbol, severity, payload, triggered_at, resolved_at")
     .order("triggered_at", { ascending: false })
     .limit(ALERT_LIMIT);
   assertNoError(error);
