@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import { ServiceWorkerRegister } from "@/src/components/pwa/ServiceWorkerRegister";
 import { PWA_CONFIG } from "@/src/modules/pwa/config";
 import "./globals.css";
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         {children}
         <ServiceWorkerRegister />
+        <SpeedInsights />
       </body>
     </html>
   );
