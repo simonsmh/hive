@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import { DashboardNav } from "@/src/components/dashboard/DashboardNav";
+import { InstallPrompt } from "@/src/components/pwa/InstallPrompt";
 import { logoutAction } from "@/src/modules/auth/actions";
 import { SESSION_COOKIE, verifySessionToken } from "@/src/modules/auth/session";
 import { getNavItems } from "@/src/modules/registry";
@@ -25,6 +26,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
       </header>
       <div className="content">{children}</div>
       <DashboardNav items={getNavItems()} />
+      <InstallPrompt />
     </div>
   );
 }
