@@ -1,10 +1,13 @@
 import type { Metadata } from "next";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatAge, formatBeijingTime } from "@/src/modules/format";
+import { WebhookDeliverySection } from "@/src/components/dashboard/WebhookDeliverySection";
 import { buildHealthReport, type SourceHealthRow, type SourceHealthView } from "@/src/modules/health/mapper";
 import { loadSourceHealth } from "@/src/modules/health/query";
 import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
+import { sourceLabel } from "@/src/modules/sources";
+import { loadDeliverySummary } from "@/src/modules/webhooks/query";
 
 const panel = requirePanel("health");
 
@@ -12,10 +15,14 @@ export const metadata: Metadata = { title: panel.title };
 export const dynamic = "force-dynamic";
 
 export default async function HealthPage() {
-  const result = await loadPanelData("source_health", loadSourceHealth);
+  const [health, deliveries] = await Promise.all([
+    loadPanelData("source_health", loadSourceHealth),
+    loadPanelData("webhook_deliveries", loadDeliverySummary),
+  ]);
   return (
     <PanelFrame title={panel.title} subtitle="各数据源最近一次成功采集。已启用且过期的数据源会使 /api/health 返回 503。">
-      {result.ok ? <HealthBody rows={result.data} /> : <ErrorState message={result.message} />}
+      {health.ok ? <HealthBody rows={health.data} /> : <ErrorState message={health.message} />}
+      {deliveries.ok ? <WebhookDeliverySection summary={deliveries.data} /> : <ErrorState message={deliveries.message} />}
     </PanelFrame>
   );
 }
@@ -73,7 +80,7 @@ function SourceItem({ source }: { source: SourceHealthView }) {
   return (
     <li className="list-item">
       <div className="list-item-head">
-        <strong>{source.source.toUpperCase()}</strong>
+        <strong>{sourceLabel(source.source)}</strong>
         {badge}
       </div>
       <div className="meta">

@@ -552,3 +552,14 @@ p {
     animation: none !important;
   }
 }
+
+.webhook-summary {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+}
+
+.webhook-summary h2 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+}
