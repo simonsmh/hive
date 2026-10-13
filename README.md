@@ -59,7 +59,7 @@ scripts/
 | `HIVE_API_TOKEN` | web | Agent 使用的 Bearer 令牌。未配置时 API 返回 500（fail closed）。生成：`openssl rand -hex 32` |
 | `SUPABASE_DB_URL` | worker | 直连 Postgres 的连接串。**必须使用 Session pooler（5432）或直连**，不能用 Transaction pooler（6543），因为 Worker 依赖会话级 advisory lock |
 | `SUPABASE_DB_CA_CERT` | worker | 可选。数据库端点的 PEM 证书，配置后启用证书校验；未配置时接受未校验的 TLS 连接 |
-| `HIVE_SYMBOLS` | worker | 可选。逗号分隔的基础符号，默认 `BZ,SNDK,MU,META,NVDA,QQQ,MRNA,TSM,XAU,BTC` |
+| `HIVE_SYMBOLS` | worker | 可选。逗号分隔的基础符号，默认 `BZ,SNDK,MU,META,NVDA,QQQ,MRNA,TSM,XAU,BTC,ETH` |
 | `HIVE_POLL_INTERVAL_SECONDS` | worker | 可选。轮询间隔，5–300 秒，默认 15 |
 | `OKX_BASE_URL` | worker | 可选。默认 `https://www.okx.com` |
 | `DATABASE_URL` | 迁移脚本 | 用于 `scripts/apply-migrations.sh` 和 `verify.sql` 的数据库连接串 |
@@ -124,7 +124,7 @@ SUPABASE_DB_URL=postgresql://postgres:postgres@localhost:54322/postgres \
 HIVE_POLL_INTERVAL_SECONDS=15 pnpm --filter @hive/worker start
 ```
 
-启动后会看到 `leadership acquired`，随后每个周期输出 `cycle ok=50 failed=0`（10 个符号 × 5 个请求）。
+启动后会看到 `leadership acquired`，随后每个周期输出 `cycle ok=55 failed=0 dbErrors=0`（11 个符号 × 5 个请求）。`dbErrors` 为本周期写库失败的次数，单次写库失败不会中断周期；只有本周期没有任何一次写入成功时，`source_health` 才记为失败。
 
 运行 API（需要 Supabase REST 端点，本地可使用 PostgREST）：
 

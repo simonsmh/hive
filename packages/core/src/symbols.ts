@@ -1,6 +1,6 @@
 import type { OkxInstrument } from "./okx.js";
 
-export const DEFAULT_SYMBOLS = ["BZ", "SNDK", "MU", "META", "NVDA", "QQQ", "MRNA", "TSM", "XAU", "BTC"] as const;
+export const DEFAULT_SYMBOLS = ["BZ", "SNDK", "MU", "META", "NVDA", "QQQ", "MRNA", "TSM", "XAU", "BTC", "ETH"] as const;
 
 export const SYMBOL_PATTERN = /^[A-Z0-9]{1,20}$/;
 
