@@ -5,8 +5,10 @@ const base: AlertRow = {
   id: 7,
   kind: "source_stale",
   symbol: null,
+  severity: "warning",
   payload: {},
   triggered_at: "2026-10-13T12:00:00Z",
+  resolved_at: null,
 };
 
 describe("toAlertView", () => {
@@ -55,5 +57,42 @@ describe("toAlertView", () => {
     const view = toAlertView({ ...base, payload: ["x"] });
     expect(view.details).toEqual([]);
     expect(view.summary).toBe("数据源 未知 超过允许的更新间隔");
+  });
+});
+
+describe("toAlertView lifecycle", () => {
+  it("marks an open source_stale alert as unresolved with its severity label", () => {
+    const view = toAlertView({ ...base, payload: { source: "jin10", threshold_minutes: 5 } });
+    expect(view.resolved).toBe(false);
+    expect(view.resolvedAt).toBeNull();
+    expect(view.severityLabel).toBe("警告");
+    expect(view.details).toEqual([
+      { label: "数据源", value: "jin10" },
+      { label: "阈值(分钟)", value: "5" },
+    ]);
+  });
+
+  it("labels the recovery event without marking it resolved", () => {
+    const view = toAlertView({
+      ...base,
+      id: 9,
+      kind: "source_recovered",
+      severity: "info",
+      payload: { source: "jin10" },
+    });
+    expect(view.kindLabel).toBe("数据源恢复");
+    expect(view.summary).toBe("数据源 jin10 已恢复更新");
+    expect(view.severityLabel).toBe("信息");
+    expect(view.resolved).toBe(false);
+  });
+
+  it("treats a row with resolved_at set as resolved", () => {
+    const view = toAlertView({ ...base, resolved_at: "2026-10-13T12:05:00Z" });
+    expect(view.resolved).toBe(true);
+    expect(view.resolvedAt).toBe("2026-10-13T12:05:00Z");
+  });
+
+  it("keeps unknown severities readable", () => {
+    expect(toAlertView({ ...base, severity: "urgent" }).severityLabel).toBe("urgent");
   });
 });

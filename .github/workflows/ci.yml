@@ -29,9 +29,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
-  edge-function:
-    name: okx-collector Edge Function (Deno)
+  edge-functions:
+    name: Edge Functions (Deno) - ${{ matrix.function }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        function: [okx-collector, jin10-poller, webhook-dispatcher]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,13 +47,13 @@ jobs:
       - name: Shared core copies are up to date
         run: node scripts/sync-edge-core.mjs --check
       - name: Lint
-        working-directory: supabase/functions/okx-collector
+        working-directory: supabase/functions/${{ matrix.function }}
         run: deno lint
       - name: Type check
-        working-directory: supabase/functions/okx-collector
-        run: deno check index.ts handler.test.ts store.test.ts
+        working-directory: supabase/functions/${{ matrix.function }}
+        run: deno check index.ts handler.ts store.ts *.test.ts
       - name: Test
-        working-directory: supabase/functions/okx-collector
+        working-directory: supabase/functions/${{ matrix.function }}
         run: deno test
 
   migrations:
