@@ -80,6 +80,25 @@ begin
   select count(*) into v_queued from pgmq.read('hive_deliveries', 30, 10);
   if v_queued <> 1 then raise exception 'expected 1 queued delivery message, got %', v_queued; end if;
 
+  -- Worker health writes (same statements as recordSourceSuccess / recordSourceFailure in apps/worker/src/store.ts).
+  insert into public.source_health (source, last_success_at, consecutive_failures, last_error, updated_at)
+  values ('okx', now(), 0, null, now())
+  on conflict (source) do update
+    set last_success_at = now(), consecutive_failures = 0, last_error = null, updated_at = now();
+  insert into public.source_health (source, consecutive_failures, last_error, updated_at)
+  values ('okx', 1, 'boom', now())
+  on conflict (source) do update
+    set consecutive_failures = source_health.consecutive_failures + 1, last_error = excluded.last_error, updated_at = now();
+  perform 1 from public.source_health
+   where source = 'okx' and last_success_at is not null and consecutive_failures = 1 and last_error = 'boom';
+  if not found then raise exception 'worker health upsert did not persist'; end if;
+
+  -- Every default worker symbol has a symbol_map seed (see packages/core DEFAULT_SYMBOLS).
+  foreach t in array array['BZ', 'SNDK', 'MU', 'META', 'NVDA', 'QQQ', 'MRNA', 'TSM', 'XAU', 'BTC', 'ETH'] loop
+    perform 1 from public.symbol_map where symbol = t and okx_inst_id = t || '-USDT-SWAP';
+    if not found then raise exception 'symbol_map is missing the % seed', t; end if;
+  end loop;
+
   -- Market data round trip: candles upsert on the composite key and quotes_latest feeds the spread view.
   insert into public.candles (symbol, source, interval, ts, open, high, low, close, volume, vol_ccy, confirmed)
   values ('NVDA', 'okx', '1m', now(), 10, 12, 9, 11, 5, 55, true)

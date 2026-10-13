@@ -16,6 +16,10 @@ describe("parseSymbolList", () => {
     expect(parseSymbolList("  ")).toEqual([...DEFAULT_SYMBOLS]);
   });
 
+  it("polls ETH by default", () => {
+    expect(parseSymbolList(undefined)).toContain("ETH");
+  });
+
   it("normalises case, trims and de-duplicates", () => {
     expect(parseSymbolList(" nvda, NVDA ,btc")).toEqual(["NVDA", "BTC"]);
   });
