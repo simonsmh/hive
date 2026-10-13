@@ -162,7 +162,7 @@ export class OkxClient {
   private readonly minIntervalMs: number;
   private readonly maxRetries: number;
   private readonly maxBackoffMs: number;
-  private lastRequestAt = Number.NEGATIVE_INFINITY;
+  private nextSlotAt = Number.NEGATIVE_INFINITY;
 
   constructor(options: OkxClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? DEFAULT_OKX_BASE_URL;
@@ -186,11 +186,13 @@ export class OkxClient {
     return parseOkxCandles(await this.request("/api/v5/market/candles", { instId, bar, limit: String(limit) }));
   }
 
+  /** Reserves the next request slot, so concurrent callers stay spaced by minIntervalMs. */
   private async pace(): Promise<void> {
     if (this.minIntervalMs <= 0) return;
-    const wait = this.lastRequestAt + this.minIntervalMs - this.now();
-    if (wait > 0) await this.sleep(wait);
-    this.lastRequestAt = this.now();
+    const now = this.now();
+    const slot = Math.max(now, this.nextSlotAt);
+    this.nextSlotAt = slot + this.minIntervalMs;
+    if (slot > now) await this.sleep(slot - now);
   }
 
   private async request(path: string, params: Record<string, string>): Promise<unknown> {

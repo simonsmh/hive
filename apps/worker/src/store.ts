@@ -1,18 +1,8 @@
 import type pg from "pg";
-import type { Candle, Interval, Source } from "@hive/core";
+import type { CollectorStore } from "@hive/core";
 
-export interface QuoteRow {
-  symbol: string;
-  price: number;
-  ts: number;
-}
-
-export interface Store {
+export interface Store extends CollectorStore {
   upsertSymbolMap(symbol: string, okxInstId: string): Promise<void>;
-  upsertQuote(symbol: string, source: Source, quote: QuoteRow): Promise<void>;
-  upsertCandles(symbol: string, source: Source, interval: Interval, candles: readonly Candle[]): Promise<number>;
-  recordSourceSuccess(source: Source): Promise<void>;
-  recordSourceFailure(source: Source, error: string): Promise<void>;
 }
 
 export function createStore(db: Pick<pg.Pool, "query">): Store {

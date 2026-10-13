@@ -1,8 +1,7 @@
 import pg from "pg";
-import { OkxClient, pickSwapInstId } from "@hive/core";
+import { OkxClient, pickSwapInstId, runPollCycle, type PollTarget } from "@hive/core";
 import { loadWorkerConfig, sslOptionsFor } from "./config.js";
 import { createStore } from "./store.js";
-import { runPollCycle, type PollTarget } from "./poller.js";
 
 /** Session-level advisory lock key. Only the session holding it polls OKX. */
 const WORKER_LOCK_KEY = 7310001;
