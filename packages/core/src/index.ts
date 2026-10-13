@@ -5,3 +5,5 @@ export * from "./atr.js";
 export * from "./auth.js";
 export * from "./alerts.js";
 export * from "./collector.js";
+export * from "./news.js";
+export * from "./webhook.js";
