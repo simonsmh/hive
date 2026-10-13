@@ -1,14 +1,35 @@
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import { ServiceWorkerRegister } from "@/src/components/pwa/ServiceWorkerRegister";
+import { PWA_CONFIG } from "@/src/modules/pwa/config";
+import "./globals.css";
 
-export const metadata = {
-  title: "Hive API",
-  description: "Hive 市场数据读取 API",
+export const metadata: Metadata = {
+  applicationName: PWA_CONFIG.name,
+  title: { default: PWA_CONFIG.name, template: `%s · ${PWA_CONFIG.name}` },
+  description: PWA_CONFIG.description,
+  icons: {
+    icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: "/icons/apple-touch-icon.png",
+  },
+  appleWebApp: { capable: true, title: PWA_CONFIG.name, statusBarStyle: "default" },
+  formatDetection: { telephone: false },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: PWA_CONFIG.themeColor,
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="zh-CN">
-      <body style={{ fontFamily: "system-ui, sans-serif", margin: "2rem", lineHeight: 1.6 }}>{children}</body>
+    <html lang={PWA_CONFIG.lang}>
+      <body>
+        {children}
+        <ServiceWorkerRegister />
+      </body>
     </html>
   );
 }
