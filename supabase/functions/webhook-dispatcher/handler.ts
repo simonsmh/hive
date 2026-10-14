@@ -2,11 +2,14 @@ import { isAuthorized } from "./core/auth.ts";
 import {
   computeBackoffSeconds,
   DELIVERY_HEADER,
+  deliveryFlags,
+  type DeliveryPriority,
   EVENT_HEADER,
   MAX_BACKOFF_SECONDS,
   SIGNATURE_HEADER,
   signWebhookBody,
   TIMESTAMP_HEADER,
+  withDeliveryFlags,
 } from "./core/webhook.ts";
 
 export interface DueDelivery {
@@ -21,6 +24,12 @@ export interface DueDelivery {
   payload: unknown;
   attempts: number;
   maxAttempts: number;
+  priority: DeliveryPriority;
+  /** ISO time of the underlying event. Null only when the database could not derive one. */
+  eventTs: string | null;
+  /** ISO time the delivery row was inserted. Used to tell a live send from a backlog replay. */
+  createdAt: string;
+  staleAfterSeconds: number;
 }
 
 export interface DeliveryOutcome {
@@ -33,6 +42,8 @@ export interface DeliveryOutcome {
 export interface DispatchStore {
   claim(limit: number, leaseSeconds: number): Promise<DueDelivery[]>;
   mark(deliveryId: number, outcome: DeliveryOutcome): Promise<string>;
+  /** Returns claimed deliveries to pending and refunds the attempt that claiming counted. */
+  release(deliveryIds: number[]): Promise<void>;
 }
 
 export interface DispatcherDeps {
@@ -62,7 +73,10 @@ interface DispatchSummary {
   delivered: number;
   failed: number;
   dead: number;
+  /** Released back to pending because the budget ran out before they were sent. */
   skipped: number;
+  /** Bulk deliveries released because the budget was tight. Intentional, so they do not make the run partial. */
+  deferred: number;
   durationMs: number;
 }
 
@@ -131,22 +145,36 @@ export function createWebhookDispatcher(deps: DispatcherDeps): (request: Request
 
   /** Signs and posts one delivery. Never throws; the outcome is always recorded through the store. */
   async function deliver(due: DueDelivery): Promise<string> {
-    const timestamp = Math.floor(now() / 1000);
+    const nowMs = now();
+    const timestamp = Math.floor(nowMs / 1000);
+    const flags = deliveryFlags(
+      { priority: due.priority, eventTs: due.eventTs, createdAt: due.createdAt, staleAfterSeconds: due.staleAfterSeconds },
+      nowMs,
+    );
     const body = JSON.stringify({
       delivery_id: due.deliveryId,
       event: due.eventType,
       created_at: new Date(timestamp * 1000).toISOString(),
-      data: due.payload,
+      data: withDeliveryFlags(due.payload, flags),
     });
     const outcome = await attempt(due, body, timestamp);
 
     try {
       const status = await deps.store.mark(due.deliveryId, outcome);
-      log(`delivery=${due.deliveryId} agent=${due.agentName} attempt=${due.attempts} result=${status}${outcome.error ? ` error="${outcome.error}"` : ""}`);
+      log(`delivery=${due.deliveryId} agent=${due.agentName} priority=${due.priority} stale=${flags.stale} replay=${flags.replay} attempt=${due.attempts} result=${status}${outcome.error ? ` error="${outcome.error}"` : ""}`);
       return status;
     } catch (error) {
       log(`delivery=${due.deliveryId} could not record outcome: ${describeError(error)}`);
       return "mark_failed";
+    }
+  }
+
+  async function release(items: DueDelivery[]): Promise<void> {
+    if (items.length === 0) return;
+    try {
+      await deps.store.release(items.map((item) => item.deliveryId));
+    } catch (error) {
+      log(`release failed for ${items.length} deliveries: ${describeError(error)}`);
     }
   }
 
@@ -165,9 +193,12 @@ export function createWebhookDispatcher(deps: DispatcherDeps): (request: Request
       failed: 0,
       dead: 0,
       skipped: 0,
+      deferred: 0,
       durationMs: 0,
     };
     const worstCaseBatchMs = Math.ceil(batchSize / concurrency) * requestTimeoutMs;
+    // Past this point a bulk delivery waits for a later run, so the rest of the budget stays free for critical ones.
+    const bulkCutoffMs = budgetMs - worstCaseBatchMs;
 
     for (;;) {
       let due: DueDelivery[];
@@ -180,13 +211,23 @@ export function createWebhookDispatcher(deps: DispatcherDeps): (request: Request
       }
       summary.claimed += due.length;
 
+      // The claim returns critical rows first, so a bulk row is only reached after every due critical row in the batch.
       for (let i = 0; i < due.length; i += concurrency) {
-        if (now() - started > budgetMs) {
-          summary.skipped += due.length - i;
+        const elapsed = now() - started;
+        if (elapsed > budgetMs) {
+          const rest = due.slice(i);
+          summary.skipped += rest.length;
+          await release(rest);
           break;
         }
         const chunk = due.slice(i, i + concurrency);
-        const statuses = await Promise.all(chunk.map((item) => deliver(item)));
+        const tight = elapsed > bulkCutoffMs;
+        const sendable = tight ? chunk.filter((item) => item.priority === "critical") : chunk;
+        const deferred = tight ? chunk.filter((item) => item.priority !== "critical") : [];
+        summary.deferred += deferred.length;
+        await release(deferred);
+
+        const statuses = await Promise.all(sendable.map((item) => deliver(item)));
         for (const status of statuses) {
           if (status === "delivered") summary.delivered += 1;
           else if (status === "dead") summary.dead += 1;
