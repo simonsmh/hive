@@ -109,7 +109,7 @@ apps/
   web/        Vercel 上的读取 API 与仪表盘（Next.js App Router）
   worker/     可选 / 遗留：Railway 上的 OKX 轮询 Worker（Dockerfile、railway.json）
 packages/
-  core/       共享逻辑：OKX 客户端、采集循环 (collector.ts)、K 线解析、ATR、鉴权、告警规则校验与评估
+  core/       共享逻辑：OKX 客户端、采集循环 (collector.ts)、K 线解析、ATR、鉴权、OKX 签名与交易客户端 (okx-trade.ts)、okx.intent.v1 校验 (order-intent.ts)、告警规则校验与评估
 supabase/
   config.toml 最小化的 Supabase CLI 配置（声明各 Edge Function 不校验 JWT）
   functions/okx-collector/     Edge Function（Deno）：OKX 行情采集
@@ -120,6 +120,7 @@ supabase/
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
   functions/ths-collector/     Edge Function（Deno）：同花顺（HiThink）行情、盘口池与交易日历
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
+  functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（仅模拟盘，P0b）
   migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–23 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
