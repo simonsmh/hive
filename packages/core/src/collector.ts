@@ -72,7 +72,7 @@ export interface CycleResult {
   skippedTargets: number;
 }
 
-async function runConcurrently<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+export async function runConcurrently<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
   let cursor = 0;
   const lanes = Array.from({ length: Math.max(1, Math.min(Math.floor(limit), items.length)) }, async () => {
     while (cursor < items.length) {
