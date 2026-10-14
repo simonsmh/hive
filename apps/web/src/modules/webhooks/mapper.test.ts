@@ -9,6 +9,7 @@ const subscription: SubscriptionRow = {
   filters: { keywords: ["黄金"] },
   enabled: true,
   secret_id: "99999999-8888-7777-6666-555555555555",
+  auth_token_secret_id: null,
   created_at: "2026-10-13T10:00:00Z",
   updated_at: "2026-10-13T10:00:00Z",
 };
@@ -39,6 +40,14 @@ describe("toSubscriptionView", () => {
     expect(view).not.toHaveProperty("secret");
     expect(view.secret_configured).toBe(true);
     expect(view.filters).toEqual({ keywords: ["黄金"] });
+  });
+
+  it("reports a configured bearer token without exposing its Vault reference", () => {
+    const withToken = toSubscriptionView({ ...subscription, auth_token_secret_id: "12345678-0000-0000-0000-000000000000" });
+    expect(withToken.auth_token_configured).toBe(true);
+    expect(withToken).not.toHaveProperty("auth_token_secret_id");
+    expect(withToken).not.toHaveProperty("auth_token");
+    expect(toSubscriptionView(subscription).auth_token_configured).toBe(false);
   });
 
   it("reports an unset secret and tolerates a non-object filters value", () => {

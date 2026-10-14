@@ -99,6 +99,22 @@ describe("API auth and validation (no database)", () => {
     expect(remove.status).toBe(400);
   });
 
+  it("rejects a bearer token with spaces or too short on create and update, before any database call", async () => {
+    const badToken = JSON.stringify({ agent_name: "grok-bot", url: "https://grok.example.com/hook", auth_token: "has space" });
+    const create = await createWebhook(new Request(`${base}/api/webhooks`, { method: "POST", headers: auth, body: badToken }));
+    expect(create.status).toBe(400);
+    expect((await create.json()).problems).toEqual(["auth_token must be 16-512 visible ASCII characters without spaces"]);
+    const patch = await patchWebhook(
+      new Request(`${base}/api/webhooks/11111111-2222-3333-4444-555555555555`, {
+        method: "PATCH",
+        headers: auth,
+        body: JSON.stringify({ auth_token: "short" }),
+      }),
+      ctx("11111111-2222-3333-4444-555555555555"),
+    );
+    expect(patch.status).toBe(400);
+  });
+
   it("rejects an unknown delivery status and an out-of-range limit", async () => {
     const status = await listDeliveries(new Request(`${base}/api/webhook-deliveries?status=exploded`, { headers: auth }));
     expect(status.status).toBe(400);
