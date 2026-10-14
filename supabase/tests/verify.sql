@@ -70,16 +70,16 @@ begin
   select decrypted_secret into v_secret from vault.decrypted_secrets where id = v_secret_id;
   if v_secret <> 'hunter2-test-secret' then raise exception 'vault round-trip failed'; end if;
 
-  -- Health check: okx and jin10 have never succeeded, so each gets one open stale alert.
+  -- Health check: okx, jin10 and okx-news have never succeeded, so each gets one open stale alert.
   v_first := public.hive_run_health_check();
-  if v_first <> 2 then raise exception 'expected 2 stale-source alerts (okx, jin10), got %', v_first; end if;
+  if v_first <> 3 then raise exception 'expected 3 stale-source alerts (okx, jin10, okx-news), got %', v_first; end if;
 
   -- An open alert is not duplicated while the source stays stale.
   v_second := public.hive_run_health_check();
   if v_second <> 0 then raise exception 'health check duplicated an open alert (% new alerts)', v_second; end if;
   select count(*) into v_queued from public.alerts
-   where kind = 'source_stale' and resolved_at is null and payload->>'source' in ('okx', 'jin10');
-  if v_queued <> 2 then raise exception 'expected 2 open stale alerts, got %', v_queued; end if;
+   where kind = 'source_stale' and resolved_at is null and payload->>'source' in ('okx', 'jin10', 'okx-news');
+  if v_queued <> 3 then raise exception 'expected 3 open stale alerts, got %', v_queued; end if;
 
   -- Worker health writes (same statements as recordSourceSuccess / recordSourceFailure in apps/worker/src/store.ts).
   insert into public.source_health (source, last_success_at, consecutive_failures, last_error, updated_at)
@@ -263,6 +263,8 @@ declare
   v_kick_after integer;
   v_secret_name text;
   v_rotated text;
+  v_okx_sub uuid;
+  v_latest timestamptz;
   v_items text := '[
     {"external_id":"VERIFY-1","title":null,"body":"美联储官员称黄金仍有支撑","url":"https://flash.jin10.com/detail/VERIFY-1","author":null,"published_at":"2026-10-13T09:40:00Z","score":1},
     {"external_id":"VERIFY-2","title":"原油","body":"原油库存意外增加","url":"https://flash.jin10.com/detail/VERIFY-2","author":"金十数据","published_at":"2026-10-13T09:41:00Z","score":0}
@@ -345,6 +347,28 @@ begin
   ]'::jsonb);
   select count(*) into v_kick_after from net.http_request_queue where url like '%/webhook-dispatcher';
   if v_kick_after <> v_kick_before then raise exception 'a duplicate-only poll must not kick the dispatcher'; end if;
+  -- OKX Orbit news: same ingest path under its own source string. A sources filter of okx-news matches it, and jin10 does not.
+  v_okx_sub := public.hive_upsert_webhook_subscription(null, 'verify-okx-agent', 'https://okx.example.com/hook',
+    'verify-okx-secret-0123456789abcdef', array['news'], '{"sources":["okx-news"]}', true);
+  v_items := '[
+    {"external_id":"VERIFY-OKX-1","title":"比特币","body":"比特币现货 ETF 获批","url":"https://www.okx.com/zh-hans/feed/post/VERIFY-OKX-1","author":"Reuters","published_at":"2026-10-13T09:45:00Z","score":1}
+  ]';
+  v_result := public.hive_news_ingest('okx-news', v_items::jsonb);
+  if (v_result->>'inserted')::integer <> 1 then raise exception 'expected 1 okx-news item inserted, got %', v_result; end if;
+  v_result := public.hive_news_ingest('okx-news', v_items::jsonb);
+  if (v_result->>'inserted')::integer <> 0 or (v_result->>'duplicates')::integer <> 1 then
+    raise exception 'okx-news re-poll must not insert (got %)', v_result;
+  end if;
+  select count(*) into v_count from public.news_items where dedup_hash = 'okx-news:VERIFY-OKX-1' and score = 1 and event_id is not null;
+  if v_count <> 1 then raise exception 'okx-news item not stored with score 1 and an event'; end if;
+  perform 1 from public.source_health where source = 'okx-news' and consecutive_failures = 0 and last_success_at > now() - interval '1 minute';
+  if not found then raise exception 'successful okx-news ingest must refresh its heartbeat'; end if;
+  select public.hive_news_latest_published('okx-news') into v_latest;
+  if v_latest is null or v_latest < '2026-10-13T09:45:00Z'::timestamptz then
+    raise exception 'watermark did not reflect the newest okx-news item (%)', v_latest;
+  end if;
+  select count(*) into v_count from public.webhook_deliveries where subscription_id = v_okx_sub;
+  if v_count <> 1 then raise exception 'okx-news source filter expected exactly 1 delivery, got %', v_count; end if;
 
   -- Fan-out: only the keyword subscriber matching VERIFY-1 gets a news delivery.
   select count(*) into v_count from public.webhook_deliveries where subscription_id = v_news_sub and event_type = 'news';
@@ -494,6 +518,8 @@ begin
 
   -- Only service_role may run the new write paths.
   if has_function_privilege('anon', 'public.hive_news_ingest(text,jsonb)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.hive_news_latest_published(text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_news_latest_published(text)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.hive_webhook_claim(integer,integer)', 'EXECUTE')
      or has_function_privilege('anon', 'public.hive_upsert_webhook_subscription(uuid,text,text,text,text[],jsonb,boolean,text,boolean)', 'EXECUTE') then
     raise exception 'news or webhook RPCs executable by anon or authenticated';
@@ -521,6 +547,8 @@ begin
   if not found then raise exception 'pg_cron job hive-jin10-poller (30 seconds) missing'; end if;
   perform 1 from cron.job where jobname = 'hive-webhook-dispatch' and schedule = '30 seconds';
   if not found then raise exception 'pg_cron job hive-webhook-dispatch (30 seconds) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-okx-news-poller' and schedule = '60 seconds';
+  if not found then raise exception 'pg_cron job hive-okx-news-poller (60 seconds) missing'; end if;
 
   v_result := public.hive_prune_news_and_webhooks();
   if not (v_result ? 'webhook_deliveries' and v_result ? 'news_items') then
