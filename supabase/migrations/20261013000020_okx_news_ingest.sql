@@ -98,4 +98,4 @@ begin
 end
 $$;
 
-select cron.schedule('hive-okx-news-poller', '60 seconds', $$select public.hive_invoke_edge_function('okx-news-poller')$$);
+select cron.schedule('hive-okx-news-poller', '* * * * *', $$select public.hive_invoke_edge_function('okx-news-poller')$$);

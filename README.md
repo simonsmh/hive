@@ -44,7 +44,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **健康检查与告警**：pg_cron 每分钟执行 `hive_run_health_check()`。已启用且超过 `max_staleness_minutes` 未成功的数据源写入一条未恢复的 `source_stale` 告警，同一数据源同时只保留一条未恢复告警。数据源恢复后，该告警写入 `resolved_at` 并新增一条 `source_recovered` 事件。
 - **新闻采集（supabase/functions/jin10-poller）**：pg_cron 每 30 秒调用一次。函数请求 Jin10 快讯接口，经 `hive_news_ingest` 按 `source + external_id` 去重写入 `news_items` 与 `news_events`，并更新 `source_health.jin10`。本轮询若插入了新快讯，`hive_news_ingest` 会在事务提交后通过 pg_net 唤醒一次分发函数（见下文「延迟」）。该接口是非官方接口，格式变化或被拦截时记录错误，数据源会因超过 5 分钟未成功而进入过期告警。
 - **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。分发函数由 pg_cron 每 30 秒调用一次作为兜底，并在新快讯入库后被唤醒。每次运行按 `next_attempt_at` 取出到期投递，只要剩余预算足够就持续领取整批，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
-- **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每 60 秒调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
+- **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每分钟调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
 
@@ -234,7 +234,7 @@ done
    - `…000017_news_dispatch_kick.sql`：新快讯入库后唤醒分发函数；`hive-webhook-dispatch` 改为每 30 秒（见下文「延迟」）。仅替换函数与调度，不修改数据
    - `…000016_webhook_auth_token.sql`：订阅可选的 Bearer 令牌（`auth_token_secret_id`，存于 Vault）；`sources` 过滤只作用于新闻，告警不再受其限制。增量迁移，不修改已有数据。
    - `…000019_okx_news_source_enum.sql`：为 `market_source` 增加 `okx-news`（须单独迁移，新枚举值不能在添加它的事务中使用）
-   - `…000020_okx_news_ingest.sql`：`source_health.okx-news` 种子（5 分钟过期）、`hive_news_latest_published` 水位函数、允许 `okx-news` 的 `hive_news_ingest`，以及 `hive-okx-news-poller`（每 60 秒）
+   - `…000020_okx_news_ingest.sql`：`source_health.okx-news` 种子（5 分钟过期）、`hive_news_latest_published` 水位函数、允许 `okx-news` 的 `hive_news_ingest`，以及 `hive-okx-news-poller`（每分钟）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
