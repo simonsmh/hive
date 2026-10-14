@@ -192,6 +192,25 @@ describe("preflightRisk", () => {
     ).toBe("symbol_not_allowed");
   });
 
+  it("lets amend_tpsl and reduce run outside the allowlist when the instrument has an enabled subscription", () => {
+    const subscribed = { killEngaged: false, submissionsLastMinute: 0, hasEnabledSubscription: true };
+    const reduce = { action: "reduce", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    const amend = { action: "amend_tpsl", instId: "QQQ-USDT-SWAP", tpTriggerPx: "741", tpOrdPx: "-1", slTriggerPx: "721", slOrdPx: "-1", reduceOnly: true };
+    expect(preflightRisk(parsed(reduce), LIMITS, subscribed)).toBeNull();
+    expect(preflightRisk(parsed(amend), LIMITS, subscribed)).toBeNull();
+  });
+
+  it("keeps the allowlist for amend_tpsl and reduce without a subscription, and for opens and closes", () => {
+    const none = { killEngaged: false, submissionsLastMinute: 0, hasEnabledSubscription: false };
+    const reduce = { action: "reduce", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(preflightRisk(parsed(reduce), LIMITS, none)).toBe("symbol_not_allowed");
+    expect(preflightRisk(parsed({ instId: "QQQ-USDT-SWAP" }), LIMITS, { ...none, hasEnabledSubscription: true })).toBe(
+      "symbol_not_allowed",
+    );
+    const close = { action: "close", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(preflightRisk(parsed(close), LIMITS, { ...none, hasEnabledSubscription: true })).toBe("symbol_not_allowed");
+  });
+
   it("enforces the per-minute submission rate", () => {
     expect(preflightRisk(parsed(), LIMITS, { killEngaged: false, submissionsLastMinute: 5 })).toBe("rate_limited");
     expect(preflightRisk(parsed(), LIMITS, { killEngaged: false, submissionsLastMinute: 4 })).toBeNull();

@@ -21,7 +21,9 @@ const FUNCTIONS = {
   "alert-evaluator": ["types", "alerts", "auth"],
   "yahoo-collector": ["types", "okx", "symbols", "auth", "collector", "yahoo", "yahoo-cycle"],
   "ths-collector": ["types", "auth", "ths-plan", "ths", "ths-cycle"],
-  "order-submit": ["auth", "okx-signing", "okx-trade", "order-intent"],
+  "order-submit": ["auth", "okx-signing", "okx-trade", "order-intent", "position"],
+  "position-manager": ["types", "okx", "auth", "okx-signing", "okx-trade", "order-intent", "atr", "position"],
+  "position-subscriptions": ["auth", "position"],
 };
 
 function rewrite(name, source, allowedLocal) {

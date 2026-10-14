@@ -270,15 +270,22 @@ export function clientOrderIds(idempotencyKey: string): ClientOrderIds {
   };
 }
 
+/** Actions that only act on an existing position. They reduce exposure, so they may run outside the allowlist. */
+export function isInPositionAction(intent: OkxIntent): boolean {
+  return intent.action === "amend_tpsl" || intent.action === "reduce";
+}
+
 /** Rejection codes returned before any price lookup or OKX call. Null means every preflight gate passed. */
 export function preflightRisk(
   intent: OkxIntent,
   limits: RiskLimitsView | null,
-  context: { killEngaged: boolean; submissionsLastMinute: number },
+  context: { killEngaged: boolean; submissionsLastMinute: number; hasEnabledSubscription?: boolean },
 ): string | null {
   if (context.killEngaged) return "kill_switch_engaged";
   if (!limits) return "no_risk_limits";
-  if (!limits.symbolAllowlist.includes(intent.instId)) return "symbol_not_allowed";
+  const inAllowlist = limits.symbolAllowlist.includes(intent.instId);
+  const managedPosition = isInPositionAction(intent) && context.hasEnabledSubscription === true;
+  if (!inAllowlist && !managedPosition) return "symbol_not_allowed";
   if (context.submissionsLastMinute >= limits.maxOrdersPerMin) return "rate_limited";
   if (intent.action !== "open") return null;
 

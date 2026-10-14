@@ -155,6 +155,18 @@ export function createRestOrderStore(options: RestStoreOptions): OrderStore {
       };
     },
 
+    async hasEnabledSubscription(mode: TradeMode, instId: string): Promise<boolean> {
+      const query = new URLSearchParams({
+        select: "id",
+        mode: `eq.${mode}`,
+        inst_id: `eq.${instId}`,
+        enabled: "eq.true",
+        limit: "1",
+      });
+      const rows = (await request("GET", `/rest/v1/position_subscriptions?${query.toString()}`)) as { id: string }[];
+      return rows.length > 0;
+    },
+
     async insertIntent(record: IntentRecord): Promise<InsertResult> {
       const result = (await rpc("hive_order_intent_insert", { p_intent: intentColumns(record) })) as {
         inserted: boolean;
