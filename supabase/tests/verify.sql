@@ -820,4 +820,136 @@ begin
 end
 $$;
 
+-- Webhook priority: policy, critical-first claim, bulk expiry, stale event_ts, release and the dispatcher kick.
+-- Runs last. It marks every other pending delivery as delivered so the claims below see only its own rows.
+do $$
+declare
+  v_sub uuid;
+  v_policy record;
+  v_before integer;
+  v_after integer;
+  v_claim record;
+  v_bulk_delivery bigint;
+  v_price_delivery bigint;
+  v_fill_delivery bigint;
+  v_expiring_delivery bigint;
+  v_fill_ts timestamptz := now() - interval '2 minutes';
+  v_seen_bulk boolean := false;
+  v_count integer;
+  v_status text;
+  v_attempts integer;
+begin
+  -- The whole file is one transaction, so the kick dedupe flag set by earlier checks must be cleared here.
+  perform set_config('hive.webhook_kick_queued', 'off', true);
+
+  select * into v_policy from public.hive_delivery_policy('alert', 'fill');
+  if v_policy.priority <> 'critical' or v_policy.stale_after_seconds <> 60 or v_policy.expires_after_seconds is not null then
+    raise exception 'fill policy mismatch';
+  end if;
+  select * into v_policy from public.hive_delivery_policy('alert', 'volume_spike');
+  if v_policy.priority <> 'bulk' or v_policy.expires_after_seconds <> 900 then raise exception 'volume_spike must be bulk with a 900 s expiry'; end if;
+  select * into v_policy from public.hive_delivery_policy('news', null);
+  if v_policy.priority <> 'critical' or v_policy.expires_after_seconds is not null then raise exception 'news must be critical and never expire'; end if;
+
+  delete from vault.secrets where name in ('edge_base_url', 'edge_cron_secret');
+  perform vault.create_secret('http://127.0.0.1:9/functions/v1', 'edge_base_url', 'verify');
+  perform vault.create_secret('verify-edge-secret', 'edge_cron_secret', 'verify');
+
+  v_sub := public.hive_upsert_webhook_subscription(null, 'verify-prio-agent', 'https://prio.example.com/hook',
+    'verify-prio-secret-0123456789abcdef', array['alert'], '{}', true);
+
+  -- Kick: a bulk alert queues none; the first critical alert queues one; a second critical in the same transaction queues none.
+  select count(*) into v_before from net.http_request_queue where url like '%/webhook-dispatcher';
+  insert into public.alerts (dedup_key, kind, symbol, severity, payload)
+  values ('verify-prio-bulk', 'volume_spike', 'ETH', 'warning', '{"volume": 12}');
+  select count(*) into v_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if v_after <> v_before then raise exception 'a bulk alert must not kick the dispatcher'; end if;
+
+  insert into public.alerts (dedup_key, kind, symbol, severity, payload)
+  values ('verify-prio-price', 'price_cross', 'BTC', 'critical', '{"price": 91000}');
+  select count(*) into v_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if v_after - v_before <> 1 then raise exception 'a critical alert must queue exactly one dispatcher kick (queued %)', v_after - v_before; end if;
+  v_before := v_after;
+
+  insert into public.alerts (dedup_key, kind, symbol, severity, payload)
+  values ('verify-prio-fill', 'fill', 'BTC', 'critical', jsonb_build_object('event_ts', v_fill_ts));
+  select count(*) into v_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if v_after <> v_before then raise exception 'a second critical alert in one transaction must not queue another kick'; end if;
+
+  select d.id into v_bulk_delivery from public.webhook_deliveries d join public.alerts a on d.event_key = 'alert:' || a.id
+   where a.dedup_key = 'verify-prio-bulk' and d.subscription_id = v_sub;
+  select d.id into v_price_delivery from public.webhook_deliveries d join public.alerts a on d.event_key = 'alert:' || a.id
+   where a.dedup_key = 'verify-prio-price' and d.subscription_id = v_sub;
+  select d.id into v_fill_delivery from public.webhook_deliveries d join public.alerts a on d.event_key = 'alert:' || a.id
+   where a.dedup_key = 'verify-prio-fill' and d.subscription_id = v_sub;
+  if v_bulk_delivery is null or v_price_delivery is null or v_fill_delivery is null then raise exception 'priority alerts were not fanned out'; end if;
+
+  perform 1 from public.webhook_deliveries d
+   where d.id = v_bulk_delivery and d.priority = 'bulk' and d.stale_after_seconds = 300 and d.expires_at is not null;
+  if not found then raise exception 'bulk delivery must carry bulk priority, a 300 s stale threshold and an expiry'; end if;
+  perform 1 from public.webhook_deliveries d
+   where d.id = v_price_delivery and d.priority = 'critical' and d.stale_after_seconds = 120 and d.expires_at is null;
+  if not found then raise exception 'critical delivery must carry critical priority, a 120 s stale threshold and no expiry'; end if;
+  perform 1 from public.webhook_deliveries d
+   where d.id = v_fill_delivery and d.event_ts = v_fill_ts and d.stale_after_seconds = 60;
+  if not found then raise exception 'fill delivery must keep the event_ts from its payload'; end if;
+
+  -- Only this subscription's rows are claimable from here on.
+  update public.webhook_deliveries set status = 'delivered', delivered_at = now()
+   where status = 'pending' and subscription_id <> v_sub;
+
+  -- Critical first: the bulk row was inserted first and is due, yet the first claim returns a critical row.
+  select * into v_claim from public.hive_webhook_claim(1, 120) c;
+  if v_claim.priority <> 'critical' or v_claim.delivery_id not in (v_price_delivery, v_fill_delivery) then
+    raise exception 'claim returned % before critical deliveries', v_claim.priority;
+  end if;
+  if v_claim.delivery_id = v_fill_delivery and v_claim.event_ts <> v_fill_ts then
+    raise exception 'claim did not return the event_ts of a critical delivery';
+  end if;
+
+  -- The rest is claimed critical-first as well.
+  v_count := 0;
+  for v_claim in select * from public.hive_webhook_claim(10, 120) c loop
+    v_count := v_count + 1;
+    if v_claim.priority = 'bulk' then
+      v_seen_bulk := true;
+    elsif v_seen_bulk then
+      raise exception 'a critical delivery was claimed after a bulk one';
+    end if;
+  end loop;
+  if v_count <> 2 then raise exception 'expected the 2 remaining deliveries to be claimed, got %', v_count; end if;
+
+  -- A release refunds the attempt that the claim counted and returns the row to pending.
+  select attempts into v_attempts from public.webhook_deliveries where id = v_bulk_delivery;
+  if v_attempts <> 1 then raise exception 'claimed bulk row should have attempts 1, got %', v_attempts; end if;
+  if public.hive_webhook_release(array[v_bulk_delivery]) <> 1 then raise exception 'release did not return the claimed row'; end if;
+  select status, attempts into v_status, v_attempts from public.webhook_deliveries where id = v_bulk_delivery;
+  if v_status <> 'pending' or v_attempts <> 0 then raise exception 'released row should be pending with 0 attempts (got % / %)', v_status, v_attempts; end if;
+  if public.hive_webhook_release(array[v_bulk_delivery]) <> 0 then raise exception 'release must only touch sending rows'; end if;
+
+  -- A bulk row past expires_at is expired and never leased, even though it is due.
+  insert into public.alerts (dedup_key, kind, symbol, severity, payload)
+  values ('verify-prio-expiring', 'pct_move', 'SNDK', 'warning', '{}');
+  update public.webhook_deliveries set status = 'delivered', delivered_at = now()
+   where status = 'pending' and subscription_id <> v_sub;
+  select d.id into v_expiring_delivery from public.webhook_deliveries d join public.alerts a on d.event_key = 'alert:' || a.id
+   where a.dedup_key = 'verify-prio-expiring' and d.subscription_id = v_sub;
+  update public.webhook_deliveries set expires_at = now() - interval '1 second' where id = v_expiring_delivery;
+  select count(*) into v_count from public.hive_webhook_claim(10, 120) c where c.delivery_id = v_expiring_delivery;
+  if v_count <> 0 then raise exception 'an expired bulk delivery was claimed'; end if;
+  select status into v_status from public.webhook_deliveries where id = v_expiring_delivery;
+  if v_status <> 'expired' then raise exception 'expired bulk delivery should be marked expired, got %', v_status; end if;
+
+  -- Only service_role may run the release and policy functions.
+  if has_function_privilege('anon', 'public.hive_webhook_release(bigint[])', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_webhook_release(bigint[])', 'EXECUTE')
+     or has_function_privilege('anon', 'public.hive_delivery_policy(text,text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_delivery_policy(text,text)', 'EXECUTE') then
+    raise exception 'webhook release or policy function executable by client roles';
+  end if;
+
+  raise notice 'verify.sql: webhook priority checks passed';
+end
+$$;
+
 rollback;
