@@ -1,6 +1,7 @@
 import { isAuthorized } from "./core/auth.ts";
 import { NewsFormatError, toIngestRows, type NewsIngestRow, type NewsItemInput } from "./core/news.ts";
 import { OKX_NEWS_PATH, parseOkxNewsPage, type OkxNewsPage } from "./core/okx-news.ts";
+import { type OkxCredentials, okxAuthHeaders } from "./okx-signing.ts";
 
 export const DEFAULT_OKX_NEWS_CONFIG = { baseUrl: "https://www.okx.com" } as const;
 
@@ -13,6 +14,8 @@ export const LOOKBACK_MS = 2 * 60 * 60_000;
 
 export interface OkxNewsConfig {
   baseUrl: string;
+  /** The endpoint rejects unsigned requests (OK-ACCESS-KEY). When absent, requests are sent unsigned and fail with OKX's message. */
+  credentials?: OkxCredentials;
 }
 
 export interface IngestResult {
@@ -36,6 +39,7 @@ export interface OkxNewsDeps {
 }
 
 const MAX_ERROR_LENGTH = 300;
+const MAX_DETAIL_LENGTH = 120;
 
 /** An upstream failure whose message is already safe to store on source_health. */
 class UpstreamError extends Error {}
@@ -58,6 +62,22 @@ function json(status: number, body: unknown): Response {
 function describeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.slice(0, MAX_ERROR_LENGTH);
+}
+
+/** OKX error bodies are {"code","msg"}. The msg is kept, since it says whether the key was missing or rejected. */
+function describeHttpError(status: number, body: string): string {
+  let detail = "";
+  try {
+    const msg = asRecord(JSON.parse(body))?.msg;
+    if (typeof msg === "string") detail = msg.trim().slice(0, MAX_DETAIL_LENGTH);
+  } catch {
+    detail = "";
+  }
+  return detail === "" ? `okx-news HTTP ${status}` : `okx-news HTTP ${status}: ${detail}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 /**
@@ -93,9 +113,17 @@ export function createOkxNewsHandler(deps: OkxNewsDeps): (request: Request) => P
       acceptLanguage: "en_US",
     }).toString();
 
-    const response = await fetchImpl(url, { method: "GET", headers: { accept: "application/json" } });
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (deps.config.credentials) {
+      Object.assign(
+        headers,
+        await okxAuthHeaders(deps.config.credentials, "GET", `${url.pathname}${url.search}`, new Date(now()).toISOString()),
+      );
+    }
+
+    const response = await fetchImpl(url, { method: "GET", headers });
     const text = await response.text();
-    if (!response.ok) throw new UpstreamError(`okx-news HTTP ${response.status}`);
+    if (!response.ok) throw new UpstreamError(describeHttpError(response.status, text));
 
     let payload: unknown;
     try {

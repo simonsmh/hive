@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { deepStrictEqual, ok, strictEqual } from "node:assert/strict";
 import type { NewsIngestRow } from "./core/news.ts";
 import {
@@ -66,13 +67,15 @@ type Reply = { status?: number; body: string };
 
 function fakeFetch(reply: (url: URL, call: number) => Reply) {
   const calls: URL[] = [];
-  const impl = (async (input: string | URL | Request) => {
+  const headers: Record<string, string>[] = [];
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     calls.push(url);
+    headers.push(Object.fromEntries(new Headers(init?.headers).entries()));
     const { status = 200, body } = reply(url, calls.length);
     return new Response(body, { status });
   }) as typeof fetch;
-  return { impl, calls };
+  return { impl, calls, headers };
 }
 
 function okBody(details: unknown[]): string {
@@ -290,4 +293,47 @@ Deno.test("skips entries that the parser rejects while keeping the rest of the p
 
 Deno.test("defaults to the public OKX host", () => {
   strictEqual(DEFAULT_OKX_NEWS_CONFIG.baseUrl, "https://www.okx.com");
+});
+
+Deno.test("sends no OKX auth headers when credentials are not configured", async () => {
+  const fetched = fakeFetch(() => ({ body: okBody([]) }));
+  const { store } = fakeStore();
+  await handlerWith(store, fetched.impl)(request());
+  strictEqual(fetched.headers[0]!["ok-access-key"], undefined);
+  strictEqual(fetched.headers[0]!["ok-access-sign"], undefined);
+});
+
+Deno.test("signs each page request with OKX v5 headers when credentials are configured", async () => {
+  const credentials = { apiKey: "key-123", apiSecret: "secret-456", passphrase: "phrase-789" };
+  const fetched = fakeFetch(() => ({ body: okBody([]) }));
+  const { store } = fakeStore();
+  await createOkxNewsHandler({
+    cronSecret: SECRET,
+    store,
+    config: { ...CONFIG, credentials },
+    fetchImpl: fetched.impl,
+    now: () => NOW,
+    log: () => undefined,
+  })(request());
+
+  const [headers] = fetched.headers;
+  const [url] = fetched.calls;
+  const timestamp = new Date(NOW).toISOString();
+  const path = `${url!.pathname}${url!.search}`;
+  strictEqual(headers!["ok-access-key"], "key-123");
+  strictEqual(headers!["ok-access-passphrase"], "phrase-789");
+  strictEqual(headers!["ok-access-timestamp"], timestamp);
+  strictEqual(
+    headers!["ok-access-sign"],
+    createHmac("sha256", "secret-456").update(`${timestamp}GET${path}`).digest("base64"),
+  );
+});
+
+Deno.test("includes OKX's error message in the degraded reason so a missing or rejected key is visible", async () => {
+  const { store, failures } = fakeStore();
+  const body = await (
+    await handlerWith(store, fakeFetch(() => ({ status: 401, body: JSON.stringify({ msg: "Invalid OK-ACCESS-KEY", code: "50111" }) })).impl)(request())
+  ).json();
+  deepStrictEqual(body, { status: "degraded", error: "okx-news HTTP 401: Invalid OK-ACCESS-KEY" });
+  deepStrictEqual(failures, ["okx-news HTTP 401: Invalid OK-ACCESS-KEY"]);
 });
