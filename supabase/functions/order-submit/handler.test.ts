@@ -61,6 +61,7 @@ interface StoreOptions {
   killSwitch?: boolean;
   submissions?: number;
   insertFails?: boolean;
+  subscribed?: boolean;
 }
 
 function fakeStore(options: StoreOptions, clock: Clock) {
@@ -68,6 +69,7 @@ function fakeStore(options: StoreOptions, clock: Clock) {
   const finished: { key: string; outcome: IntentOutcome }[] = [];
   const orders: OrderRecord[] = [];
   const algoStates: Record<string, string> = {};
+  const subscriptionLookups: string[] = [];
   let liveAlgoRows: { algoId: string; clOrdId: string }[] = [];
   const store: OrderStore = {
     async killSwitchEngaged() {
@@ -103,6 +105,10 @@ function fakeStore(options: StoreOptions, clock: Clock) {
     async submissionsSince() {
       return options.submissions ?? 0;
     },
+    async hasEnabledSubscription(_mode: TradeMode, instId: string) {
+      subscriptionLookups.push(instId);
+      return options.subscribed ?? false;
+    },
     async recordOrder(record) {
       orders.push(record);
     },
@@ -118,6 +124,7 @@ function fakeStore(options: StoreOptions, clock: Clock) {
     finished,
     orders,
     algoStates,
+    subscriptionLookups,
     setLiveAlgos(rows: { algoId: string; clOrdId: string }[]) {
       liveAlgoRows = rows;
     },
@@ -314,6 +321,61 @@ Deno.test("rejects a symbol outside the allowlist", async () => {
   strictEqual(response.status, 422);
   strictEqual((await json(response)).reason, "symbol_not_allowed");
   strictEqual(calls.length, 0);
+});
+
+const QQQ_REDUCE = {
+  ...GROK_SHORT,
+  intentId: "int-qqq-reduce",
+  idempotencyKey: "pm-qqq-reduce-1",
+  action: "reduce",
+  instId: "QQQ-USDT-SWAP",
+  side: "sell",
+  reduceOnly: true,
+  lever: null,
+  sz: "3",
+  ordType: "market",
+  theme: null,
+  themeStopCapU: null,
+  maxLossU: null,
+  slTriggerPx: null,
+  slOrdPx: null,
+  tpTriggerPx: null,
+  tpOrdPx: null,
+  source: "hive:position-manager",
+};
+
+Deno.test("reduce on an instrument outside the allowlist is placed when it has an enabled subscription", async () => {
+  const { handler, calls, subscriptionLookups } = setup({ store: { subscribed: true } });
+  const response = await handler(post(QQQ_REDUCE));
+  strictEqual(response.status, 200);
+  strictEqual((await json(response)).status, "acked");
+  deepStrictEqual(subscriptionLookups, ["QQQ-USDT-SWAP"]);
+  const order = calls.find((c) => c.method === "placeOrder")?.args as Record<string, unknown>;
+  strictEqual(order.reduceOnly, true);
+  strictEqual(order.instId, "QQQ-USDT-SWAP");
+});
+
+Deno.test("reduce outside the allowlist without a subscription is still refused, and places nothing", async () => {
+  const { handler, calls } = setup({ store: { subscribed: false } });
+  const response = await handler(post(QQQ_REDUCE));
+  strictEqual(response.status, 422);
+  strictEqual((await json(response)).reason, "symbol_not_allowed");
+  strictEqual(calls.length, 0);
+});
+
+Deno.test("open outside the allowlist is refused even with an enabled subscription", async () => {
+  const { handler, calls, subscriptionLookups } = setup({ store: { subscribed: true } });
+  const response = await handler(post({ ...GROK_SHORT, instId: "QQQ-USDT-SWAP" }));
+  strictEqual((await json(response)).reason, "symbol_not_allowed");
+  strictEqual(subscriptionLookups.length, 0);
+  strictEqual(calls.length, 0);
+});
+
+Deno.test("an allowlisted instrument does not query subscriptions", async () => {
+  const { handler, subscriptionLookups } = setup({ store: { subscribed: false } });
+  const response = await handler(post({ ...QQQ_REDUCE, instId: "BTC-USDT-SWAP", idempotencyKey: "pm-btc-reduce-1" }));
+  strictEqual(response.status, 200);
+  strictEqual(subscriptionLookups.length, 0);
 });
 
 Deno.test("rejects when the per-minute submission rate is reached", async () => {

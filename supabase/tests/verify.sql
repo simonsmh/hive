@@ -1026,4 +1026,87 @@ begin
 end
 $$;
 
+-- P0c position management: subscriptions are not limited to a symbol list, the upsert keeps half_reduce_done,
+-- the reduce lease is exclusive, and the live risk row and cron job exist. Rolled back with the rest of the file.
+do $$
+declare
+  v_row jsonb := '{"mode":"live","inst_id":"BTC-USDT-SWAP","pos_side":"net","direction":"short","td_mode":"isolated","lever":15,"entry_px":81818.5,"sl_px":82700,"tp_px":80400,"mid_px":82259.25,"theme_stop_cap_u":0.1,"atr_len":14,"atr_mult":0.8,"amend_min_atr_frac":0.15,"half_reduce_frac":0.5,"dynamic_tp_enabled":true,"half_reduce_enabled":true,"enabled":true}'::jsonb;
+  v_btc uuid;
+  v_qqq uuid;
+  v_again uuid;
+  v_done boolean;
+  v_claim boolean;
+  v_attempts integer;
+begin
+  perform 1 from pg_tables where schemaname = 'public' and tablename = 'position_subscriptions' and rowsecurity;
+  if not found then raise exception 'public.position_subscriptions must exist with RLS enabled'; end if;
+  if has_table_privilege('authenticated', 'public.position_subscriptions', 'SELECT')
+     or has_table_privilege('anon', 'public.position_subscriptions', 'SELECT') then
+    raise exception 'position_subscriptions readable by client roles';
+  end if;
+  if has_function_privilege('anon', 'public.hive_position_subscription_upsert(jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_position_claim_half_reduce(uuid,integer)', 'EXECUTE') then
+    raise exception 'position RPCs executable by client roles';
+  end if;
+  if not has_function_privilege('service_role', 'public.hive_position_subscription_upsert(jsonb)', 'EXECUTE') then
+    raise exception 'service_role must execute the position upsert';
+  end if;
+
+  perform 1 from public.risk_limits where mode = 'live' and enabled and name = 'live-default';
+  if not found then raise exception 'live-default risk_limits row must exist and be enabled'; end if;
+  perform 1 from cron.job where jobname = 'hive-position-manager' and schedule = '*/3 * * * *';
+  if not found then raise exception 'pg_cron job hive-position-manager (*/3) missing'; end if;
+
+  -- No symbol list: QQQ is accepted exactly like BTC.
+  v_btc := public.hive_position_subscription_upsert(v_row);
+  v_qqq := public.hive_position_subscription_upsert(v_row || '{"inst_id":"QQQ-USDT-SWAP","direction":"long","pos_side":"net","entry_px":731.19,"sl_px":721,"tp_px":741,"mid_px":726.095}'::jsonb);
+  if v_btc is null or v_qqq is null or v_btc = v_qqq then raise exception 'BTC and QQQ subscriptions should both be created'; end if;
+
+  -- Re-upsert updates in place, keeps half_reduce_done, and only reset_state clears it.
+  update public.position_subscriptions set half_reduce_done = true where id = v_btc;
+  v_again := public.hive_position_subscription_upsert(v_row || '{"tp_px":80500}'::jsonb);
+  if v_again <> v_btc then raise exception 'upsert of an enabled row must update it in place'; end if;
+  select half_reduce_done into v_done from public.position_subscriptions where id = v_btc;
+  if not v_done then raise exception 'upsert must preserve half_reduce_done'; end if;
+  v_again := public.hive_position_subscription_upsert(v_row || '{"reset_state":true}'::jsonb);
+  select half_reduce_done into v_done from public.position_subscriptions where id = v_btc;
+  if v_done then raise exception 'reset_state must clear half_reduce_done'; end if;
+
+  -- Disabling returns the id of the enabled row. Geometry and cap are enforced by the table.
+  if public.hive_position_subscription_upsert(v_row || '{"enabled":false}'::jsonb) <> v_btc then
+    raise exception 'disable should return the enabled row id';
+  end if;
+  begin
+    perform public.hive_position_subscription_upsert(v_row || '{"enabled":true,"sl_px":80000}'::jsonb);
+    raise exception 'short with stop below entry was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    perform public.hive_position_subscription_upsert(v_row || '{"enabled":true,"theme_stop_cap_u":0.2}'::jsonb);
+    raise exception 'theme_stop_cap_u above 0.1 was accepted';
+  exception when check_violation then null;
+  end;
+
+  -- Reduce lease: one holder at a time, released by finish.
+  v_claim := public.hive_position_claim_half_reduce(v_qqq, 300);
+  if not v_claim then raise exception 'first half-reduce claim should be granted'; end if;
+  if public.hive_position_claim_half_reduce(v_qqq, 300) then raise exception 'lease granted while held'; end if;
+  perform public.hive_position_finish_half_reduce(v_qqq, false, 'rejected', false);
+  select half_reduce_attempts into v_attempts from public.position_subscriptions where id = v_qqq;
+  if v_attempts <> 1 then raise exception 'a rejected attempt must bump half_reduce_attempts, got %', v_attempts; end if;
+  if not public.hive_position_claim_half_reduce(v_qqq, 300) then raise exception 'lease should be free after a rejected attempt'; end if;
+  perform public.hive_position_finish_half_reduce(v_qqq, true, 'acked', true);
+  select half_reduce_attempts into v_attempts from public.position_subscriptions where id = v_qqq;
+  if v_attempts <> 1 then raise exception 'an acked attempt must not bump half_reduce_attempts, got %', v_attempts; end if;
+  if public.hive_position_claim_half_reduce(v_qqq, 300) then raise exception 'a done subscription must not be claimable'; end if;
+
+  -- The attempt counter survives a reset, so a new position never reuses an old reduce key.
+  v_again := public.hive_position_subscription_upsert(v_row || '{"inst_id":"QQQ-USDT-SWAP","direction":"long","pos_side":"net","entry_px":731.19,"sl_px":721,"tp_px":741,"mid_px":726.095,"reset_state":true}'::jsonb);
+  select half_reduce_attempts into v_attempts from public.position_subscriptions where id = v_qqq;
+  if v_attempts <> 1 then raise exception 'reset_state must not clear half_reduce_attempts, got %', v_attempts; end if;
+
+  raise notice 'verify.sql: position subscription checks passed';
+end
+$$;
+
 rollback;

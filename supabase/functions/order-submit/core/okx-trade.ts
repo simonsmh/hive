@@ -1,5 +1,6 @@
 // Generated from packages/core/src by scripts/sync-edge-core.mjs. Do not edit by hand.
 import type { TdMode } from "./order-intent.ts";
+import type { InstrumentSpec, PendingAlgo, PositionRow } from "./position.ts";
 import { type OkxCredentials, okxAuthHeaders } from "./okx-signing.ts";
 
 export const TRADE_BASE_URL = "https://www.okx.com";
@@ -78,6 +79,11 @@ function text(row: Record<string, unknown>, field: string): string {
   return typeof value === "string" ? value : "";
 }
 
+function optionalText(row: Record<string, unknown>, field: string): string | null {
+  const value = text(row, field).trim();
+  return value === "" ? null : value;
+}
+
 function positiveNumber(value: unknown, field: string): number {
   const n = typeof value === "string" && value.trim() !== "" ? Number(value) : typeof value === "number" ? value : NaN;
   if (!Number.isFinite(n) || n <= 0) throw new OkxTradeError(`OKX ${field} is not a positive number`, "api");
@@ -124,6 +130,61 @@ export class OkxTradeClient implements OrderTrade {
       if (Number(text(row, "pos")) !== 0) return { avgPx: positiveNumber(row.avgPx, "avgPx") };
     }
     return null;
+  }
+
+  /** Non-zero positions on the instrument. Net mode reports one row with a signed pos; long/short reports one per side. */
+  async positions(instId: string): Promise<PositionRow[]> {
+    const rows = await this.data("GET", "/api/v5/account/positions", {
+      query: { instType: "SWAP", instId },
+      signed: true,
+    });
+    return rows
+      .map((raw) => {
+        const row = asRecord(raw);
+        return {
+          posSide: text(row, "posSide"),
+          pos: text(row, "pos") === "" ? 0 : Number(text(row, "pos")),
+          avgPx: Number(text(row, "avgPx")),
+          markPx: Number(text(row, "markPx")),
+        };
+      })
+      .filter((row) => row.pos !== 0);
+  }
+
+  /** Pending conditional and OCO algo orders on the instrument, which carry the position's stop and take-profit. */
+  async pendingAlgos(instId: string): Promise<PendingAlgo[]> {
+    const rows = await this.data("GET", "/api/v5/trade/orders-algo-pending", {
+      query: { instType: "SWAP", instId, ordType: "conditional,oco" },
+      signed: true,
+    });
+    return rows
+      .map((raw): PendingAlgo => {
+        const row = asRecord(raw);
+        return {
+          algoId: text(row, "algoId"),
+          algoClOrdId: text(row, "algoClOrdId"),
+          side: text(row, "side"),
+          posSide: text(row, "posSide"),
+          sz: Number(text(row, "sz")),
+          reduceOnly: text(row, "reduceOnly") !== "false",
+          slTriggerPx: optionalText(row, "slTriggerPx"),
+          slOrdPx: optionalText(row, "slOrdPx"),
+          tpTriggerPx: optionalText(row, "tpTriggerPx"),
+          tpOrdPx: optionalText(row, "tpOrdPx"),
+        };
+      })
+      .filter((algo) => algo.algoId !== "");
+  }
+
+  async instrumentSpec(instId: string): Promise<InstrumentSpec> {
+    const rows = await this.data("GET", "/api/v5/public/instruments", { query: { instType: "SWAP", instId } });
+    const row = asRecord(rows[0]);
+    return {
+      ctVal: positiveNumber(row.ctVal, "ctVal"),
+      lotSz: positiveNumber(row.lotSz, "lotSz"),
+      minSz: positiveNumber(row.minSz, "minSz"),
+      tickSz: positiveNumber(row.tickSz, "tickSz"),
+    };
   }
 
   async setLeverage(instId: string, lever: number, tdMode: TdMode): Promise<void> {
