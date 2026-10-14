@@ -291,6 +291,26 @@ Deno.test("skips entries that the parser rejects while keeping the rest of the p
   deepStrictEqual(ingested[0]!.map((row) => row.external_id), ["1"]);
 });
 
+Deno.test("ingests items from an OKX v5 envelope whose data holds the array", async () => {
+  const body = JSON.stringify({ code: "0", msg: "", data: [newsItem(1, NOW - 1000), newsItem(2, NOW - 2000)] });
+  const { store, ingested } = fakeStore();
+  const result = await (await handlerWith(store, fakeFetch(() => ({ body })).impl)(request())).json();
+  strictEqual(result.status, "ok");
+  strictEqual(result.fetched, 2);
+  deepStrictEqual(ingested[0]!.map((row) => row.external_id), ["1", "2"]);
+});
+
+Deno.test("degraded reason names the envelope keys, not values, when the news array moved", async () => {
+  const body = JSON.stringify({ code: "0", msg: "", data: { totalPage: "1", ts: "1760000000000", summary: "正文" } });
+  const { store, failures } = fakeStore();
+  const result = await (await handlerWith(store, fakeFetch(() => ({ body })).impl)(request())).json();
+  strictEqual(result.status, "degraded");
+  ok(String(result.error).includes("top-level keys: code,msg,data"));
+  ok(String(result.error).includes("totalPage,ts,summary"));
+  ok(!String(result.error).includes("正文"));
+  strictEqual(failures.length, 1);
+});
+
 Deno.test("defaults to the public OKX host", () => {
   strictEqual(DEFAULT_OKX_NEWS_CONFIG.baseUrl, "https://www.okx.com");
 });

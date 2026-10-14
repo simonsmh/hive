@@ -10,6 +10,7 @@ const MAX_TITLE_LENGTH = 300;
 const MAX_BODY_LENGTH = 4000;
 const MAX_AUTHOR_LENGTH = 120;
 const MAX_EXTERNAL_ID_LENGTH = 128;
+const MAX_ERROR_MSG_LENGTH = 120;
 /** A cTime below this is not milliseconds since 1970 in any plausible range (1e11 ms is 1973). */
 const MIN_CTIME_MS = 1e11;
 
@@ -43,6 +44,13 @@ function parseCTime(value: unknown): number | null {
   return Number.isFinite(ms) && ms >= MIN_CTIME_MS ? Math.floor(ms) : null;
 }
 
+function pick(raw: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (raw[key] !== undefined && raw[key] !== null) return raw[key];
+  }
+  return undefined;
+}
+
 function firstNonEmpty(...values: unknown[]): string {
   for (const value of values) {
     const text = typeof value === "string" ? stripMarkup(value) : "";
@@ -61,8 +69,54 @@ function parseAuthors(value: unknown): string | null {
   return names.size === 0 ? null : [...names].join(", ").slice(0, MAX_AUTHOR_LENGTH);
 }
 
+const LIST_KEYS = ["details", "list", "newsList", "articles"] as const;
+
+function firstList(record: Record<string, unknown>): unknown[] | null {
+  for (const key of LIST_KEYS) {
+    const value = record[key];
+    if (Array.isArray(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * Finds the news array in the envelope. Known paths, first match wins: top-level `details`; `data` as an array of
+ * items; `data` as an array of pages (`data: [{ details: [...] }]`, the OKX announcement style); `data` as an object
+ * holding `details`, `list`, `newsList` or `articles`. Returns null when none of them holds an array.
+ */
+function findNewsList(root: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(root.details)) return root.details;
+
+  const data = root.data;
+  if (Array.isArray(data)) {
+    const pageLists = data.flatMap((entry) => {
+      const record = asRecord(entry);
+      const list = record === null ? null : firstList(record);
+      return list === null ? [] : [list];
+    });
+    return pageLists.length > 0 ? pageLists.flat() : data;
+  }
+
+  const payload = asRecord(data);
+  return payload === null ? null : firstList(payload);
+}
+
+/** Key names only, never values, so the message can be stored on source_health without leaking news content. */
+function describeKeys(value: unknown): string {
+  if (Array.isArray(value)) return "array";
+  const record = asRecord(value);
+  if (record === null) return value === null ? "null" : typeof value;
+  const keys = Object.keys(record).slice(0, 20).map((key) => key.slice(0, 40));
+  return keys.length === 0 ? "none" : keys.join(",");
+}
+
+function describeEnvelope(root: Record<string, unknown>): string {
+  return `top-level keys: ${describeKeys(root)}; data keys: ${describeKeys(root.data)}`;
+}
+
 function toItem(raw: Record<string, unknown>, publishedMs: number): NewsItemInput | null {
-  const id = typeof raw.id === "string" || typeof raw.id === "number" ? String(raw.id).trim() : "";
+  const rawId = pick(raw, "id", "newsId");
+  const id = typeof rawId === "string" || typeof rawId === "number" ? String(rawId).trim() : "";
   if (id === "" || id.length > MAX_EXTERNAL_ID_LENGTH) return null;
 
   const importance = asText(raw.importance);
@@ -72,7 +126,7 @@ function toItem(raw: Record<string, unknown>, publishedMs: number): NewsItemInpu
   if (body === "") return null;
 
   const title = firstNonEmpty(raw.title);
-  const sourceUrl = asText(raw.sourceUrl)?.trim() ?? "";
+  const sourceUrl = (asText(pick(raw, "sourceUrl", "url")) ?? "").trim();
 
   return {
     source: OKX_NEWS_SOURCE,
@@ -80,16 +134,18 @@ function toItem(raw: Record<string, unknown>, publishedMs: number): NewsItemInpu
     title: title === "" ? null : title.slice(0, MAX_TITLE_LENGTH),
     body: body.slice(0, MAX_BODY_LENGTH),
     url: isHttpUrl(sourceUrl) ? sourceUrl : `${OKX_NEWS_POST_BASE}${encodeURIComponent(id)}`,
-    author: parseAuthors(raw.duplicateAuthors),
+    author: parseAuthors(pick(raw, "duplicateAuthors", "authors")),
     publishedAt: new Date(publishedMs).toISOString(),
     important: true,
   };
 }
 
 /**
- * Parses one `news-search` page. The endpoint's envelope is `{ details: [...], nextCursor }`. Pagination is driven by
- * the caller through `end`, so nextCursor is not read. Entries without an id, content or a high importance are
- * skipped. A missing details array, a non-zero `code`, or a non-empty page with nothing usable throws NewsFormatError.
+ * Parses one news-search page. The envelope is OKX v5 `{ code, msg, data }`; the news array is located by
+ * findNewsList (top-level `details`, `data` as an array, or `data.details` / `data.list` / `data.newsList` /
+ * `data.articles`). Pagination is driven by the caller through `end`, so any cursor is not read. Entries without an id,
+ * content or a high importance are skipped. A non-zero `code` throws with OKX's msg. An envelope with no recognised
+ * array throws NewsFormatError naming its keys, and so does a non-empty page with nothing usable.
  */
 export function parseOkxNewsPage(payload: unknown, nowMs: number = Date.now()): OkxNewsPage {
   const root = asRecord(payload);
@@ -97,25 +153,26 @@ export function parseOkxNewsPage(payload: unknown, nowMs: number = Date.now()): 
 
   const code = root.code;
   if (code !== undefined && code !== null && String(code) !== "0") {
-    throw new NewsFormatError(`okx-news returned code ${String(code).slice(0, 20)}`);
+    const msg = (asText(root.msg) ?? "").trim().slice(0, MAX_ERROR_MSG_LENGTH);
+    throw new NewsFormatError(`okx-news returned code ${String(code).slice(0, 20)}${msg === "" ? "" : `: ${msg}`}`);
   }
 
-  const details = root.details;
-  if (!Array.isArray(details)) throw new NewsFormatError("okx-news response has no details array");
+  const list = findNewsList(root);
+  if (list === null) throw new NewsFormatError(`okx-news response has no news array (${describeEnvelope(root)})`);
 
   const items: NewsItemInput[] = [];
   let oldestMs: number | null = null;
-  for (const entry of details) {
+  for (const entry of list) {
     const raw = asRecord(entry);
     if (raw === null) continue;
-    const ms = parseCTime(raw.cTime);
+    const ms = parseCTime(pick(raw, "cTime", "createTime"));
     if (ms !== null && (oldestMs === null || ms < oldestMs)) oldestMs = ms;
     const item = toItem(raw, ms ?? nowMs);
     if (item !== null) items.push(item);
   }
 
-  if (details.length > 0 && items.length === 0) {
-    throw new NewsFormatError("okx-news response contained no usable news items");
+  if (list.length > 0 && items.length === 0) {
+    throw new NewsFormatError(`okx-news response contained no usable news items (first item keys: ${describeKeys(list[0])})`);
   }
-  return { items, rawCount: details.length, oldestMs };
+  return { items, rawCount: list.length, oldestMs };
 }
