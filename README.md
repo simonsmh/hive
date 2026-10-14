@@ -145,6 +145,10 @@ scripts/
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
 | `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` | okx-news-poller（Edge secret） | 只读 OKX API Key 的三项凭据，用于签名快讯请求。**必须三者同时设置**，否则不签名。只会在 okx-news-poller 中读取，不要提交到仓库 |
+| `HIVE_ORDER_TOKEN` | order-submit（Edge secret） | 调用 `order-submit` 的 Bearer 令牌（`Authorization: Bearer <token>`）。与 `EDGE_CRON_SECRET` 分离，仅交给下单调用方（Grok / 规则服务）。未配置时拒绝所有请求。生成：`openssl rand -hex 32` |
+| `OKX_TRADE_API_KEY`、`OKX_TRADE_API_SECRET`、`OKX_TRADE_API_PASSPHRASE` | order-submit（Edge secret） | **交易权限**（Trade + Read）的 OKX API Key 三项凭据，与只读的 `OKX_API_*` 分开。三者必须同时设置，否则拒绝所有请求。模拟盘 Key 在 OKX 模拟交易页面创建。不要提交到仓库 |
+| `OKX_TRADE_DEMO` | order-submit（Edge secret，可选） | 默认 demo。只有显式设置为 `false` 才会走实盘，且还需 `OKX_TRADE_LIVE_ENABLED=true`，否则所有请求返回 `rejected_risk`（`live_disabled`） |
+| `OKX_TRADE_LIVE_ENABLED` | order-submit（Edge secret，可选） | 实盘闸门，仅 `true` 时放行 live 模式。P0b 阶段保持未设置 |
 | `HITHINK_FINANCE_API_KEY` | ths-collector（Edge secret） | 同花顺（HiThink）REST 的 API Key，以请求头 `X-api-key` 发送。未配置时函数返回 500。只在 Edge secret 中设置，不要提交到仓库 |
 | `THS_BASE_URL` | ths-collector（Edge secret，可选） | 默认 `https://fuyao.aicubes.cn` |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` | okx-collector | Supabase 自动注入到 Edge Function，无需手动设置 |
@@ -657,9 +661,88 @@ Agent 集成建议：
 - 调用前先看 `/api/health`。若返回 503，说明数据源已过期，此时不要基于报价做决策。
 - 遵守速率限制：采集端已经控制了上游请求，Agent 无需高频轮询 API，可以按需拉取。
 
+## 下单（order-submit，P0b，仅模拟盘）
+
+Agent 发送 `okx.intent.v1`（JSON Schema：`supabase/functions/order-submit/okx.intent.v1.schema.json`），Hive 同步校验风控、签名调用 OKX REST 并返回 `ordId` / `algoId`。Agent 不再需要本机 `okx` CLI 下单。
+
+```bash
+curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
+  -H "Authorization: Bearer $HIVE_ORDER_TOKEN" -H "content-type: application/json" \
+  -d '{"schema":"okx.intent.v1","intentId":"int-0001","idempotencyKey":"grok-xau-0001","action":"open",
+       "instId":"XAU-USDT-SWAP","side":"sell","posSide":"net","tdMode":"isolated","lever":15,"sz":"1",
+       "ordType":"market","slTriggerPx":"4125","slOrdPx":"-1","tpTriggerPx":"4085","tpOrdPx":"-1",
+       "theme":"xau_cpi","themeStopCapU":0.1,"maxLossU":0.1,"source":"grok","createdAt":"2026-10-14T14:40:00+08:00","ttlSec":120}'
+```
+
+**鉴权与模式**
+
+- `Authorization: Bearer <HIVE_ORDER_TOKEN>`，与 `EDGE_CRON_SECRET` 分开。
+- 默认 demo：请求带 `x-simulated-trading: 1`。live 需要 `OKX_TRADE_DEMO=false` **且** `OKX_TRADE_LIVE_ENABLED=true`，两者缺一都会被拒绝，P0b 不开放 live。
+
+**字段约定**
+
+- 请求字段保持 camelCase（与 `okx.intent.v1` 一致）；数据表为 snake_case（`intent_id`、`idempotency_key`、`sl_trigger_px` 等）。
+- 未知字段直接拒绝（`rejected_invalid`），避免拼错的 TP/SL 字段被静默丢弃。
+- `open`：必须带 `lever`、`theme`、`themeStopCapU`、`slTriggerPx`、`slOrdPx`，并且 `reduceOnly` 为 `false`。
+- `close` / `reduce`：`reduceOnly` 必须为 `true`，`sz` 为平仓张数。
+- `amend_tpsl`：至少一组 `slTriggerPx` / `tpTriggerPx`，并带对应的 `*OrdPx`（市价用 `"-1"`）。`side` 为**平仓方向**（平多为 `sell`，平空为 `buy`）。
+- `ordType` 默认 `market`；`limit` 必须带 `px`。`ttlSec` 默认 120，超过 `createdAt + ttlSec` 返回 `expired`。`createdAt` 比 Hive 当前时间晚超过 60 秒视为无效（`rejected_invalid`），用于拦截时钟错误。
+
+**风控门（按顺序执行，任一失败都不会下单）**
+
+| 门 | 结果 |
+| --- | --- |
+| 鉴权 | `401` `rejected_auth` |
+| schema 与字段组合 | `400` `rejected_invalid` |
+| 幂等（见下） | 重复 key 返回原结果，或 `409` |
+| `expired` | `422` `expired` |
+| kill switch（`kill_switch.engaged`） | `423` `rejected_risk`（`kill_switch_engaged`）。engage 后 close 与 reduce 也会被拒绝，需要先关闭 kill switch 或直接在 OKX 平仓 |
+| `risk_limits`（demo：标的白名单、单分钟提交数）；缺少启用的限额行时 fail closed | `422` `rejected_risk` |
+| 开仓：杠杆上限、名义金额上限（`sz × ctVal × 价格`），止损方向，`themeStopCapU` / `maxLossU`（`名义 × |入场 − SL| / 入场`） | `422` `rejected_risk`（`notional_exceeds_limit`、`loss_exceeds_theme_cap` 等）。入场价取市价开仓的最新价（ticker `last`）或限价单的 `px` |
+| OKX 下单 | 成功返回 `200` `acked` 与 `ordId` / `algoId`；OKX 明确拒绝返回 `502` `exchange_error`（`okx_rejected:<sCode>`）；鉴权被 OKX 拒绝返回 `401` `rejected_auth`（`okx_auth:<code>`） |
+
+**幂等**
+
+- 同一 `idempotencyKey` 在 10 分钟内只会下单一次。重复请求返回首次结果（`duplicate: true`）。超过 10 分钟的重复 key 返回 `409` `duplicate_key_expired`，需要换新 key。
+- OKX 的 `clOrdId` 由 key 的 SHA-256 派生，网络超时后会按 `clOrdId` 查询订单，确认是否已经成交挂单。查询不到时返回 `502` `outcome_unknown`，需要换新 key 重试，并先人工核对订单。
+- 同一 key 仍在处理中返回 `409` `in_progress`。
+
+**响应**
+
+```json
+{ "intentId": "int-0001", "idempotencyKey": "grok-xau-0001", "mode": "demo", "status": "acked",
+  "reason": null, "ordId": "2456789012345678901", "algoId": null, "clOrdId": "h…", "state": "accepted",
+  "detail": null }
+```
+
+`status` 取值：`acked`、`rejected_risk`、`rejected_auth`、`expired`、`exchange_error`（Grok 约定的五种），以及 Hive 自身返回的 `rejected_invalid`、`in_progress`、`duplicate_key_expired`、`duplicate_intent_id`。
+
+**部署**
+
+1. 应用迁移 `supabase/migrations/20261014000024_order_submit.sql`（建表、RLS、RPC，并写入 `kill_switch` 与 demo `risk_limits`）。
+2. 设置 Edge secrets（见下），然后部署：`supabase functions deploy order-submit --no-verify-jwt`。函数由自己校验 `HIVE_ORDER_TOKEN`，与其他函数一样关闭平台 JWT 校验。
+3. 紧急停止：`update public.kill_switch set engaged = true, reason = '…', engaged_at = now(), engaged_by = '…' where id = 1;`。恢复时把 `engaged` 设为 `false`。
+
+**需要配置的 Edge secrets（不要提交到仓库）**
+
+```bash
+supabase secrets set HIVE_ORDER_TOKEN="$(openssl rand -hex 32)"
+supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_API_PASSPHRASE=…   # 模拟盘交易权限 Key，三者必须同时设置
+# 可选：OKX_TRADE_DEMO 未设置即为模拟盘；OKX_TRADE_LIVE_ENABLED 在 P0b 保持未设置
+```
+
+**已知限制（P0b）**
+
+- `order-sync` 尚未实现：`orders.state` 停在 `accepted`，成交与撤单需要后续同步。
+- 总敞口（所有未平仓单合计）未做限制，只做单笔与每分钟限额。
+- `open` 附带的 SL/TP 随订单成交由 OKX 挂载，Hive 不跟踪它的 `algoId`。`amend_tpsl` 只会撤销 Hive 自己下的条件单，不会撤销开仓时挂载的 SL。
+- `amend_tpsl` 的价格门使用持仓均价（`/account/positions` 的 `avgPx`），不是当前价。
+- 所有 OKX 请求和响应字段都按 OKX v5 文档实现，但**尚未在真实模拟盘上端到端验证**，合入后需要用一笔小额模拟单确认。
+- 限额数值（`demo-default`：白名单 BTC/ETH/SOL/XAU，单笔名义上限 500 USDT，杠杆上限 20，每分钟 5 笔）是起始值，需要确认后再调整。
+
 ## 安全
 
-- 行情采集（okx-collector、apps/worker）只使用 OKX **公开**行情接口，不读取任何 API Key。快讯轮询（okx-news-poller）需要一组**只读** OKX API Key（`OKX_API_KEY` 等），仅用于签名快讯请求。本项目不做交易，不使用可交易权限的 Key。
+- 行情采集（okx-collector、apps/worker）只使用 OKX **公开**行情接口，不读取任何 API Key。快讯轮询（okx-news-poller）需要一组**只读** OKX API Key（`OKX_API_KEY` 等），仅用于签名快讯请求。下单（order-submit）使用单独的**交易权限**模拟盘 Key（`OKX_TRADE_API_*`），与只读 Key 分开保存。
 - service role key、`HIVE_API_TOKEN`、`HIVE_DASHBOARD_PASSWORD`、`HIVE_SESSION_SECRET`、`COLLECTOR_SECRET`、`EDGE_CRON_SECRET` 与 Vault 中的密钥只能放在服务端环境变量或 Supabase 的密钥存储中。仪表盘的密码与会话密钥不会出现在任何客户端代码或 `NEXT_PUBLIC_*` 变量中。API 对令牌比较使用常量时间比较，且令牌未配置时拒绝所有请求。Edge Function 同样使用常量时间比较，且未配置 `COLLECTOR_SECRET` 时拒绝所有请求。
 - 所有表开启 RLS；匿名与 `authenticated` 角色没有直接表权限。采集写入函数与 Vault 相关函数只授予 service role 执行。webhook 签名密钥存放在 Supabase Vault 中。
 - `.env*` 已加入 `.gitignore`，只提交 `.env.example`。
@@ -669,7 +752,7 @@ Agent 集成建议：
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector` 七个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector`、`order-submit` 八个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
