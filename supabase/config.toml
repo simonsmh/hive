@@ -28,3 +28,10 @@ verify_jwt = false
 # Callers send HIVE_ORDER_TOKEN as a bearer token, not a Supabase JWT, so the gateway JWT check must be off.
 [functions.order-submit]
 verify_jwt = false
+
+# position-manager is invoked by pg_cron (EDGE_CRON_SECRET). position-subscriptions is called by Grok with HIVE_ORDER_TOKEN.
+[functions.position-manager]
+verify_jwt = false
+
+[functions.position-subscriptions]
+verify_jwt = false

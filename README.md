@@ -120,7 +120,10 @@ supabase/
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
   functions/ths-collector/     Edge Function（Deno）：同花顺（HiThink）行情、盘口池与交易日历
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
-  functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（仅模拟盘，P0b）
+  functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（P0b，demo 默认，live 需显式开启）
+  functions/position-manager/  Edge Function（Deno）：持仓管理（P0c，pg_cron 每 3 分钟）：动态 ATR 止盈、半程减仓
+  functions/position-subscriptions/ Edge Function（Deno）：持仓订阅的鉴权 upsert / 列表（P0c，供 Grok 登记持仓）
+  seeds/       上线后执行的种子（P0c：BTC-USDT-SWAP short、QQQ-USDT-SWAP long）
   migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–23 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
@@ -149,7 +152,8 @@ scripts/
 | `HIVE_ORDER_TOKEN` | order-submit（Edge secret） | 调用 `order-submit` 的 Bearer 令牌（`Authorization: Bearer <token>`）。与 `EDGE_CRON_SECRET` 分离，仅交给下单调用方（Grok / 规则服务）。未配置时拒绝所有请求。生成：`openssl rand -hex 32` |
 | `OKX_TRADE_API_KEY`、`OKX_TRADE_API_SECRET`、`OKX_TRADE_API_PASSPHRASE` | order-submit（Edge secret） | **交易权限**（Trade + Read）的 OKX API Key 三项凭据，与只读的 `OKX_API_*` 分开。三者必须同时设置，否则拒绝所有请求。模拟盘 Key 在 OKX 模拟交易页面创建。不要提交到仓库 |
 | `OKX_TRADE_DEMO` | order-submit（Edge secret，可选） | 默认 demo。只有显式设置为 `false` 才会走实盘，且还需 `OKX_TRADE_LIVE_ENABLED=true`，否则所有请求返回 `rejected_risk`（`live_disabled`） |
-| `OKX_TRADE_LIVE_ENABLED` | order-submit（Edge secret，可选） | 实盘闸门，仅 `true` 时放行 live 模式。P0b 阶段保持未设置 |
+| `OKX_TRADE_LIVE_ENABLED` | order-submit、position-manager（Edge secret，可选） | 实盘闸门，仅 `true` 时放行 live 模式。P0b 保持未设置；P0c 持仓管理上线 live 时由 coordinator 设为 `true`，两个函数必须一致 |
+| `POSITION_MANAGER_DRY_RUN` | position-manager（Edge secret，可选） | 设为 `true` 时只计算决策并输出日志，不下单，也不写入订阅状态，用于上线前冒烟 |
 | `HITHINK_FINANCE_API_KEY` | ths-collector（Edge secret） | 同花顺（HiThink）REST 的 API Key，以请求头 `X-api-key` 发送。未配置时函数返回 500。只在 Edge secret 中设置，不要提交到仓库 |
 | `THS_BASE_URL` | ths-collector（Edge secret，可选） | 默认 `https://fuyao.aicubes.cn` |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` | okx-collector | Supabase 自动注入到 Edge Function，无需手动设置 |
@@ -157,6 +161,7 @@ scripts/
 | `SUPABASE_DB_CA_CERT` | worker（可选 / 遗留） | 可选。数据库端点的 PEM 证书，配置后启用证书校验；未配置时接受未校验的 TLS 连接 |
 | `HIVE_SYMBOLS` | worker（可选 / 遗留） | 可选。逗号分隔的基础符号，默认 `BZ,SNDK,MU,META,NVDA,QQQ,MRNA,TSM,XAU,BTC,ETH`。Edge Function 不读取此变量，符号以 `symbol_map` 为准 |
 | `HIVE_POLL_INTERVAL_SECONDS` | worker（可选 / 遗留） | 可选。轮询间隔，5–300 秒，默认 15 |
+| `SUPABASE_SECRET_KEY`（可选） | position-manager、position-subscriptions | 与 `SUPABASE_SERVICE_ROLE_KEY` 二选一，两者都没有时函数拒绝请求 |
 | `DATABASE_URL` | 迁移脚本 | 用于 `scripts/apply-migrations.sh` 和 `verify.sql` 的数据库连接串 |
 
 ### Vault 密钥（采集调度）
@@ -698,7 +703,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
 | 幂等（见下） | 重复 key 返回原结果，或 `409` |
 | `expired` | `422` `expired` |
 | kill switch（`kill_switch.engaged`） | `423` `rejected_risk`（`kill_switch_engaged`）。engage 后 close 与 reduce 也会被拒绝，需要先关闭 kill switch 或直接在 OKX 平仓 |
-| `risk_limits`（demo：标的白名单、单分钟提交数）；缺少启用的限额行时 fail closed | `422` `rejected_risk` |
+| `risk_limits`（标的白名单、单分钟提交数）；缺少启用的限额行时 fail closed。`amend_tpsl` 与 `reduce` 不受白名单限制，只要该标的有启用的持仓订阅（见 P0c） | `422` `rejected_risk` |
 | 开仓：杠杆上限、名义金额上限（`sz × ctVal × 价格`），止损方向，`themeStopCapU` / `maxLossU`（`名义 × |入场 − SL| / 入场`） | `422` `rejected_risk`（`notional_exceeds_limit`、`loss_exceeds_theme_cap` 等）。入场价取市价开仓的最新价（ticker `last`）或限价单的 `px` |
 | OKX 下单 | 成功返回 `200` `acked` 与 `ordId` / `algoId`；OKX 明确拒绝返回 `502` `exchange_error`（`okx_rejected:<sCode>`）；鉴权被 OKX 拒绝返回 `401` `rejected_auth`（`okx_auth:<code>`） |
 
@@ -741,6 +746,119 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 - 所有 OKX 请求和响应字段都按 OKX v5 文档实现，但**尚未在真实模拟盘上端到端验证**，合入后需要用一笔小额模拟单确认。
 - 限额数值（`demo-default`：白名单 BTC/ETH/SOL/XAU，单笔名义上限 500 USDT，杠杆上限 20，每分钟 5 笔）是起始值，需要确认后再调整。
 
+## 持仓管理（P0c，live，pg_cron 每 3 分钟）
+
+`position-manager` 由 pg_cron 每 3 分钟调用一次（`hive-position-manager`，`*/3 * * * *`，经 `hive_invoke_edge_function('position-manager')` 以 `EDGE_CRON_SECRET` 鉴权）。它只根据 `position_subscriptions` 中启用的订阅工作，**不接收价格 webhook，也不由价格直接触发下单**。每次运行对每个订阅依次做两件事：
+
+1. **半程减仓（每个订阅只一次）**。中点 `mid = (开仓均价 + SL) / 2` 在开仓时写入订阅。取最近一根**已确认**的 5m K 线收盘价：多头收盘 `<= mid`、空头收盘 `>= mid` 视为没有守住，此时以 `reduce`（市价、reduce-only、平仓方向）减约 50%（按手数向下取整）。剩余仓位保留原 OCO 的 SL/TP，数量随之调整。`half_reduce_done` 在确认或无法确认结果后置为 `true`，之后不会再次减仓。
+2. **动态 ATR 止盈**。以 1H ATR14 计算 `TP = 开仓均价 ± 0.8 × ATR`（多头加、空头减）。只有当新 TP 与 OKX 上当前 TP 的偏差达到 `0.15 × ATR` 以上，并且 TP 仍在标记价的同一侧（相对标记价有 0.05% 的余量）时，才以 `amend_tpsl` 修改 OCO 的 TP。SL 原样重新提交，不会因为修改而消失。仓位数量与保护单不一致时（例如减仓后）同一次修改会调整数量。修改成功后，Hive 撤销同一平仓方向上残留的 reduce-only 条件单（OKX 原有的 SL/TP 之外的旧单）。
+
+两个动作都经过 `order-submit` 的 HTTP 路径，因此与 Grok 下单共用同一套闸门：kill switch、`live` 开关（`OKX_TRADE_LIVE_ENABLED`）、`preflightRisk`、10 分钟幂等窗口与限频。**交易所 OCO 的 SL/TP 仍是机械底线**，Edge 失败时它仍然生效。
+
+**没有标的白名单**。持仓管理不包含任何写死的标的列表（不是只允许 XAU/BTC/ETH/SOL）。只要 `position_subscriptions` 中存在该标的的启用订阅（`mode` 一致），它就能被管理，**QQQ-USDT-SWAP 与其他 USDT 永续同样适用**。`themeStopCapU` 必须在 `(0, 0.1]` 之间，由表约束与 upsert 校验共同保证。
+
+**order-submit 的改动**。`amend_tpsl` 与 `reduce` 不再因为标的不在 `risk_limits.symbol_allowlist` 中而拒绝，前提是该标的存在启用的持仓订阅。开仓（`open`）仍然受白名单约束。没有启用订阅、不在白名单中的 `amend_tpsl` / `reduce` 仍返回 `symbol_not_allowed`。
+
+**live 风控行（`live-default`）**。迁移 `20261014000025` 在没有启用的 live 限额行时写入一行，`symbol_allowlist` 为空、`max_notional_usdt=500`、`max_leverage=15`、`max_orders_per_min=10`。空白名单意味着 live **开仓**全部被拒绝，只有订阅的持仓动作可以通过。停用：`update public.risk_limits set enabled = false where name = 'live-default';`（同时停用持仓动作，因为 order-submit 将缺少限额行视为 fail closed）。
+
+### 组件与迁移
+
+| 组件 | 说明 |
+| --- | --- |
+| `supabase/migrations/20261014000025_position_subscriptions.sql` | 表 `position_subscriptions`（每个 `mode, inst_id, pos_side` 只能有一行启用）、upsert RPC、减仓租约与完成 RPC、`live-default` 风控行、cron 任务。已有对象不变 |
+| `supabase/functions/position-manager` | 持仓管理 Edge Function。每次运行逐个订阅处理，单个订阅出错不影响其他订阅，错误写入 `last_note` |
+| `supabase/functions/position-subscriptions` | 订阅的鉴权 upsert（POST）与列表（GET）。供 Grok 登记新持仓，使用 `HIVE_ORDER_TOKEN` |
+| `supabase/seeds/position_subscriptions_p0c.sql` | 上线后的种子：BTC-USDT-SWAP short/net 与 QQQ-USDT-SWAP long/net |
+| `packages/core/src/position.ts` | 纯逻辑：中点、动态 TP、减仓数量、保护单选择、持仓匹配、okx.intent.v1 的 `amend_tpsl` / `reduce` 构造、订阅校验 |
+
+### 订阅字段（每行一个持仓）
+
+| 字段 | 含义 |
+| --- | --- |
+| `mode` | `live` 或 `demo`，必须与 position-manager 的模式一致（由 `OKX_TRADE_DEMO` 决定） |
+| `instId` | 任意 USDT 永续，如 `BTC-USDT-SWAP`、`QQQ-USDT-SWAP` |
+| `posSide` / `direction` | `net`（单向持仓，Grok 当前使用）或 `long` / `short`。`direction` 始终为持仓方向 |
+| `tdMode` | 默认 `isolated` |
+| `lever` | 1–125，仅记录用 |
+| `entryPx` / `slPx` / `tpPx` | 开仓均价、止损价、原始止盈价（多头：SL ≤ entry < TP；空头：TP < entry ≤ SL） |
+| `midPx` | 可省略，省略时为 `(entryPx + slPx) / 2`，必须位于 entry 与 SL 之间 |
+| `themeStopCapU` | 必须在 `(0, 0.1]`，表约束与 upsert 校验都会检查 |
+| `atrLen`、`atrMult`、`amendMinAtrFrac`、`halfReduceFrac` | 默认 14、0.8、0.15、0.5。ATR 为 1H |
+| `dynamicTpEnabled`、`halfReduceEnabled` | 默认 `true`，可分别关闭 |
+| `enabled` | `false` 停用该持仓的启用行（不删除历史） |
+| `resetState` | 默认 `false`。仅在确认是**全新持仓**时设为 `true`，它会清除 `half_reduce_done`。普通更新与重放种子时不要设置 |
+
+### 登记与停用持仓（Grok 调用）
+
+```bash
+# 登记或更新（同一 mode/instId/posSide 的启用行原地更新，保留 half_reduce_done）
+curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-subscriptions" \
+  -H "Authorization: Bearer $HIVE_ORDER_TOKEN" -H "content-type: application/json" \
+  -d '{"mode":"live","instId":"BTC-USDT-SWAP","posSide":"net","direction":"short","tdMode":"isolated","lever":15,
+       "entryPx":81818.5,"slPx":82700,"tpPx":80400,"midPx":82259.25,"themeStopCapU":0.1}'
+
+# 查看启用中的订阅
+curl "https://<project-ref>.supabase.co/functions/v1/position-subscriptions?mode=live" \
+  -H "Authorization: Bearer $HIVE_ORDER_TOKEN"
+
+# 停用（返回被停用行的 id；没有启用行时 id 为 null）
+curl -X POST ".../functions/v1/position-subscriptions" -H "Authorization: Bearer $HIVE_ORDER_TOKEN" \
+  -H "content-type: application/json" -d '{"mode":"live","instId":"BTC-USDT-SWAP","posSide":"net","direction":"short","entryPx":81818.5,"slPx":82700,"tpPx":80400,"themeStopCapU":0.1,"enabled":false}'
+```
+
+- 响应 `status`：`upserted`、`disabled`、`rejected_auth`（401）、`rejected_invalid`（400，附 `error`）、`store_unavailable`（500）。请求体上限 16 KB。
+- 同一个 `(mode, instId, posSide)` 只能有一个启用行。重复 `POST` 是安全的，只会更新。
+- 上线前不会有订阅，因此 position-manager 对空表是一次无副作用的运行。
+
+### 种子（部署后执行一次）
+
+```bash
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/seeds/position_subscriptions_p0c.sql
+```
+
+两行均为 `mode=live`、`theme_stop_cap_u=0.1`、`lever=15`、`td_mode=isolated`、`enabled=true`，不带 `reset_state`。重复执行安全：`half_reduce_done` 会保留，因此不会因为重放种子而二次减仓。BTC 与 QQQ 的中点分别为 `82259.25`、`726.095`，与表约束一致。
+
+### 部署与上线顺序
+
+1. 应用迁移 `20261014000025_position_subscriptions.sql`（依赖 `hive_invoke_edge_function` 与 Vault 中的 `edge_base_url`、`edge_cron_secret`，与 `20261013000015` 相同）。
+2. 设置 Edge secrets：`position-manager` 需要 `EDGE_CRON_SECRET`（与 Vault 中的 `edge_cron_secret` 相同）、`HIVE_ORDER_TOKEN`（调用 order-submit 时使用，与 Grok 相同的令牌）、`OKX_TRADE_API_*`；`position-subscriptions` 需要 `HIVE_ORDER_TOKEN`。
+3. 部署：`supabase functions deploy position-manager --no-verify-jwt` 与 `supabase functions deploy position-subscriptions --no-verify-jwt`。两者都自行校验令牌。
+4. 先用 `POSITION_MANAGER_DRY_RUN=true` 运行一个周期（见下文冒烟），确认决策日志正确，再取消该变量。
+5. 执行种子 `supabase/seeds/position_subscriptions_p0c.sql`。
+6. 上线 live：`OKX_TRADE_DEMO=false` 与 `OKX_TRADE_LIVE_ENABLED=true` 必须同时设置在 **order-submit 与 position-manager** 上。否则 position-manager 返回 `disabled`，什么都不做。
+
+### 冒烟与验证
+
+- **鉴权拒绝**：不带或带错 `EDGE_CRON_SECRET` 调用 `position-manager`，应返回 `401 {"error":"unauthorized"}`，且不读取任何订阅。
+- **空表干跑**：`position_subscriptions` 为空（或全部停用）时，带正确密钥调用应返回 `200 {"status":"ok","subscriptions":0,...}`，无任何下单。
+- **有持仓但未触发**：`last_note` 为 `no_change`、`no_position` 或 `skip:*`，`last_eval_at` 每个周期更新。
+- **订阅 upsert**：见上文 curl；`GET ?mode=live` 能看到两行。
+- **保护单检查**：上线后在 OKX 上确认每个持仓仍有且只有一个 reduce-only 的 SL/TP 条件单，数量与持仓一致。
+
+```bash
+curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
+  -H "Authorization: Bearer $EDGE_CRON_SECRET" -H "content-type: application/json" -d '{}'
+```
+
+### 幂等与失败语义
+
+- **减仓**的幂等键不按时间分桶，并且包含 `halfReduceAttempts`。订单被 order-submit 接受后，同一订阅不会再次减仓。只有**没有下单**的拒绝（例如 kill switch、限频、`symbol_not_allowed`、OKX 明确拒绝）才会释放租约，并将 `half_reduce_attempts` 加一，之后的重试使用新键。
+- 减仓结果**无法确认**（网络超时、`outcome_unknown`、超时）时，`half_reduce_done` 置为 `true` 并在 `last_note` 写入 `check_okx`。此后该订阅不会再自动减仓，需要先在 OKX 上核对。核对后若确认未减仓，可用 `resetState: true` 重新登记（注意：这会把订阅视为全新持仓）。
+- **改止盈**的幂等键按 3 分钟分桶，与 okx.intent.v1 的约定一致。
+- 租约为 300 秒。崩溃后的运行会在租约过期后才能重新获得减仓资格，而且 order-submit 的 10 分钟窗口会阻止重复下单。
+
+### 上线需要知道的行为
+
+- 首次 live 周期会修改真实持仓的 TP：BTC 空单的 TP 从 `80400` 改到约 `entry − 0.8 × ATR`，QQQ 多单的 TP 从 `741` 改到约 `entry + 0.8 × ATR`。两者都比原 TP 更近（更保守），是设计预期。
+- `themeStopCapU` 只作为配置上限（`<= 0.1`），**不是**保护单替换时的实时亏损闸门。保护单按 `amend_tpsl` 原样重发，不携带 `themeStopCapU`，否则 `priceRisk` 会在持仓已亏损时拒绝替换 SL/TP。
+- `order-submit` 的 `amend_tpsl` 只撤销 Hive 自己记录过的条件单，开仓时由 OKX 挂载的 SL/TP 不在其中，因此 position-manager 自行撤销同方向残留的 reduce-only 条件单。
+- `tp_px` 会随动态 TP 更新为最近一次下达给 OKX 的价格；再次执行种子会把它重置回种子中的 `tpPx`，下一个周期会再次修正。
+- 只有 `open` 受 `live-default` 空白名单约束，因此 live 新开仓默认全部拒绝。
+
+### 未实现（P0d，本 PR 不包含）
+
+保本移动止损、波动率突增保护、时间衰减减仓、ATR 追踪止损均未实现，没有保留任何占位钩子。
+
 ## 安全
 
 - 行情采集（okx-collector、apps/worker）只使用 OKX **公开**行情接口，不读取任何 API Key。快讯轮询（okx-news-poller）需要一组**只读** OKX API Key（`OKX_API_KEY` 等），仅用于签名快讯请求。下单（order-submit）使用单独的**交易权限**模拟盘 Key（`OKX_TRADE_API_*`），与只读 Key 分开保存。
@@ -753,7 +871,7 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector`、`order-submit` 八个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector`、`order-submit`、`position-manager`、`position-subscriptions` 十个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
