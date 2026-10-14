@@ -27,6 +27,45 @@ export function computeBackoffSeconds(attempt: number): number {
   return Math.min(MAX_BACKOFF_SECONDS, BASE_BACKOFF_SECONDS * 2 ** exponent);
 }
 
+export const DELIVERY_PRIORITIES = ["critical", "bulk"] as const;
+export type DeliveryPriority = (typeof DELIVERY_PRIORITIES)[number];
+
+/** A delivery sent more than this long after it was created is a backlog send, flagged replay: true. */
+export const REPLAY_LAG_SECONDS = 30;
+
+export interface DeliveryTiming {
+  priority: DeliveryPriority;
+  /** ISO time of the underlying event, or null when the database could not derive one. */
+  eventTs: string | null;
+  createdAt: string;
+  staleAfterSeconds: number;
+}
+
+export interface DeliveryFlags {
+  priority: DeliveryPriority;
+  event_ts: string | null;
+  stale: boolean;
+  replay: boolean;
+}
+
+/**
+ * Consumers must not place or amend orders on a payload with stale or replay set. Both are computed at send time,
+ * so a delivery that waited in a backlog cannot look fresh. A missing or unparseable time counts as stale.
+ */
+export function deliveryFlags(timing: DeliveryTiming, nowMs: number): DeliveryFlags {
+  const createdMs = Date.parse(timing.createdAt);
+  const eventMs = timing.eventTs === null ? createdMs : Date.parse(timing.eventTs);
+  const stale = !Number.isFinite(eventMs) || nowMs - eventMs > timing.staleAfterSeconds * 1000;
+  const replay = !Number.isFinite(createdMs) || nowMs - createdMs > REPLAY_LAG_SECONDS * 1000;
+  return { priority: timing.priority, event_ts: timing.eventTs, stale, replay };
+}
+
+/** Adds the delivery flags to the payload. They overwrite any same-named keys, so a producer cannot clear stale. */
+export function withDeliveryFlags(payload: unknown, flags: DeliveryFlags): Record<string, unknown> {
+  const base = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : { value: payload };
+  return { ...base, ...flags };
+}
+
 /** HMAC-SHA256 over `${timestamp}.${body}`, so a captured signature cannot be replayed with a new timestamp. */
 export function signWebhookBody(secret: string, timestamp: number, body: string): string {
   const digest = createHmac("sha256", secret).update(`${timestamp}.${body}`, "utf8").digest("hex");

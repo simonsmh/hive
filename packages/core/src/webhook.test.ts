@@ -2,12 +2,15 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   MAX_BACKOFF_SECONDS,
+  REPLAY_LAG_SECONDS,
   SubscriptionInputError,
   computeBackoffSeconds,
+  deliveryFlags,
   parseSubscriptionFilters,
   parseSubscriptionInput,
   signWebhookBody,
   verifyWebhookSignature,
+  withDeliveryFlags,
 } from "./webhook.js";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
@@ -147,5 +150,69 @@ describe("parseSubscriptionInput", () => {
   it("rejects non-object bodies", () => {
     expect(() => parseSubscriptionInput([], { requireAll: true })).toThrow(SubscriptionInputError);
     expect(() => parseSubscriptionInput(null, { requireAll: false })).toThrow(/JSON object/);
+  });
+});
+
+describe("deliveryFlags", () => {
+  const CREATED = Date.parse("2026-10-14T12:00:00.000Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const critical = (overrides: Partial<Parameters<typeof deliveryFlags>[0]> = {}) => ({
+    priority: "critical" as const,
+    eventTs: iso(CREATED),
+    createdAt: iso(CREATED),
+    staleAfterSeconds: 60,
+    ...overrides,
+  });
+
+  it("is neither stale nor replay for a live send inside both windows", () => {
+    expect(deliveryFlags(critical(), CREATED + 5_000)).toEqual({
+      priority: "critical",
+      event_ts: iso(CREATED),
+      stale: false,
+      replay: false,
+    });
+  });
+
+  it("is stale when the event is older than its threshold, whatever the queue lag", () => {
+    const flags = deliveryFlags(critical({ eventTs: iso(CREATED - 90_000), createdAt: iso(CREATED + 4_000) }), CREATED + 5_000);
+    expect(flags.stale).toBe(true);
+    expect(flags.replay).toBe(false);
+  });
+
+  it("is replay when the send lags its insert past the replay window, even if the event is still fresh", () => {
+    const flags = deliveryFlags(critical({ staleAfterSeconds: 120 }), CREATED + (REPLAY_LAG_SECONDS + 10) * 1000);
+    expect(flags.stale).toBe(false);
+    expect(flags.replay).toBe(true);
+  });
+
+  it("uses the insert time for staleness when the event time is unknown, and treats unparseable times as stale", () => {
+    expect(deliveryFlags(critical({ eventTs: null, staleAfterSeconds: 60 }), CREATED + 90_000).stale).toBe(true);
+    expect(deliveryFlags(critical({ eventTs: null }), CREATED + 1_000).stale).toBe(false);
+    expect(deliveryFlags(critical({ eventTs: "not a time" }), CREATED).stale).toBe(true);
+  });
+
+  it("never lets a delayed delivery through with both flags clear", () => {
+    for (const lag of [0, 5, 29, 31, 60, 61, 150, 400]) {
+      const flags = deliveryFlags(critical({ staleAfterSeconds: 120 }), CREATED + lag * 1000);
+      const delayed = lag > REPLAY_LAG_SECONDS || lag > 120;
+      expect(flags.stale || flags.replay).toBe(delayed);
+    }
+  });
+});
+
+describe("withDeliveryFlags", () => {
+  const flags = { priority: "bulk" as const, event_ts: "2026-10-14T12:00:00.000Z", stale: true, replay: false };
+
+  it("adds the flags beside the payload fields and overwrites same-named keys a producer set", () => {
+    expect(withDeliveryFlags({ type: "alert", stale: false, kind: "fill" }, flags)).toEqual({
+      type: "alert",
+      kind: "fill",
+      ...flags,
+    });
+  });
+
+  it("wraps a non-object payload so the flags always have an object to live in", () => {
+    expect(withDeliveryFlags(null, flags)).toEqual({ value: null, ...flags });
+    expect(withDeliveryFlags([1, 2], flags)).toEqual({ value: [1, 2], ...flags });
   });
 });
