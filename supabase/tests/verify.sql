@@ -562,4 +562,57 @@ begin
 end
 $$;
 
+-- Alert evaluation: the pct_move kind, the seeded rules and SKHY, the record RPC and its cron schedule.
+do $$
+declare
+  v_rule uuid;
+  v_result jsonb;
+  v_count integer;
+  v_last timestamptz;
+begin
+  begin
+    insert into public.alert_rules (name, symbol, kind, params) values ('verify-bad-kind', 'BTC', 'moon', '{}');
+    raise exception 'alert_rules accepted an unknown kind';
+  exception when check_violation then null;
+  end;
+
+  perform 1 from public.symbol_map where symbol = 'SKHY' and enabled;
+  if not found then raise exception 'symbol_map is missing an enabled SKHY row'; end if;
+
+  select count(*) into v_count from public.alert_rules
+   where kind = 'pct_move' and enabled and cooldown_seconds = 600 and symbol in ('SNDK', 'MU', 'SKHY')
+     and params = '{"interval":"1m","lookback":10,"minAbsPct":1}'::jsonb;
+  if v_count <> 3 then raise exception 'expected 3 seeded pct_move rules for SNDK, MU and SKHY, got %', v_count; end if;
+
+  perform 1 from cron.job where jobname = 'hive-alert-evaluator' and schedule = '* * * * *';
+  if not found then raise exception 'pg_cron job hive-alert-evaluator (every minute) missing'; end if;
+
+  if has_function_privilege('anon', 'public.hive_alert_evaluator_record(jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_alert_evaluator_record(jsonb)', 'EXECUTE') then
+    raise exception 'hive_alert_evaluator_record is executable by client roles';
+  end if;
+
+  -- The same bar recorded twice yields one alert, and the rule's cooldown timestamp is set.
+  insert into public.alert_rules (name, symbol, kind, params, cooldown_seconds)
+  values ('verify-pct-rule', 'BTC', 'pct_move', '{"interval":"1m","lookback":10,"minAbsPct":1}', 600)
+  returning id into v_rule;
+
+  v_result := public.hive_alert_evaluator_record(jsonb_build_array(
+    jsonb_build_object('dedup_key', 'rule:' || v_rule || ':1', 'rule_id', v_rule, 'symbol', 'BTC',
+                       'kind', 'pct_move', 'severity', 'warning', 'payload', '{"pct": 1.5}'::jsonb),
+    jsonb_build_object('dedup_key', 'rule:' || v_rule || ':1', 'rule_id', v_rule, 'symbol', 'BTC',
+                       'kind', 'pct_move', 'severity', 'warning', 'payload', '{"pct": 1.5}'::jsonb)
+  ));
+  if (v_result->>'inserted')::integer <> 1 or (v_result->>'duplicates')::integer <> 1 then
+    raise exception 'record RPC expected 1 insert and 1 duplicate, got %', v_result;
+  end if;
+  select last_triggered_at into v_last from public.alert_rules where id = v_rule;
+  if v_last is null then raise exception 'record RPC did not set last_triggered_at'; end if;
+  select count(*) into v_count from public.alerts where rule_id = v_rule;
+  if v_count <> 1 then raise exception 'expected 1 alert for the verify rule, got %', v_count; end if;
+
+  raise notice 'verify.sql: alert evaluation checks passed';
+end
+$$;
+
 rollback;
