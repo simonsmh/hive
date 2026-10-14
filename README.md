@@ -45,6 +45,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **新闻采集（supabase/functions/jin10-poller）**：pg_cron 每 30 秒调用一次。函数请求 Jin10 快讯接口，经 `hive_news_ingest` 按 `source + external_id` 去重写入 `news_items` 与 `news_events`，并更新 `source_health.jin10`。本轮询若插入了新快讯，`hive_news_ingest` 会在事务提交后通过 pg_net 唤醒一次分发函数（见下文「延迟」）。该接口是非官方接口，格式变化或被拦截时记录错误，数据源会因超过 5 分钟未成功而进入过期告警。
 - **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。分发函数由 pg_cron 每 30 秒调用一次作为兜底，并在新快讯入库后被唤醒。每次运行按 `next_attempt_at` 取出到期投递，只要剩余预算足够就持续领取整批，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
 - **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每分钟调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
+- **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
 
@@ -91,8 +92,9 @@ supabase/
   functions/jin10-poller/      Edge Function（Deno）：Jin10 快讯轮询与入库
   functions/okx-news-poller/   Edge Function（Deno）：OKX Orbit 重要快讯轮询与入库
   functions/webhook-dispatcher/ Edge Function（Deno）：webhook 签名、投递与退避
+  functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
-  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–20 为阶段 2）
+  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–21 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
   apply-migrations.sh  依次应用迁移
@@ -112,7 +114,7 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` | okx-news-poller（Edge secret） | 只读 OKX API Key 的三项凭据，用于签名快讯请求。**必须三者同时设置**，否则不签名。只会在 okx-news-poller 中读取，不要提交到仓库 |
@@ -136,7 +138,7 @@ pg_cron 的任务本身不保存任何密钥。每次触发时，`hive_okx_colle
 
 ### Vault 密钥（新闻与推送调度）
 
-`hive_invoke_edge_function(name)` 被 `hive-jin10-poller`、`hive-webhook-dispatch` 等 pg_cron 任务共用。它从 Vault 读取以下两个密钥，cron 任务本身不保存任何密钥。
+`hive_invoke_edge_function(name)` 被 `hive-jin10-poller`、`hive-webhook-dispatch`、`hive-alert-evaluator` 等 pg_cron 任务共用。它从 Vault 读取以下两个密钥，cron 任务本身不保存任何密钥。
 
 | Vault 名称 | 内容 |
 | --- | --- |
@@ -213,7 +215,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher; do
+for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -235,6 +237,7 @@ done
    - `…000016_webhook_auth_token.sql`：订阅可选的 Bearer 令牌（`auth_token_secret_id`，存于 Vault）；`sources` 过滤只作用于新闻，告警不再受其限制。增量迁移，不修改已有数据。
    - `…000019_okx_news_source_enum.sql`：为 `market_source` 增加 `okx-news`（须单独迁移，新枚举值不能在添加它的事务中使用）
    - `…000020_okx_news_ingest.sql`：`source_health.okx-news` 种子（5 分钟过期）、`hive_news_latest_published` 水位函数、允许 `okx-news` 的 `hive_news_ingest`，以及 `hive-okx-news-poller`（每分钟）
+   - `…000021_alert_evaluator.sql`：`alert_rules.kind` 允许 `pct_move`；`SKHY` 写入 `symbol_map`（启用，幂等）；SNDK、MU、SKHY 的 `pct_move` 规则种子；`hive_alert_evaluator_record` 写入函数；`hive-alert-evaluator`（每分钟）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -243,6 +246,7 @@ done
    supabase functions deploy jin10-poller --no-verify-jwt
    supabase functions deploy okx-news-poller --no-verify-jwt
    supabase functions deploy webhook-dispatcher --no-verify-jwt
+   supabase functions deploy alert-evaluator --no-verify-jwt
    ```
 
    `--no-verify-jwt` 与 `supabase/config.toml` 中的 `verify_jwt = false` 保持一致。pg_net 不携带 Supabase JWT，因此每个函数都改用自己的共享密钥校验 Bearer，未通过校验的请求返回 401。
@@ -345,6 +349,38 @@ pnpm --filter @hive/web dev
 
 安装到手机主屏幕：iOS Safari 点击「分享 → 添加到主屏幕」，Android Chrome 点击菜单中的「安装应用」。Service Worker 只缓存静态外壳与离线页，页面数据与 `/api/*` 不会写入缓存。
 
+## 告警规则（alert_rules）
+
+规则保存在 `public.alert_rules`，`enabled = true` 的规则由 alert-evaluator 每分钟评估一次。`params` 为 JSON，解析与默认值见 `packages/core/src/alerts.ts` 的 `parseRuleParams`。
+
+| `kind` | `params` | 触发条件 |
+| --- | --- | --- |
+| `price_cross` | `level`、`direction`（`above`/`below`） | 最近两根 1m 收盘价穿越 `level` |
+| `candle_close_break` | `interval`、`level`、`direction` | 最新已确认 K 线收盘价越过 `level` |
+| `volume_spike` | `interval`、`multiple`、`lookback`（默认 6） | 最新 K 线成交量 ≥ `multiple` × 之前 `lookback` 根的平均 |
+| `long_wick` | `interval`、`minWickRatio`（默认 0.6）、`side`（`upper`/`lower`/`any`） | 最新 K 线影线占振幅的比例达到阈值 |
+| `pullback` | `interval`、`lookback`（默认 20）、`minDropPct` | 最新收盘价较窗口最高价下跌 ≥ `minDropPct`% |
+| `pct_move` | `interval`、`lookback`（1–500）、`minAbsPct`（> 0） | 见下文 |
+
+**`pct_move`（区间涨跌幅）**：以同一 `interval` 下最新已确认 K 线的收盘价 `last`，与其之前第 `lookback` 根的收盘价 `earlier` 比较，`pct = (last − earlier) / earlier × 100`。当 `|pct| ≥ minAbsPct` 时触发。缺少足够的 K 线或 `earlier ≤ 0` 时不触发。只使用已确认 K 线，正在形成的 K 线不参与计算。
+
+告警写入 `alerts`：`kind` 为规则的 `kind`，`symbol` 为规则的符号，`severity` 固定为 `warning`，`payload` 包含 `source`、`symbol`、`rule_id`、`rule_name`、`interval`、`bar_ts`，以及各类型的数值（例如 `pct` 与 `earlier_price`、`last_price`、`lookback`、`min_abs_pct`）。订阅方可用 `alert_kinds: ["pct_move"]` 过滤。
+
+**评估语义**：
+- 每分钟读取每个 `(符号, 周期)` 最近的已确认 K 线（同一序列只读一次），并对每条规则评估最新的一根。
+- 冷却：规则在 `cooldown_seconds` 内最多写入一次（以 `last_triggered_at` 为准）。
+- 去重：`dedup_key = rule:<rule_id>:<bar_ts>`，同一规则对同一根 K 线只写入一次，即使两次运行重叠。
+- 新鲜度：最新已确认 K 线超过 3 个周期未更新（采集停滞）时不评估，避免基于陈旧数据告警。
+- `price_cross` 没有 `interval` 参数，固定比较最近两根 1m 收盘价。
+- 局限：`pct_move` 按 K 线根数计算，不检查时间间隔，采集中断导致的缺口不会被识别；评估只看最新一根已确认 K 线，若采集器在两次运行之间一次确认了多根 K 线，中间的几根不会被评估。采集（30 秒）加评估（每分钟）的延迟约为 1 分钟。
+
+**Stock 盯盘用途（SNDK、MU、SKHY）**：迁移 `…000021` 写入三条规则，`params = {"interval":"1m","lookback":10,"minAbsPct":1}`，`cooldown_seconds = 600`。即最近 10 分钟涨跌幅 ≥ 1% 时告警，同一规则至多每 10 分钟一条，对应 Stock 原先的 10 分钟本地轮询。这些规则不设 `webhook_id`，告警由已订阅 `alert` 事件的 webhook 投递方接收。新增规则示例：
+
+```sql
+insert into public.alert_rules (name, symbol, kind, params, cooldown_seconds)
+values ('BZ 10m move >=1%', 'BZ', 'pct_move', '{"interval":"1m","lookback":10,"minAbsPct":1}', 600);
+```
+
 ## API（供 Agent 调用）
 
 所有接口都需要请求头：`Authorization: Bearer <HIVE_API_TOKEN>`。未携带或令牌错误返回 `401`。
@@ -430,7 +466,7 @@ Agent 集成建议：
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher` 四个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator` 五个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
@@ -446,5 +482,4 @@ Agent 集成建议：
 ## 后续计划
 
 - 接入其他数据源（如 `yahoo`），使 `v_spread` 生效。
-- 在 Edge Function 中评估 `alert_rules`（价格穿越、K 线收盘突破、放量、长影线、回调），使用 `cooldown_seconds` 与 `alertDedupKey` 防止重复告警。规则解析与评估函数已在 `packages/core` 中实现并有单元测试。
 - 成交回报的采集写入。

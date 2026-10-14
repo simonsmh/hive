@@ -18,6 +18,7 @@ const FUNCTIONS = {
   "jin10-poller": ["auth", "news"],
   "okx-news-poller": ["auth", "news", "okx-news"],
   "webhook-dispatcher": ["auth", "webhook"],
+  "alert-evaluator": ["types", "alerts", "auth"],
 };
 
 function rewrite(name, source, allowedLocal) {
