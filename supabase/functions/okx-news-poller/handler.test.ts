@@ -79,7 +79,7 @@ function fakeFetch(reply: (url: URL, call: number) => Reply) {
 }
 
 function okBody(details: unknown[]): string {
-  return JSON.stringify({ details, nextCursor: "" });
+  return JSON.stringify({ code: "0", msg: "", data: [{ details, nextCursor: "" }] });
 }
 
 function handlerWith(store: OkxNewsStore, fetchImpl: typeof fetch) {
@@ -291,13 +291,23 @@ Deno.test("skips entries that the parser rejects while keeping the rest of the p
   deepStrictEqual(ingested[0]!.map((row) => row.external_id), ["1"]);
 });
 
-Deno.test("ingests items from an OKX v5 envelope whose data holds the array", async () => {
-  const body = JSON.stringify({ code: "0", msg: "", data: [newsItem(1, NOW - 1000), newsItem(2, NOW - 2000)] });
+Deno.test("ingests items from the live envelope, data[0].details", async () => {
+  const body = JSON.stringify({ code: "0", msg: "", data: [{ details: [newsItem(1, NOW - 1000), newsItem(2, NOW - 2000)], nextCursor: "c" }] });
   const { store, ingested } = fakeStore();
   const result = await (await handlerWith(store, fakeFetch(() => ({ body })).impl)(request())).json();
   strictEqual(result.status, "ok");
   strictEqual(result.fetched, 2);
   deepStrictEqual(ingested[0]!.map((row) => row.external_id), ["1", "2"]);
+});
+
+Deno.test("degrades when the envelope code is not \"0\", with OKX's message", async () => {
+  const { store, failures, ingested } = fakeStore();
+  const body = await (
+    await handlerWith(store, fakeFetch(() => ({ body: JSON.stringify({ code: "50111", msg: "Invalid OK-ACCESS-KEY", data: [] }) })).impl)(request())
+  ).json();
+  deepStrictEqual(body, { status: "degraded", error: "okx-news returned code 50111: Invalid OK-ACCESS-KEY" });
+  deepStrictEqual(failures, ["okx-news returned code 50111: Invalid OK-ACCESS-KEY"]);
+  strictEqual(ingested.length, 0);
 });
 
 Deno.test("degraded reason names the envelope keys, not values, when the news array moved", async () => {

@@ -80,22 +80,19 @@ function firstList(record: Record<string, unknown>): unknown[] | null {
 }
 
 /**
- * Finds the news array in the envelope. Known paths, first match wins: top-level `details`; `data` as an array of
- * items; `data` as an array of pages (`data: [{ details: [...] }]`, the OKX announcement style); `data` as an object
- * holding `details`, `list`, `newsList` or `articles`. Returns null when none of them holds an array.
+ * Finds the news array in the envelope. Known paths, first match wins: `data[0].details` (the live OKX shape, one page
+ * per response); top-level `details` (legacy); `data` as an array of items; `data` as an object holding `details`,
+ * `list`, `newsList` or `articles`. Returns null when none of them holds an array.
  */
 function findNewsList(root: Record<string, unknown>): unknown[] | null {
-  if (Array.isArray(root.details)) return root.details;
-
   const data = root.data;
-  if (Array.isArray(data)) {
-    const pageLists = data.flatMap((entry) => {
-      const record = asRecord(entry);
-      const list = record === null ? null : firstList(record);
-      return list === null ? [] : [list];
-    });
-    return pageLists.length > 0 ? pageLists.flat() : data;
+  if (Array.isArray(data) && data.length > 0) {
+    const page = asRecord(data[0]);
+    if (page !== null && Array.isArray(page.details)) return page.details;
   }
+
+  if (Array.isArray(root.details)) return root.details;
+  if (Array.isArray(data)) return data;
 
   const payload = asRecord(data);
   return payload === null ? null : firstList(payload);
@@ -141,20 +138,21 @@ function toItem(raw: Record<string, unknown>, publishedMs: number): NewsItemInpu
 }
 
 /**
- * Parses one news-search page. The envelope is OKX v5 `{ code, msg, data }`; the news array is located by
- * findNewsList (top-level `details`, `data` as an array, or `data.details` / `data.list` / `data.newsList` /
- * `data.articles`). Pagination is driven by the caller through `end`, so any cursor is not read. Entries without an id,
- * content or a high importance are skipped. A non-zero `code` throws with OKX's msg. An envelope with no recognised
- * array throws NewsFormatError naming its keys, and so does a non-empty page with nothing usable.
+ * Parses one news-search page. The envelope is OKX v5 `{ code: "0", msg, data: [{ details: [...], nextCursor }] }`,
+ * and the items are `data[0].details`. The code must be "0"; a missing or other code throws with OKX's msg. Pagination
+ * is driven by the caller through `end`, so nextCursor is not read. Entries without an id, content or a high
+ * importance are skipped. An envelope with no recognised array throws NewsFormatError naming its keys, and so does a
+ * non-empty page with nothing usable.
  */
 export function parseOkxNewsPage(payload: unknown, nowMs: number = Date.now()): OkxNewsPage {
   const root = asRecord(payload);
   if (root === null) throw new NewsFormatError("okx-news response is not an object");
 
-  const code = root.code;
-  if (code !== undefined && code !== null && String(code) !== "0") {
+  if (root.code === undefined || root.code === null) throw new NewsFormatError("okx-news response has no code");
+  const code = String(root.code);
+  if (code !== "0") {
     const msg = (asText(root.msg) ?? "").trim().slice(0, MAX_ERROR_MSG_LENGTH);
-    throw new NewsFormatError(`okx-news returned code ${String(code).slice(0, 20)}${msg === "" ? "" : `: ${msg}`}`);
+    throw new NewsFormatError(`okx-news returned code ${code.slice(0, 20)}${msg === "" ? "" : `: ${msg}`}`);
   }
 
   const list = findNewsList(root);
