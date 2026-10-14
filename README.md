@@ -197,6 +197,7 @@ done
    - `…000013_webhook_subscriptions.sql`：`alerts.severity` / `resolved_at`，`webhook_subscriptions`、`webhook_deliveries`，预过滤触发器与分发/管理函数
    - `…000014_health_alerts.sql`：健康检查的开启/恢复语义，改为每分钟执行
    - `…000015_edge_news_cron.sql`：`hive_invoke_edge_function`，`hive-jin10-poller`（30 秒）、`hive-webhook-dispatch`（每分钟）、`hive-news-prune`（每天 03:27 UTC）
+   - `…000016_webhook_auth_token.sql`：订阅可选的 Bearer 令牌（`auth_token_secret_id`，存于 Vault）；`sources` 过滤只作用于新闻，告警不再受其限制。增量迁移，不修改已有数据。
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -306,7 +307,8 @@ curl -X POST -H "Authorization: Bearer $HIVE_API_TOKEN" -H "content-type: applic
 - `agent_name`：`[a-z0-9_-]{1,64}`，唯一。
 - `url`：必须是 `https://`，最长 2048 字符。
 - `event_types`：`news`、`alert` 的非空子集，默认两者都要。
-- `filters`：每个键都可省略，省略或为空数组表示不限制。`sources` 匹配来源（如 `jin10`、`okx`）；`keywords` 为大小写不敏感的子串匹配，作用于新闻标题与正文或告警文本；`severities` 为 `info`/`warning`/`critical`；`alert_kinds` 为告警类型（如 `source_stale`）；`symbols` 为符号（如 `BTC`）。未知的键会被拒绝（`400`，并列出问题）。
+- `auth_token`：可选，16–512 个可见 ASCII 字符（不含空格）。设置后每次投递都带 `Authorization: Bearer <auth_token>`，同时保留 HMAC 签名头。它与签名密钥一样存放在 Vault 中，**只写不读**：创建、更新时可以提交，任何响应都不会返回。PATCH 时省略表示保留原值，传 `null` 表示清除。
+- `filters`：每个键都可省略，省略或为空数组表示不限制。`sources` 只过滤新闻来源（如 `jin10`、`okx`），告警不受它限制；`keywords` 为大小写不敏感的子串匹配，作用于新闻标题与正文或告警文本；`severities` 为 `info`/`warning`/`critical`；`alert_kinds` 为告警类型（如 `source_stale`）；`symbols` 为符号（如 `BTC`）。未知的键会被拒绝（`400`，并列出问题）。
 - `secret`：可选，32–256 个字符。省略时由服务端生成并在响应的 `signing_secret` 中返回一次。
 - `enabled`：默认 `true`。
 
@@ -319,6 +321,7 @@ x-hive-event: news            # news | alert
 x-hive-delivery-id: 1234
 x-hive-timestamp: 1760356800  # unix 秒
 x-hive-signature: sha256=<hex>
+authorization: Bearer <auth_token>   # 仅当订阅设置了 auth_token
 
 {"delivery_id":1234,"event":"news","created_at":"2026-10-13T12:00:00.000Z","data":{...}}
 ```
