@@ -5,7 +5,7 @@ import { parseOkxNewsPage } from "./okx-news.js";
 const NOW = Date.parse("2026-10-13T12:00:00.000Z");
 const CTIME = String(Date.parse("2026-10-13T11:59:00.000Z"));
 
-const page = (details: unknown[]) => ({ details, nextCursor: "" });
+const page = (details: unknown[]) => ({ code: "0", msg: "", data: [{ details, nextCursor: "" }] });
 
 describe("parseOkxNewsPage", () => {
   it("maps a high-importance entry to a normalised okx-news item", () => {
@@ -109,8 +109,11 @@ describe("parseOkxNewsPage", () => {
     expect(item?.author).toHaveLength(120);
   });
 
-  it("throws NewsFormatError when the envelope is missing, not an object, or reports a non-zero code", () => {
-    expect(() => parseOkxNewsPage({ data: [] })).toThrow(NewsFormatError);
+  it("throws NewsFormatError when the envelope has no news array, is not an object, or reports a non-zero code", () => {
+    expect(() => parseOkxNewsPage({ items: [] })).toThrow(NewsFormatError);
+    expect(() => parseOkxNewsPage({ details: [] })).toThrow("okx-news response has no code");
+    expect(() => parseOkxNewsPage({ code: 0, details: [] })).not.toThrow();
+    expect(() => parseOkxNewsPage({ code: "0", msg: "", data: { totalPage: "1" } })).toThrow(NewsFormatError);
     expect(() => parseOkxNewsPage("<html>blocked</html>")).toThrow(NewsFormatError);
     expect(() => parseOkxNewsPage({ code: "51000", msg: "param error", details: [] })).toThrow(/code 51000/);
   });
@@ -133,5 +136,126 @@ describe("parseOkxNewsPage", () => {
         score: 1,
       },
     ]);
+  });
+});
+
+describe("parseOkxNewsPage envelope shapes", () => {
+  const entry = (id: string, content = `内容 ${id}`) => ({ id, cTime: CTIME, content, importance: "high" });
+  const v5 = (data: unknown) => ({ code: "0", msg: "", data });
+
+  it("reads the live shape: items are data[0].details, with nextCursor beside them", () => {
+    const result = parseOkxNewsPage(
+      { code: "0", msg: "", data: [{ details: [entry("1"), entry("2")], nextCursor: "cursor-abc" }] },
+      NOW,
+    );
+    expect(result.items.map((item) => item.externalId)).toEqual(["1", "2"]);
+    expect(result.rawCount).toBe(2);
+    expect(result.oldestMs).toBe(Date.parse("2026-10-13T11:59:00.000Z"));
+  });
+
+  it("reads only data[0].details when data holds several pages", () => {
+    const result = parseOkxNewsPage(
+      { code: "0", msg: "", data: [{ details: [entry("1")] }, { details: [entry("2"), entry("3")] }] },
+      NOW,
+    );
+    expect(result.items.map((item) => item.externalId)).toEqual(["1"]);
+    expect(result.rawCount).toBe(1);
+  });
+
+  it("reads the news array from top-level details, the legacy shape", () => {
+    const result = parseOkxNewsPage({ code: "0", details: [entry("1"), entry("2")], nextCursor: "" }, NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["1", "2"]);
+    expect(result.rawCount).toBe(2);
+  });
+
+  it("reads an OKX v5 envelope whose data is the array of items", () => {
+    const result = parseOkxNewsPage({ code: "0", msg: "", data: [entry("1"), entry("2"), entry("3")] }, NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["1", "2", "3"]);
+    expect(result.rawCount).toBe(3);
+    expect(result.oldestMs).toBe(Date.parse("2026-10-13T11:59:00.000Z"));
+  });
+
+  it("accepts an empty data array as an empty page", () => {
+    expect(parseOkxNewsPage({ code: "0", msg: "", data: [] }, NOW)).toEqual({ items: [], rawCount: 0, oldestMs: null });
+  });
+
+  it("reads the items from data[0].details when data is a list of one page", () => {
+    const result = parseOkxNewsPage(v5([{ details: [entry("1"), entry("2")], nextCursor: "" }]), NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["1", "2"]);
+    expect(result.rawCount).toBe(2);
+  });
+
+  it.each(["details", "list", "newsList", "articles"])("reads the items from data.%s", (key) => {
+    const result = parseOkxNewsPage(v5({ totalPage: "1", [key]: [entry("9")] }), NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["9"]);
+    expect(result.rawCount).toBe(1);
+  });
+
+  it("prefers top-level details over data when both are arrays", () => {
+    const result = parseOkxNewsPage({ code: "0", details: [entry("top")], data: [entry("data")] }, NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["top"]);
+  });
+
+  it("prefers data.details over data.list when both are present", () => {
+    const result = parseOkxNewsPage(v5({ details: [entry("d")], list: [entry("l")] }), NOW);
+    expect(result.items.map((item) => item.externalId)).toEqual(["d"]);
+  });
+
+  it("returns the OKX msg with a non-zero code, so the degraded reason says why", () => {
+    expect(() => parseOkxNewsPage({ code: "50111", msg: "Invalid OK-ACCESS-KEY", data: [] })).toThrow(
+      "okx-news returned code 50111: Invalid OK-ACCESS-KEY",
+    );
+    expect(() => parseOkxNewsPage({ code: 50103, msg: "" })).toThrow("okx-news returned code 50103");
+  });
+
+  it("names the envelope keys but no values when the array path is unknown", () => {
+    const secretLike = "SECRET-NEWS-BODY-TEXT";
+    let message = "";
+    try {
+      parseOkxNewsPage({ code: "0", msg: "", data: { totalPage: "2", ts: "1760000000000", summary: secretLike } });
+    } catch (error) {
+      message = error instanceof Error ? error.message : "";
+    }
+    expect(message).toContain("okx-news response has no news array");
+    expect(message).toContain("top-level keys: code,msg,data");
+    expect(message).toContain("totalPage,ts,summary");
+    expect(message).not.toContain(secretLike);
+    expect(message).not.toContain("1760000000000");
+  });
+
+  it("names the first item's keys when a data array holds no usable news", () => {
+    expect(() => parseOkxNewsPage({ code: "0", data: [{ ts: "1", cursor: "x" }] })).toThrow(
+      "okx-news response contained no usable news items (first item keys: ts,cursor)",
+    );
+  });
+
+  it("throws when a list-shaped page holds only unusable entries", () => {
+    expect(() => parseOkxNewsPage(v5([{ details: [{ id: "", content: "x" }] }]), NOW)).toThrow(NewsFormatError);
+  });
+
+  it("accepts the alias field names that OKX variants are known to use", () => {
+    const [item] = parseOkxNewsPage(
+      v5([
+        {
+          newsId: 77,
+          createTime: String(Date.parse("2026-10-13T11:58:00.000Z")),
+          summary: "摘要",
+          importance: "high",
+          url: "https://www.okx.com/zh-hans/feed/post/77",
+          authors: ["Reuters"],
+        },
+      ]),
+      NOW,
+    ).items;
+    expect(item).toEqual({
+      source: "okx-news",
+      externalId: "77",
+      title: null,
+      body: "摘要",
+      url: "https://www.okx.com/zh-hans/feed/post/77",
+      author: "Reuters",
+      publishedAt: "2026-10-13T11:58:00.000Z",
+      important: true,
+    });
   });
 });
