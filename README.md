@@ -80,6 +80,28 @@ select count(*) as delivered,
  where event_type = 'news' and status = 'delivered' and delivered_at > now() - interval '1 day';
 ```
 
+## 推送优先级与陈旧标记（webhook 卫生）
+
+`webhook_deliveries` 按事件分为两档，见 `supabase/migrations/20261014000001_webhook_priority.sql`（`hive_delivery_policy` 为唯一来源）：
+
+- **critical**：全部快讯，以及 `fill`、`near_sl`、`position`、`order_state`、`premium_pulse`、`candle_close_break`（突破）、`price_cross` 告警。领取时优先，永不丢弃。
+- **bulk**：其余告警（如 `volume_spike`、`pct_move` 与 5m 扫描类）。在预算紧张时延后到下一轮。超过 `expires_at`（入库后 15 分钟）仍未送达的，标记为 `expired` 且不再发送。
+
+每条投递的 `data` 中都带有以下字段，由分发函数在发送时计算（`packages/core/src/webhook.ts` 的 `deliveryFlags`），生产者无法覆盖：
+
+| 字段 | 含义 |
+| --- | --- |
+| `priority` | `critical` 或 `bulk` |
+| `event_ts` | 事件时间（告警为 `event_ts` 或入库时间，快讯为 `published_at`），可知时才有 |
+| `stale` | 事件时间距发送超过阈值：`fill` 60 秒，其他关键告警 120 秒，快讯与 bulk 300 秒 |
+| `replay` | 从入库到发送超过 30 秒（积压重放、cron 兜底或重试后的投递） |
+
+**接收方约定**：`stale` 或 `replay` 为 `true` 时，不得下单或改单，只可记账。同一 `delivery_id` 可能因重试而重复收到，请按 `delivery_id` 去重。
+
+关键告警（`alerts` 插入且命中 critical 订阅）在同一事务内只触发一次分发函数（`hive_invoke_edge_function`），不必等待 30 秒的 cron。cron 仍是兜底。分发函数超过预算时，尚未发送的投递通过 `hive_webhook_release` 退回待发送状态，并返还本次领取计入的尝试次数。
+
+部署顺序：先执行迁移，再部署 `webhook-dispatcher`（新分发函数依赖 `hive_webhook_release` 与新的领取返回列）。无需新增订阅行，除非要把关键事件单独发往一个 URL：此时新建订阅并用 `alert_kinds` 过滤即可。
+
 ## 目录
 
 ```

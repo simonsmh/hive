@@ -17,16 +17,25 @@ function due(overrides: Partial<DueDelivery> = {}): DueDelivery {
     payload: { type: "news", id: 1, title: "美联储" },
     attempts: 1,
     maxAttempts: 6,
+    priority: "critical",
+    eventTs: new Date(NOW_MS - 1_000).toISOString(),
+    createdAt: new Date(NOW_MS - 1_000).toISOString(),
+    staleAfterSeconds: 300,
     ...overrides,
   };
 }
 
-function fakeStore(items: DueDelivery[] = [due()], options: { markError?: Error; claimError?: Error } = {}) {
+function fakeStore(items: DueDelivery[] = [due()], options: { markError?: Error; claimError?: Error; releaseError?: Error } = {}) {
   const marks: { id: number; outcome: DeliveryOutcome }[] = [];
+  const released: number[][] = [];
   const store: DispatchStore = {
     async claim() {
       if (options.claimError) throw options.claimError;
       return items;
+    },
+    async release(ids) {
+      if (options.releaseError) throw options.releaseError;
+      released.push(ids);
     },
     async mark(id, outcome) {
       if (options.markError) throw options.markError;
@@ -36,7 +45,7 @@ function fakeStore(items: DueDelivery[] = [due()], options: { markError?: Error;
       return item && item.attempts >= item.maxAttempts ? "dead" : "pending";
     },
   };
-  return { store, marks };
+  return { store, marks, released };
 }
 
 interface Sent {
@@ -238,18 +247,22 @@ Deno.test("delivers in parallel chunks and reports each outcome", async () => {
 
 function pagedStore(pages: DueDelivery[][]) {
   const marks: { id: number; outcome: DeliveryOutcome }[] = [];
+  const released: number[][] = [];
   let claims = 0;
   const store: DispatchStore = {
     async claim() {
       claims += 1;
       return pages[claims - 1] ?? [];
     },
+    async release(ids) {
+      released.push(ids);
+    },
     async mark(id, outcome) {
       marks.push({ id, outcome });
       return outcome.ok ? "delivered" : "pending";
     },
   };
-  return { store, marks, claims: () => claims };
+  return { store, marks, released, claims: () => claims };
 }
 
 Deno.test("drains a backlog larger than one batch within a single run", async () => {
@@ -289,9 +302,130 @@ Deno.test("keeps the delivered rows when a later claim in the same run fails", a
     async mark() {
       return "delivered";
     },
+    async release() {},
   };
   const { impl } = fakeFetch(() => new Response(null, { status: 200 }));
   const response = await dispatcher(store, impl, { batchSize: 2, concurrency: 2 })(trigger());
   strictEqual(response.status, 200);
   strictEqual((await response.json()).delivered, 2);
+});
+
+const iso = (ms: number) => new Date(ms).toISOString();
+
+function sentData(sent: Sent[]): Record<string, unknown> {
+  return JSON.parse(sent[0]!.body).data;
+}
+
+Deno.test("a delayed critical fill is sent stale and replay, keeps its event_ts, and cannot clear the flags itself", async () => {
+  const eventMs = NOW_MS - 90_000;
+  const { store } = fakeStore([
+    due({
+      eventType: "alert",
+      priority: "critical",
+      staleAfterSeconds: 60,
+      eventTs: iso(eventMs),
+      createdAt: iso(NOW_MS - 80_000),
+      payload: { type: "alert", kind: "fill", stale: false, replay: false },
+    }),
+  ]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  const data = sentData(sent);
+  strictEqual(data.stale, true);
+  strictEqual(data.replay, true);
+  strictEqual(data.event_ts, iso(eventMs));
+  strictEqual(data.priority, "critical");
+  strictEqual(data.kind, "fill");
+});
+
+Deno.test("a live critical delivery is sent with stale and replay both false", async () => {
+  const { store } = fakeStore([due({ priority: "critical", staleAfterSeconds: 60, eventTs: iso(NOW_MS - 2_000), createdAt: iso(NOW_MS - 2_000) })]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  const data = sentData(sent);
+  strictEqual(data.stale, false);
+  strictEqual(data.replay, false);
+});
+
+Deno.test("a critical delivery that waited in the queue is flagged replay even when its event is still fresh", async () => {
+  const { store } = fakeStore([due({ priority: "critical", staleAfterSeconds: 120, eventTs: iso(NOW_MS - 40_000), createdAt: iso(NOW_MS - 40_000) })]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  const data = sentData(sent);
+  strictEqual(data.stale, false);
+  strictEqual(data.replay, true);
+});
+
+Deno.test("every delayed critical delivery carries stale or replay, so a backlog never looks fresh", async () => {
+  for (const lagSeconds of [5, 31, 90, 150, 400]) {
+    const staleAfterSeconds = 120;
+    const { store } = fakeStore([
+      due({ priority: "critical", staleAfterSeconds, eventTs: iso(NOW_MS - lagSeconds * 1000), createdAt: iso(NOW_MS - lagSeconds * 1000) }),
+    ]);
+    const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+    await dispatcher(store, impl)(trigger());
+    const data = sentData(sent);
+    const delayed = lagSeconds > 30 || lagSeconds > staleAfterSeconds;
+    strictEqual(data.stale || data.replay, delayed, `lag ${lagSeconds}s`);
+  }
+});
+
+Deno.test("a delivery whose event time is unknown is treated as stale", async () => {
+  const { store } = fakeStore([due({ priority: "critical", staleAfterSeconds: 60, eventTs: null, createdAt: iso(NOW_MS - 90_000) })]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  strictEqual(sentData(sent).stale, true);
+});
+
+Deno.test("defers bulk deliveries once the budget is tight, and still sends the critical ones", async () => {
+  let clock = NOW_MS;
+  const items = [due({ deliveryId: 1 }), due({ deliveryId: 2, priority: "bulk" }), due({ deliveryId: 3 })];
+  const { store, marks, released } = fakeStore(items);
+  const impl = (async () => {
+    clock += 80_000;
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  const body = await (await dispatcher(store, impl, { now: () => clock, concurrency: 1, batchSize: 3, budgetMs: 90_000, requestTimeoutMs: 8_000 })(trigger())).json();
+  deepStrictEqual(marks.map((m) => m.id), [1, 3]);
+  deepStrictEqual(released, [[2]]);
+  strictEqual(body.deferred, 1);
+  strictEqual(body.delivered, 2);
+  strictEqual(body.skipped, 0);
+  strictEqual(body.status, "ok");
+});
+
+Deno.test("releases whatever the budget ran out before sending, and reports the run as partial", async () => {
+  let clock = NOW_MS;
+  const items = [due({ deliveryId: 1 }), due({ deliveryId: 2 })];
+  const { store, marks, released } = fakeStore(items);
+  const impl = (async () => {
+    clock += 100_000;
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  const body = await (await dispatcher(store, impl, { now: () => clock, concurrency: 1, batchSize: 2, budgetMs: 90_000, requestTimeoutMs: 8_000 })(trigger())).json();
+  deepStrictEqual(marks.map((m) => m.id), [1]);
+  deepStrictEqual(released, [[2]]);
+  strictEqual(body.skipped, 1);
+  strictEqual(body.status, "partial");
+});
+
+Deno.test("a failed release is logged and does not stop the run", async () => {
+  let clock = NOW_MS;
+  const logged: string[] = [];
+  const { store, marks } = fakeStore([due({ deliveryId: 1 }), due({ deliveryId: 2, priority: "bulk" })], { releaseError: new Error("db down") });
+  const impl = (async () => {
+    clock += 80_000;
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  const response = await dispatcher(store, impl, {
+    now: () => clock,
+    concurrency: 1,
+    batchSize: 2,
+    budgetMs: 90_000,
+    requestTimeoutMs: 8_000,
+    log: (message) => logged.push(message),
+  })(trigger());
+  strictEqual(response.status, 200);
+  deepStrictEqual(marks.map((m) => m.id), [1]);
+  ok(logged.some((message) => message.includes("release failed for 1 deliveries")));
 });

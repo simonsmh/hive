@@ -44,3 +44,38 @@ Deno.test("claim maps the decrypted bearer token and leaves it null when absent"
   strictEqual(due[1]!.authToken, null);
   strictEqual(due[1]!.attempts, 2);
 });
+
+Deno.test("claim maps priority, event time and stale threshold, and treats an unknown priority as critical", async () => {
+  const row = (priority: string) => ({
+    delivery_id: 5,
+    agent_name: "grok-bot",
+    url: "https://grok.example.com/hook",
+    secret: "signing-secret-0123456789abcdef",
+    auth_token: null,
+    event_type: "alert",
+    payload: { type: "alert", kind: "fill" },
+    attempts: 1,
+    max_attempts: 6,
+    priority,
+    event_ts: "2026-10-14T12:00:00+00:00",
+    created_at: "2026-10-14T12:00:01+00:00",
+    stale_after_seconds: 60,
+  });
+  const { fetchImpl } = fakeRpc([row("bulk"), row("critical"), row("surprise")]);
+  const store = createRestDispatchStore({ supabaseUrl: "https://project.supabase.co", serviceKey: "service-key", fetchImpl });
+  const due = await store.claim(20, 120);
+  deepStrictEqual(due.map((d) => d.priority), ["bulk", "critical", "critical"]);
+  strictEqual(due[0]!.eventTs, "2026-10-14T12:00:00+00:00");
+  strictEqual(due[0]!.createdAt, "2026-10-14T12:00:01+00:00");
+  strictEqual(due[0]!.staleAfterSeconds, 60);
+});
+
+Deno.test("release posts the claimed ids to hive_webhook_release and skips the call when there are none", async () => {
+  const { fetchImpl, calls } = fakeRpc([]);
+  const store = createRestDispatchStore({ supabaseUrl: "https://project.supabase.co", serviceKey: "service-key", fetchImpl });
+  await store.release([]);
+  strictEqual(calls.length, 0);
+  await store.release([7, 9]);
+  strictEqual(calls[0]!.url, "https://project.supabase.co/rest/v1/rpc/hive_webhook_release");
+  deepStrictEqual(calls[0]!.body, { p_delivery_ids: [7, 9] });
+});

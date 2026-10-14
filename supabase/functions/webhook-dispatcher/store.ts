@@ -20,6 +20,10 @@ interface ClaimRow {
   payload: unknown;
   attempts: number;
   max_attempts: number;
+  priority: string;
+  event_ts: string | null;
+  created_at: string;
+  stale_after_seconds: number | string;
 }
 
 /**
@@ -61,7 +65,16 @@ export function createRestDispatchStore(options: RestStoreOptions): DispatchStor
         payload: row.payload,
         attempts: Number(row.attempts),
         maxAttempts: Number(row.max_attempts),
+        priority: row.priority === "bulk" ? "bulk" : "critical",
+        eventTs: row.event_ts ?? null,
+        createdAt: row.created_at,
+        staleAfterSeconds: Number(row.stale_after_seconds),
       }));
+    },
+
+    async release(deliveryIds: number[]): Promise<void> {
+      if (deliveryIds.length === 0) return;
+      await rpc("hive_webhook_release", { p_delivery_ids: deliveryIds });
     },
 
     async mark(deliveryId: number, outcome: DeliveryOutcome): Promise<string> {
