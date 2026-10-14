@@ -19,6 +19,7 @@ const FUNCTIONS = {
   "okx-news-poller": ["auth", "news", "okx-news"],
   "webhook-dispatcher": ["auth", "webhook"],
   "alert-evaluator": ["types", "alerts", "auth"],
+  "yahoo-collector": ["types", "okx", "symbols", "auth", "collector", "yahoo", "yahoo-cycle"],
 };
 
 function rewrite(name, source, allowedLocal) {

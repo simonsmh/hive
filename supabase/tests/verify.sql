@@ -615,4 +615,66 @@ begin
 end
 $$;
 
+-- Yahoo collector: schedule, seeded rows, per-source lease, writes under source 'yahoo', and symbol mapping.
+do $$
+declare
+  v_holder uuid := gen_random_uuid();
+  v_count integer;
+  v_price numeric;
+  v_rows integer;
+begin
+  perform 1 from cron.job where jobname = 'hive-yahoo-collector' and schedule = '*/2 * * * *'
+     and command like '%yahoo-collector%';
+  if not found then raise exception 'pg_cron job hive-yahoo-collector (every 2 minutes, yahoo-collector) missing'; end if;
+
+  perform 1 from public.collector_state where source = 'yahoo';
+  if not found then raise exception 'collector_state has no yahoo row'; end if;
+  perform 1 from public.source_health where source = 'yahoo' and max_staleness_minutes = 30 and enabled = false;
+  if not found then raise exception 'source_health yahoo should be seeded disabled with 30 minutes staleness'; end if;
+
+  if has_function_privilege('anon', 'public.hive_collector_upsert_candles(text,text,text,jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_collector_begin(text,uuid,integer)', 'EXECUTE') then
+    raise exception 'yahoo collector RPCs must not be executable by client roles';
+  end if;
+
+  -- Lease is per source: the okx lease taken earlier does not block yahoo, and yahoo's own lease is exclusive.
+  if not public.hive_collector_begin('yahoo', v_holder, 120) then raise exception 'yahoo lease should be granted while okx holds its lease'; end if;
+  if public.hive_collector_begin('yahoo', gen_random_uuid(), 120) then raise exception 'yahoo lease granted while another run holds it'; end if;
+  perform public.hive_collector_finish('yahoo', v_holder, 'ok', 0, '{"successes": 1}'::jsonb);
+  if not public.hive_collector_begin('yahoo', gen_random_uuid(), 120) then raise exception 'yahoo lease should be free after finish'; end if;
+
+  -- Quotes and candles land under source 'yahoo' and do not touch the okx rows.
+  perform public.hive_collector_upsert_quote('VERIFY', 'yahoo', 55, 1000000002000);
+  perform public.hive_collector_upsert_quote('VERIFY', 'yahoo', 54, 1000000001000);
+  select price into v_price from public.quotes_latest where symbol = 'VERIFY' and source = 'yahoo';
+  if v_price <> 55 then raise exception 'yahoo quote guard failed: expected 55, got %', v_price; end if;
+  v_rows := public.hive_collector_upsert_candles('VERIFY', 'yahoo', '1D',
+    '[{"ts":1000000000000,"open":1,"high":2,"low":0.5,"close":1.5,"volume":10,"vol_ccy":0,"confirmed":true}]'::jsonb);
+  if v_rows <> 1 then raise exception 'expected 1 yahoo daily candle written, got %', v_rows; end if;
+  select count(*) into v_count from public.candles where symbol = 'VERIFY' and source = 'yahoo' and interval = '1D';
+  if v_count <> 1 then raise exception 'yahoo daily candle not stored under source yahoo'; end if;
+
+  -- Health: failure accumulates against yahoo only, and success resets it.
+  perform public.hive_collector_record_failure('yahoo', 'probe failure');
+  perform public.hive_collector_record_failure('yahoo', 'probe failure again');
+  select consecutive_failures into v_count from public.source_health where source = 'yahoo';
+  if v_count < 2 then raise exception 'yahoo consecutive_failures did not accumulate'; end if;
+  perform public.hive_collector_record_success('yahoo');
+  select consecutive_failures into v_count from public.source_health where source = 'yahoo';
+  if v_count <> 0 then raise exception 'yahoo success did not reset source_health'; end if;
+
+  -- Symbol mapping: every Yahoo-tracked symbol has a yahoo_symbol, and SKHY stays OKX-only.
+  perform 1 from public.symbol_map
+   where symbol in ('NVDA', 'BTC', 'XAU', 'BZ', 'ETH') and enabled and yahoo_symbol is not null;
+  if not found then raise exception 'symbol_map is missing yahoo_symbol for a seeded symbol'; end if;
+  perform 1 from public.symbol_map where symbol = 'SKHY' and yahoo_symbol is null;
+  if not found then raise exception 'SKHY must keep a null yahoo_symbol (OKX-only)'; end if;
+
+  -- Edge invoker: the yahoo job reaches the function once the Vault secrets from the news block exist.
+  if public.hive_invoke_edge_function('yahoo-collector') is null then raise exception 'yahoo-collector invocation was not queued'; end if;
+
+  raise notice 'verify.sql: yahoo collector checks passed';
+end
+$$;
+
 rollback;

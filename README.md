@@ -4,7 +4,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 
 > **采集已迁移到 Supabase 免费额度内的 Edge Function**（`supabase/functions/okx-collector`），不再需要付费的 Railway 常驻 Worker。`apps/worker` 保留为**可选 / 遗留**实现，默认不再部署。两者不要同时运行，见下文。
 
-当前为 **阶段 2**：OKX 行情采集、Jin10 快讯轮询、OKX Orbit 重要快讯轮询、数据源过期告警（含恢复）、webhook 推送（HMAC 签名、退避重试、投递记录）、仪表盘与管理 API。X（Twitter）不接入，见「范围说明」。
+当前为 **阶段 2**：OKX 行情采集、Yahoo Finance 行情采集（部署后启用，见「部署 > Yahoo 行情」）、Jin10 快讯轮询、OKX Orbit 重要快讯轮询、数据源过期告警（含恢复）、webhook 推送（HMAC 签名、退避重试、投递记录）、仪表盘与管理 API。X（Twitter）不接入，见「范围说明」。
 
 ## 架构
 
@@ -46,6 +46,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。分发函数由 pg_cron 每 30 秒调用一次作为兜底，并在新快讯入库后被唤醒。每次运行按 `next_attempt_at` 取出到期投递，只要剩余预算足够就持续领取整批，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
 - **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每分钟调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
 - **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
+- **Yahoo 行情（supabase/functions/yahoo-collector）**：pg_cron 每 2 分钟调用一次（`hive-yahoo-collector`，每天 720 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `yahoo_symbol` 非空的符号，请求 Yahoo 公开图表接口 `/v8/finance/chart/{yahoo_symbol}`，无需密钥。每个符号每次运行发起一次 `interval=1m&range=1d&includePrePost=true` 请求，同时得到最新报价（最新 1m 收盘价）与最近 60 根 1m K 线；日线（`interval=1d&range=3mo`）每个符号每小时至多请求一次。数据经 `hive_collector_*` 写入，`source = 'yahoo'`。租约使用 `collector_state` 中的 `yahoo` 行，与 OKX 互不影响。遇到 429 或 403 时本次运行不再发起新请求，并退避 10 分钟。`source_health.yahoo` 默认禁用，见「部署 > Yahoo 行情」。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
 
@@ -66,7 +67,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **积压**：每次运行循环领取整批（每批 20 条，4 并发）。只有剩余预算（90 秒）能覆盖最坏一批（约 40 秒）时才继续领取，因此不会留下未处理且被租约锁住的投递。
 - **重试**：失败后按 30 秒起的指数退避，兜底 cron 的 30 秒粒度不会额外拉长重试。
 - **不调整的部分**：轮询仍为 30 秒，避免把非官方 Jin10 接口的请求频率翻倍。
-- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。采集、轮询、分发兜底各每天 2,880 次，分发唤醒最多每天 2,880 次，合计最多约 34.5 万次/月。
+- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天 12,240 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、Yahoo 行情 720），约 36.7 万次/月。分发唤醒最多每天再加 2,880 次（约 8.6 万次/月），上限约 45.4 万次/月，仍低于 50 万次。新增 Edge Function 或提高调度频率前请重新计算。
 
 生产环境观测最近一天的快讯送达延迟（`published_at` 为 Jin10 快讯时间，`delivered_at` 为首次成功投递时间）：
 
@@ -93,8 +94,9 @@ supabase/
   functions/okx-news-poller/   Edge Function（Deno）：OKX Orbit 重要快讯轮询与入库
   functions/webhook-dispatcher/ Edge Function（Deno）：webhook 签名、投递与退避
   functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
+  functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
-  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–21 为阶段 2）
+  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–22 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
   apply-migrations.sh  依次应用迁移
@@ -114,9 +116,10 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator、yahoo-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
+| `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
 | `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` | okx-news-poller（Edge secret） | 只读 OKX API Key 的三项凭据，用于签名快讯请求。**必须三者同时设置**，否则不签名。只会在 okx-news-poller 中读取，不要提交到仓库 |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` | okx-collector | Supabase 自动注入到 Edge Function，无需手动设置 |
 | `SUPABASE_DB_URL` | worker（可选 / 遗留） | 直连 Postgres 的连接串。**必须使用 Session pooler（5432）或直连**，不能用 Transaction pooler（6543），因为 Worker 依赖会话级 advisory lock |
@@ -138,7 +141,7 @@ pg_cron 的任务本身不保存任何密钥。每次触发时，`hive_okx_colle
 
 ### Vault 密钥（新闻与推送调度）
 
-`hive_invoke_edge_function(name)` 被 `hive-jin10-poller`、`hive-webhook-dispatch`、`hive-alert-evaluator` 等 pg_cron 任务共用。它从 Vault 读取以下两个密钥，cron 任务本身不保存任何密钥。
+`hive_invoke_edge_function(name)` 被 `hive-jin10-poller`、`hive-webhook-dispatch`、`hive-alert-evaluator`、`hive-yahoo-collector` 等 pg_cron 任务共用。它从 Vault 读取以下两个密钥，cron 任务本身不保存任何密钥。
 
 | Vault 名称 | 内容 |
 | --- | --- |
@@ -154,6 +157,14 @@ pg_cron 的任务本身不保存任何密钥。每次触发时，`hive_okx_colle
 - 若 `okx_inst_id` 为空，函数会拉取 OKX 公开接口 `/api/v5/public/instruments?instType=SWAP`，选取处于 `live` 状态的 `<SYMBOL>-USDT-SWAP`（找不到时回退 `-USD-SWAP`），并写回 `symbol_map`。实例列表在内存中缓存 15 分钟。
 - 例如 `BTC-USDT-SWAP`、`XAU-USDT-SWAP`、`ETH-USDT-SWAP`。
 
+### Yahoo 代码映射（yahoo_symbol）
+
+- `symbol_map.yahoo_symbol` 决定 yahoo-collector 请求哪个 Yahoo 代码。为空的符号不采集 Yahoo 行情，只走 OKX。
+- 现有映射：`BZ` → `BZ=F`（布伦特原油期货）、`XAU` → `XAUUSD=X`、`BTC` → `BTC-USD`、`ETH` → `ETH-USD`；股票与 ETF 使用同名代码，如 `NVDA`、`MU`、`QQQ`。
+- **`SKHY` 保持为空**，仅 OKX。没有经过核实的 Yahoo 代码时不要填写，猜测的代码会采集到错误的标的。
+- 只接受 `[A-Za-z0-9.^=-]` 且不超过 24 个字符的代码，不合规的代码会被跳过并记录日志，其他符号照常采集。
+- 新增 Yahoo 行情（符号已在 `symbol_map` 中且启用）：`update public.symbol_map set yahoo_symbol = 'XYZ' where symbol = 'XYZ';`，下一次运行即生效。
+
 ## 数据约定
 
 - **日线使用 `1Dutc`**：OKX 的 `1D` 以 UTC+8 的 00:00 为一根 K 线的开盘（即 UTC 16:00）。采集请求的是 `1Dutc`（UTC 00:00），存储时 `interval = '1D'`。这样日期与星期判断都以 UTC 为准。
@@ -162,7 +173,7 @@ pg_cron 的任务本身不保存任何密钥。每次触发时，`hive_okx_colle
 - **Wilder ATR**：前 `period` 个真实波幅的简单平均作为初值，之后按 `(ATR·(n−1)+TR)/n` 平滑。
 - `candles.confirmed` 对应 OKX 的 `confirm` 字段，`1` 表示已收盘。
 - `quotes_latest` 每个 `(symbol, source)` 只保留最新一条。写入时只接受时间戳不早于已有记录的报价。
-- `v_spread` 视图：`yahoo` 与 `okx` 同一符号的报价差与百分比。阶段 1 只写入 `okx`，因此视图暂时为空，阶段 2 接入 `yahoo` 后生效。
+- `v_spread` 视图：`yahoo`（现货/标的参考价）与 `okx`（永续）同一符号的报价差与百分比。只有两个来源在 `quotes_latest` 中都有该符号的报价时才会出现一行，因此启用 yahoo-collector 后生效（见「部署 > Yahoo 行情」）。
 - **保留策略（`hive_run_retention`，每天 UTC 03:17）**：
   - 删除 30 天前的 `1m`、`5m`、`15m`、`1H` K 线。**`1D` 日线永久保留**。
   - 删除 30 天前的 `alerts`（级联删除其 `deliveries`），并删除 30 天前已投递或已死信的 `deliveries`。
@@ -201,7 +212,7 @@ psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/tests/verify.sql
 
 `verify.sql` 在事务内检查：所有表都开启了 RLS；匿名角色没有表权限；pgmq 队列与 pg_cron 任务已存在；webhook 密钥写入 Vault 且可解密；健康检查同一 15 分钟窗口内幂等；`candles` 与 `alerts` 的唯一约束生效；`v_spread` 可以计算价差。
 
-采集相关的检查同样在事务内完成：`hive_collector_*` 函数只允许 service role 执行；租约互斥且在退避期内拒绝运行；报价只接受不更旧的时间戳；K 线按主键幂等写入；保留任务删除 30 天前的分钟线但保留日线；`hive-okx-collector`（30 秒）与 `hive-retention` 任务已注册；未配置 Vault 时采集 tick 为空操作，配置后会排入一条 pg_net 请求。验证中使用的测试符号为 `VERIFY`，脚本最后回滚，不会留下数据。
+采集相关的检查同样在事务内完成：`hive_collector_*` 函数只允许 service role 执行；租约互斥且在退避期内拒绝运行；报价只接受不更旧的时间戳；K 线按主键幂等写入；保留任务删除 30 天前的分钟线但保留日线；`hive-okx-collector`（30 秒）与 `hive-retention` 任务已注册；未配置 Vault 时采集 tick 为空操作，配置后会排入一条 pg_net 请求。验证中使用的测试符号为 `VERIFY`，脚本最后回滚，不会留下数据。Yahoo 相关检查包括：`hive-yahoo-collector`（每 2 分钟）已注册；租约按来源独立；`source = 'yahoo'` 的报价与日线写入；`yahoo_symbol` 映射正确，SKHY 保持为空。
 
 ## 本地开发
 
@@ -215,7 +226,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator; do
+for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -227,7 +238,7 @@ done
 ### Supabase（采集、新闻与推送）
 
 1. 在 Tokyo（ap-northeast-1）创建项目，Postgres 17，使用免费计划。记录 `<project-ref>`。
-2. 应用迁移（`scripts/apply-migrations.sh`，按文件名顺序）。全新项目执行 `20261013000001` 至 `20261013000020`；已部署阶段 1 的项目只需执行新增的 `20261013000011` 至 `20261013000020`：
+2. 应用迁移（`scripts/apply-migrations.sh`，按文件名顺序）。全新项目执行全部迁移；已部署阶段 1 的项目需执行 `20261013000011` 之后的迁移；已部署到 `…000021` 的项目只需执行 `…000022_yahoo_collector.sql`。各迁移的内容如下：
    - `…000011_news_source_enum.sql`：为 `market_source` 增加 `jin10`
    - `…000012_news_ingest.sql`：`news_items.author`、`source_health.jin10` 种子、`hive_news_ingest` 写入函数
    - `…000013_webhook_subscriptions.sql`：`alerts.severity` / `resolved_at`，`webhook_subscriptions`、`webhook_deliveries`，预过滤触发器与分发/管理函数
@@ -238,6 +249,7 @@ done
    - `…000019_okx_news_source_enum.sql`：为 `market_source` 增加 `okx-news`（须单独迁移，新枚举值不能在添加它的事务中使用）
    - `…000020_okx_news_ingest.sql`：`source_health.okx-news` 种子（5 分钟过期）、`hive_news_latest_published` 水位函数、允许 `okx-news` 的 `hive_news_ingest`，以及 `hive-okx-news-poller`（每分钟）
    - `…000021_alert_evaluator.sql`：`alert_rules.kind` 允许 `pct_move`；`SKHY` 写入 `symbol_map`（启用，幂等）；SNDK、MU、SKHY 的 `pct_move` 规则种子；`hive_alert_evaluator_record` 写入函数；`hive-alert-evaluator`（每分钟）
+   - `…000022_yahoo_collector.sql`：`collector_state` 与 `source_health` 的 `yahoo` 行（健康告警默认禁用）；`hive-yahoo-collector`（每 2 分钟）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -247,6 +259,7 @@ done
    supabase functions deploy okx-news-poller --no-verify-jwt
    supabase functions deploy webhook-dispatcher --no-verify-jwt
    supabase functions deploy alert-evaluator --no-verify-jwt
+   supabase functions deploy yahoo-collector --no-verify-jwt
    ```
 
    `--no-verify-jwt` 与 `supabase/config.toml` 中的 `verify_jwt = false` 保持一致。pg_net 不携带 Supabase JWT，因此每个函数都改用自己的共享密钥校验 Bearer，未通过校验的请求返回 401。
@@ -259,7 +272,7 @@ done
    supabase secrets set COLLECTOR_SECRET="$COLLECTOR_SECRET" EDGE_CRON_SECRET="$EDGE_CRON_SECRET"
    ```
 
-   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller 与 webhook-dispatcher 使用。可以设为相同值，但建议分开。okx-news-poller 还需要只读 OKX Key：`supabase secrets set OKX_API_KEY=… OKX_API_SECRET=… OKX_API_PASSPHRASE=…`（三者需同时设置）。
+   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator 与 yahoo-collector 使用。可以设为相同值，但建议分开。okx-news-poller 还需要只读 OKX Key：`supabase secrets set OKX_API_KEY=… OKX_API_SECRET=… OKX_API_PASSPHRASE=…`（三者需同时设置）。
 
 5. 写入 Vault（只需执行一次，SQL Editor 或 `psql`）。阶段 1 的两个密钥照旧；阶段 2 新增两个：
 
@@ -285,6 +298,45 @@ done
    `source_health` 中 `okx`、`jin10` 与 `okx-news` 的 `last_success_at` 应持续更新。`last_outcome` 为 `ok` 表示正常；`degraded` 表示部分请求或写入失败；`rate_limited` 表示 OKX 限流中。若未配置 Vault，`jin10` 与 `okx-news` 会在 5 分钟后各产生一条 `source_stale` 告警，这是预期行为。
 
 7. webhook 订阅通过管理 API 创建（见下文「Webhook 管理 API」），不要直接写表。
+
+### Yahoo 行情（yahoo-collector）
+
+yahoo-collector 写入 `source = 'yahoo'` 的报价与 K 线，不需要任何 API Key。迁移与函数部署完成后，它会自动运行，但健康告警默认关闭，需要确认数据正常后再手动启用。
+
+1. 应用迁移 `…000022_yahoo_collector.sql`，并部署 `yahoo-collector`（见上文第 2、3 步）。`EDGE_CRON_SECRET` 与 Vault 中的 `edge_cron_secret`、`edge_base_url` 沿用阶段 2 的配置，无需新增密钥。
+2. 等待约 4 分钟（两个调度周期），确认数据写入：
+
+   ```sql
+   select source, lease_holder is not null as leased, last_outcome, last_finished_at from public.collector_state where source = 'yahoo';
+   select source, enabled, consecutive_failures, last_error, last_success_at from public.source_health where source = 'yahoo';
+   select symbol, price, ts, updated_at from public.quotes_latest where source = 'yahoo' order by symbol;
+   select status_code, error_msg, created from net._http_response order by id desc limit 5;
+   ```
+
+   `last_outcome` 为 `ok` 表示正常。`rate_limited` 表示 Yahoo 限流，会退避 10 分钟后自动恢复。`quotes_latest` 中应出现各个 `yahoo_symbol` 对应的符号（如 `NVDA`、`BZ`、`XAU`、`BTC`、`ETH`）。
+3. 确认 `v_spread` 中有对应行（需要 `okx` 与 `yahoo` 的报价同时存在）。`SKHY` 没有 Yahoo 映射，不会出现在视图中，这是预期的：
+
+   ```sql
+   select symbol, okx_inst_id, yahoo_symbol, spot_price, perp_price, spread, spread_pct from public.v_spread order by symbol;
+   ```
+
+4. 第 2、3 步确认无误后启用健康告警：
+
+   ```sql
+   update public.source_health set enabled = true where source = 'yahoo';
+   ```
+
+   启用后，`hive_run_health_check()` 会在超过 30 分钟没有成功写入时产生 `source_stale` 告警。若要回退，把 `enabled` 改回 `false` 即可。
+
+**免费额度**：每天 720 次 Edge Function 调用（每 2 分钟一次），约 2.2 万次/月，远低于 50 万次的上限。
+
+**Yahoo 侧的请求量与限流**：每个符号每 2 分钟一次 1m 请求，11 个符号约 7,900 次/天，另加每小时一次的日线请求。Yahoo 没有公开的配额，限流按出口 IP 计算。开发环境探测时曾在首个成功请求后持续收到 429。Supabase Edge 出口 IP 上的表现尚未验证，因此第 2 步必须实际确认数据写入，不要直接启用告警。收到 429 或 403 时，本次运行停止请求并退避 10 分钟，`source_health.yahoo.last_error` 记录最后一个错误。
+
+**已知限制**：
+
+- 接口为非官方接口，字段或路径随时可能变化。格式不符时请求会记为失败，并在 `last_error` 中给出 Yahoo 返回的错误信息。
+- 若接口返回空数据（既无报价也无 K 线），本次运行既不写入也不记录失败，`source_health.yahoo` 不会更新。日线请求通常仍有数据，因此正常情况下不会误报；若长时间没有任何写入，启用后可能产生 `source_stale` 告警，确认后可暂时禁用。
+- `BZ=F`、`XAUUSD=X` 等代码含 `=`，请求时会做 URL 编码。Yahoo 是否接受编码后的代码，以第 2 步的实际写入结果为准。
 
 ### Vercel（apps/web）
 
@@ -466,7 +518,7 @@ Agent 集成建议：
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator` 五个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector` 六个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
@@ -481,5 +533,6 @@ Agent 集成建议：
 
 ## 后续计划
 
-- 接入其他数据源（如 `yahoo`），使 `v_spread` 生效。
+- Yahoo 行情的部署与启用步骤见「部署 > Yahoo 行情（yahoo-collector）」。
+- Stock 的美股简报（US brief）与推送标记切换，待 Yahoo 数据稳定后另行实现；A 股行情（同花顺、sina）不在本阶段范围内。
 - 成交回报的采集写入。
