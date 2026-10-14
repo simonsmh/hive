@@ -47,6 +47,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每分钟调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
 - **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
 - **Yahoo 行情（supabase/functions/yahoo-collector）**：pg_cron 每 2 分钟调用一次（`hive-yahoo-collector`，每天 720 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `yahoo_symbol` 非空的符号，请求 Yahoo 公开图表接口 `/v8/finance/chart/{yahoo_symbol}`，无需密钥。每个符号每次运行发起一次 `interval=1m&range=1d&includePrePost=true` 请求，同时得到最新报价（最新 1m 收盘价）与最近 60 根 1m K 线；日线（`interval=1d&range=3mo`）每个符号每小时至多请求一次。数据经 `hive_collector_*` 写入，`source = 'yahoo'`。租约使用 `collector_state` 中的 `yahoo` 行，与 OKX 互不影响。遇到 429 或 403 时本次运行不再发起新请求，并退避 10 分钟。`source_health.yahoo` 默认禁用，见「部署 > Yahoo 行情」。
+- **同花顺行情（supabase/functions/ths-collector，可选）**：pg_cron 每 2 分钟调用一次，只在北京时间工作日 09:15–15:15 请求上游。指数与个股报价写入 `quotes_latest`（`source = 'ths'`），涨跌停池、热门股、龙虎榜、竞价、涨跌家数等写入 `daily_snapshot`。默认关闭，部署步骤与调用预算见下文「部署 > ths 行情」。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
 
@@ -95,8 +96,9 @@ supabase/
   functions/webhook-dispatcher/ Edge Function（Deno）：webhook 签名、投递与退避
   functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
+  functions/ths-collector/     Edge Function（Deno）：同花顺（HiThink）行情、盘口池与交易日历
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
-  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–22 为阶段 2）
+  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–23 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
   apply-migrations.sh  依次应用迁移
@@ -116,11 +118,13 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator、yahoo-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
 | `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` | okx-news-poller（Edge secret） | 只读 OKX API Key 的三项凭据，用于签名快讯请求。**必须三者同时设置**，否则不签名。只会在 okx-news-poller 中读取，不要提交到仓库 |
+| `HITHINK_FINANCE_API_KEY` | ths-collector（Edge secret） | 同花顺（HiThink）REST 的 API Key，以请求头 `X-api-key` 发送。未配置时函数返回 500。只在 Edge secret 中设置，不要提交到仓库 |
+| `THS_BASE_URL` | ths-collector（Edge secret，可选） | 默认 `https://fuyao.aicubes.cn` |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` | okx-collector | Supabase 自动注入到 Edge Function，无需手动设置 |
 | `SUPABASE_DB_URL` | worker（可选 / 遗留） | 直连 Postgres 的连接串。**必须使用 Session pooler（5432）或直连**，不能用 Transaction pooler（6543），因为 Worker 依赖会话级 advisory lock |
 | `SUPABASE_DB_CA_CERT` | worker（可选 / 遗留） | 可选。数据库端点的 PEM 证书，配置后启用证书校验；未配置时接受未校验的 TLS 连接 |
@@ -213,6 +217,7 @@ psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/tests/verify.sql
 `verify.sql` 在事务内检查：所有表都开启了 RLS；匿名角色没有表权限；pgmq 队列与 pg_cron 任务已存在；webhook 密钥写入 Vault 且可解密；健康检查同一 15 分钟窗口内幂等；`candles` 与 `alerts` 的唯一约束生效；`v_spread` 可以计算价差。
 
 采集相关的检查同样在事务内完成：`hive_collector_*` 函数只允许 service role 执行；租约互斥且在退避期内拒绝运行；报价只接受不更旧的时间戳；K 线按主键幂等写入；保留任务删除 30 天前的分钟线但保留日线；`hive-okx-collector`（30 秒）与 `hive-retention` 任务已注册；未配置 Vault 时采集 tick 为空操作，配置后会排入一条 pg_net 请求。验证中使用的测试符号为 `VERIFY`，脚本最后回滚，不会留下数据。Yahoo 相关检查包括：`hive-yahoo-collector`（每 2 分钟）已注册；租约按来源独立；`source = 'yahoo'` 的报价与日线写入；`yahoo_symbol` 映射正确，SKHY 保持为空。
+ths 行情的检查同样在事务内完成：`symbol_map` 的 ths 种子与约束、`source_health` 的会话门控标记、交易时段判断、`daily_snapshot` 的写入与 `ths_` 前缀限制、清理函数、租约，以及 `hive-ths-collector` 与 `hive-ths-prune` 两个调度。
 
 ## 本地开发
 
@@ -226,7 +231,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector; do
+for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -250,6 +255,7 @@ done
    - `…000020_okx_news_ingest.sql`：`source_health.okx-news` 种子（5 分钟过期）、`hive_news_latest_published` 水位函数、允许 `okx-news` 的 `hive_news_ingest`，以及 `hive-okx-news-poller`（每分钟）
    - `…000021_alert_evaluator.sql`：`alert_rules.kind` 允许 `pct_move`；`SKHY` 写入 `symbol_map`（启用，幂等）；SNDK、MU、SKHY 的 `pct_move` 规则种子；`hive_alert_evaluator_record` 写入函数；`hive-alert-evaluator`（每分钟）
    - `…000022_yahoo_collector.sql`：`collector_state` 与 `source_health` 的 `yahoo` 行（健康告警默认禁用）；`hive-yahoo-collector`（每 2 分钟）
+   - `…000023_ths_collector.sql`：`symbol_map` 增加 `ths_code`、`ths_kind`、`ths_auction`（默认关闭）；`source_health.session_only`（ths 的过期告警只在交易时段判断）；`hive_run_health_check` 按该标记跳过窗口外的检查；`hive_collector_upsert_daily_snapshot` 与 `hive_prune_ths_snapshots`；`hive-ths-collector`（每 2 分钟）与 `hive-ths-prune`。全部幂等，`ths` 数据源保持关闭，直到按下文「ths 行情」启用。若 Yahoo 的 `…000022_yahoo_collector.sql` 尚未应用，先按顺序执行它。
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -260,6 +266,7 @@ done
    supabase functions deploy webhook-dispatcher --no-verify-jwt
    supabase functions deploy alert-evaluator --no-verify-jwt
    supabase functions deploy yahoo-collector --no-verify-jwt
+   supabase functions deploy ths-collector --no-verify-jwt
    ```
 
    `--no-verify-jwt` 与 `supabase/config.toml` 中的 `verify_jwt = false` 保持一致。pg_net 不携带 Supabase JWT，因此每个函数都改用自己的共享密钥校验 Bearer，未通过校验的请求返回 401。
@@ -337,6 +344,128 @@ yahoo-collector 写入 `source = 'yahoo'` 的报价与 K 线，不需要任何 A
 - 接口为非官方接口，字段或路径随时可能变化。格式不符时请求会记为失败，并在 `last_error` 中给出 Yahoo 返回的错误信息。
 - 若接口返回空数据（既无报价也无 K 线），本次运行既不写入也不记录失败，`source_health.yahoo` 不会更新。日线请求通常仍有数据，因此正常情况下不会误报；若长时间没有任何写入，启用后可能产生 `source_stale` 告警，确认后可暂时禁用。
 - `BZ=F`、`XAUUSD=X` 等代码含 `=`，请求时会做 URL 编码。Yahoo 是否接受编码后的代码，以第 2 步的实际写入结果为准。
+
+### ths 行情（supabase/functions/ths-collector，可选）
+
+用同花顺（HiThink）公开 REST 替代本地 hithink CLI 轮询，供 A 股推送巡检与盯盘使用。数据源默认关闭（`source_health.ths.enabled = false`，`symbol_map` 中的 ths 行也是 `enabled = false`），完成下列步骤后才开始采集。
+
+**接口与映射**
+
+- 与 `@hithink-tech/hithink-finance-cli` 使用同一套接口，基址 `https://fuyao.aicubes.cn`，请求头 `X-api-key`，只读。密钥只放在 Edge secret `HITHINK_FINANCE_API_KEY` 中。
+
+| 数据 | 接口 | 频率 | 写入 |
+| --- | --- | --- | --- |
+| 指数快照 | `/api/a-share-index/prices/snapshot?thscodes=` | 每轮 | `quotes_latest` |
+| 个股快照（`symbol_map` 中 `ths_kind = stock` 的已启用行） | `/api/a-share/prices/snapshot?thscodes=` | 每轮 | `quotes_latest` |
+| 涨停池 / 跌停池 / 炸板池 | `/api/a-share/special-data/limit-up-pool`、`limit-down-pool`、`limit-break-pool`（`page`、`size=200`，最多 5 页） | 每轮 | `daily_snapshot`：`ths_limit_up_pool` 等 |
+| 连板梯队 | `/api/a-share/special-data/limit-up-ladder` | 每轮 | `ths_limit_up_ladder` |
+| 热门股（小时） | `/api/a-share/special-data/hot-stock-list?period=hour` | 每轮 | `ths_hot_stock_hour` |
+| 热门股（日）、大涨榜（日）、异动、龙虎榜 | `hot-stock-list?period=day`、`skyrocket-list?period=day`、`anomaly-analysis-list`、`dragon-tiger-list` | 每 10 分钟 | `ths_hot_stock_day`、`ths_skyrocket_day`、`ths_anomaly_list`、`ths_dragon_tiger` |
+| 竞价基准 | `/api/a-share/auction/short-term-benchmark` | 每 10 分钟 | `ths_auction_benchmark` |
+| 竞价快照 | `/api/a-share/auction/snapshot?thscodes=…&stage=live\|final`（仅 `ths_auction = true` 的股票，单次最多 100 个代码） | 每轮，09:25 前 `live`，09:25–09:40 `final` | `ths_auction_live`、`ths_auction_final` |
+| 涨跌家数 | `/api/a-share/prices/snapshot?limit=100&offset=N`（分页，最多 100 页），按 `price_change_ratio_pct` 的符号统计 | 北京时间 15:00 之后每天一次 | `ths_breadth` |
+| 交易日历 | `/api/a-share/calendar/trading-days` | 每个北京日期缓存一次 | 不落库，只用于判断交易日 |
+
+**调度与门控**
+
+- pg_cron `hive-ths-collector` 每 2 分钟调用一次，UTC 表达式 `*/2 1-7 * * 1-5`，即北京时间工作日 09:00–15:58。函数内再按北京时间 09:15（含）至 15:15（不含）判断，窗口外直接返回 `skipped`，不访问上游。
+- 门控顺序：HTTP 方法 → `EDGE_CRON_SECRET` 是否配置 → Bearer → `HITHINK_FINANCE_API_KEY` 是否配置 → 交易时段 → `source_health.ths.enabled` → 交易日历 → 租约。
+- **交易日历与节假日**：日历包含当天则为交易日。若日历不含当天，且列表已覆盖到前一个工作日，则视为非交易日：记录一次成功心跳（更新 `last_success_at`，不记失败），返回 `non_trading_day`，不发起行情请求。日历拉取失败，或列表过旧（未覆盖到前一个工作日）时，按工作日照常轮询，避免陈旧日历让交易日停止采集。
+- **健康判断**：`source_health.ths.session_only = true`，`max_staleness_minutes = 10`。过期告警只在交易时段内判断（当前时刻与 10 分钟前都在窗口内），夜间、周末与节假日不会产生 `source_stale` 告警。
+- **竞价**：`auction_live` 在 09:25 前运行，`auction_final` 在 09:25–09:40 运行。两者只在存在 `ths_auction = true` 的股票时发起请求，代码数超过 100 时只取前 100 个。
+
+**上游预算与错误处理**
+
+- 单轮预算 25 秒，预算用尽后不再启动新任务；单个 HTTP 请求超时 6 秒。
+- 最多 4 个并发请求。每个 HTTP 调用对 429、5xx 与网络错误最多重试 3 次，指数退避，单次等待上限 4 秒。
+- 单个端点失败只记录该端点，其余端点照常执行，整轮结果为 `degraded`。只有全部端点都失败时，`source_health.ths` 才记为失败。
+- 限流（HTTP 429 或业务码 4001）：停止本轮新任务，`collector_state` 退避 300 秒，结果为 `rate_limited`。
+- 鉴权失败（HTTP 401/403 或业务码 2001/2003）：停止本轮，结果为 `auth_error`，不设退避。修复密钥后下一轮即可恢复。
+- 数据未就绪（业务码 3002，或快照缺少 `timestamp`）：记为 `not_ready`，不计入失败。
+- 租约 90 秒。函数在 `finally` 中释放租约，异常退出也不会阻塞后续 tick。
+
+**数据落地**
+
+- 报价只写 `quotes_latest`（`source = 'ths'`，按时间戳保护，旧报价不会覆盖新报价）。**不写 `candles`**，因此 ths 没有 K 线。
+- 池、梯队、热门、异动、龙虎榜、竞价与涨跌家数写入 `daily_snapshot`，主键 `(snapshot_date, kind)`，每天每种类型一行，每轮覆盖。`payload` 为 `{"fetched_at": …, "timestamp": …, "data": …}`，其中 `data` 为上游原始 JSON。数据库函数只接受 `ths_` 前缀的 kind，不会写入其他来源的行。
+- `hive_prune_ths_snapshots()` 每天 03:40 UTC 删除 30 天前的 `ths_` 行。
+
+**符号与竞价配置**
+
+迁移写入以下种子（均为 `enabled = false`、`ths_auction = false`）。只使用 HiThink 文档中出现过的代码：
+
+| symbol | ths_code | ths_kind |
+| --- | --- | --- |
+| `SH000001` | `000001.SH` | index |
+| `SZ399001` | `399001.SZ` | index |
+| `SH000300` | `000300.SH` | index |
+| `MOUTAI` | `600519.SH` | stock |
+| `WULIANGYE` | `000858.SZ` | stock |
+
+创业板指 `399006.SZ` 不在文档中，因此未写入种子。验证后可手动添加：
+
+```sql
+insert into public.symbol_map (symbol, enabled, ths_code, ths_kind) values ('SZ399006', true, '399006.SZ', 'index');
+```
+
+竞价快照需要显式开启。仅对股票生效，代码由 `ths_auction` 决定：
+
+```sql
+update public.symbol_map set ths_auction = true where symbol = 'MOUTAI';
+```
+
+**部署步骤**
+
+1. 应用迁移 `…000023_ths_collector.sql`（若 `…000022_yahoo_collector.sql` 尚未应用，先按顺序执行）。迁移幂等，执行后 ths 仍然关闭。
+2. 设置密钥（只在 Supabase 中保存，不要提交到仓库）：
+
+   ```bash
+   supabase secrets set HITHINK_FINANCE_API_KEY='<HiThink API Key>'
+   ```
+
+   `THS_BASE_URL` 可选，默认即可。
+3. 部署 Edge Function。与其他函数一样，pg_net 不携带 Supabase JWT，因此使用 `--no-verify-jwt`，并由函数自己校验 `EDGE_CRON_SECRET`：
+
+   ```bash
+   supabase functions deploy ths-collector --no-verify-jwt
+   ```
+
+4. 启用符号与数据源。先启用符号，再启用数据源：
+
+   ```sql
+   update public.symbol_map set enabled = true where ths_code is not null;
+   update public.source_health set enabled = true where source = 'ths';
+   ```
+
+5. 在下一个交易时段内验证（约 2–4 分钟后）：
+
+   ```sql
+   select source, enabled, session_only, consecutive_failures, last_error, last_success_at from public.source_health where source = 'ths';
+   select source, last_outcome, last_finished_at from public.collector_state where source = 'ths';
+   select symbol, price, ts, updated_at from public.quotes_latest where source = 'ths' order by symbol;
+   select kind, snapshot_date, created_at from public.daily_snapshot where left(kind, 4) = 'ths_' order by created_at desc limit 20;
+   select jobname, schedule, active from cron.job where jobname like 'hive-ths%' order by jobname;
+   select status_code, error_msg, created from net._http_response order by id desc limit 5;
+   ```
+
+   `last_outcome` 为 `ok` 或 `degraded` 表示正常。`degraded` 通常是个别端点（例如某张池）返回错误，可在 `daily_snapshot` 中确认其他类型是否已更新。
+
+**首次上线前需要核对的内容**
+
+- 本仓库没有 HiThink 密钥，以下接口的返回字段没有经过生产环境验证：涨停/跌停/炸板池、连板梯队、热门股、大涨榜、异动、龙虎榜、竞价基准与竞价快照、交易日历。这些数据按原始 JSON 写入 `payload.data`，采集器只解析信封的 `code`、`timestamp` 与 `item` 数组。
+- 交易日历的解析接受字符串日期（`YYYY-MM-DD` 或 `YYYYMMDD`）、毫秒时间戳，或含 `date`、`trade_date`、`trading_day` 字段的对象。无法解析时该次日历视为失败，按工作日照常轮询。
+- 报价字段 `thscode`、`last_price`、`price_change_ratio_pct` 与快照的 `timestamp`，以 hithink-finance CLI 的字段为准，已按此实现。上线后用 `daily_snapshot` 中的 `payload->'data'` 对照一次真实返回。
+- 节假日：日历可用时非交易日会跳过；日历不可用时，非交易日仍会按工作日轮询，上游返回的空数据或 3002 记为 `not_ready`，不影响 `source_health`。
+
+**调用预算（免费额度）**
+
+- Edge 调用：每个工作日 210 次（每 2 分钟，北京时间 09:00–15:58），约 4,600 次/月，远低于免费版每月 50 万次的额度。窗口外的调用在门控处直接返回，不访问上游。
+- 上游请求：交易时段内每轮约 7 次（指数、个股快照、三类池、梯队、热门小时）。每 10 分钟的整点轮次另加约 5 次（热门日、大涨、异动、龙虎榜、竞价基准）。竞价期间每轮另加 1 次。收盘后涨跌家数分页约 `ceil(总数 / 100)` 次，上限 100 次。
+- 并发不超过 4，单轮失败不影响其他端点，与 Stock 原先约 10 并发的调用方式相比，对上游的瞬时压力更小。
+
+**密钥与安全**
+
+- `HITHINK_FINANCE_API_KEY` 只通过 Edge secret 注入。代码、日志与错误信息都不包含密钥，测试中有覆盖。
 
 ### Vercel（apps/web）
 
@@ -518,11 +647,12 @@ Agent 集成建议：
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector` 六个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector` 七个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
 
+- **同花顺（ths）范围**：只接入指数与个股快照、涨跌停/炸板池、连板梯队、热门股、大涨榜、异动、龙虎榜、竞价、涨跌家数和交易日历。不包含东财/新浪资金流、简报合成与漏发标记。
 - **X（Twitter）不接入**：不使用 X API，没有 X 轮询函数，也没有 X 专用的 ingest 端点、健康阈值或告警。
 - **OKX 快讯使用 Orbit 接口**：`GET /api/v5/orbit/news-search` 只拉取 `importance=high` 的快讯，`source` 为 `okx-news`（与 `okx` 行情源区分）。**实测不带 `OK-ACCESS-KEY` 的请求返回 401**（`code 50103`），携带无效 Key 返回 `50111`，因此必须配置 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE`（只读 Key 即可），函数按 OKX v5 规则签名。三者缺一时请求不签名，`source_health.okx-news.last_error` 会记录 OKX 返回的消息。该接口不在 OKX 公开公告接口的类型（`new-listings`、`delistings`、`trading-updates-us-aus`、`api`）之中，返回字段（如 `duplicateAuthors`）可能变化，格式不符时数据源降级并告警。
 - **快讯关键词不在入库时过滤**：Hive 入库全部高重要性快讯。Agent 需要的关键词可以写在订阅的 `filters.keywords` 中，推送前由 Hive 过滤；未设置 `keywords` 的订阅会收到全部 `okx-news` 快讯，需要按关键词筛选的 Agent 请设置该字段或在客户端再次过滤。
