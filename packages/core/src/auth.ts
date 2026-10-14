@@ -6,7 +6,7 @@ export function parseBearerToken(header: string | null | undefined): string | nu
   return match?.[1] ?? null;
 }
 
-function digest(value: string): Buffer {
+function digest(value: string): Uint8Array {
   return createHash("sha256").update(value, "utf8").digest();
 }
 

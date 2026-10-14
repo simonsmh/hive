@@ -20,6 +20,7 @@ const FUNCTIONS = {
   "webhook-dispatcher": ["auth", "webhook"],
   "alert-evaluator": ["types", "alerts", "auth"],
   "yahoo-collector": ["types", "okx", "symbols", "auth", "collector", "yahoo", "yahoo-cycle"],
+  "ths-collector": ["types", "auth", "ths-plan", "ths", "ths-cycle"],
 };
 
 function rewrite(name, source, allowedLocal) {
@@ -30,7 +31,7 @@ function rewrite(name, source, allowedLocal) {
       throw new Error(`${name}.ts imports "${specifier}", which is not in this function's core set`);
     }
   }
-  return HEADER + source.replace(/from "(\.\/[a-z]+)\.js"/g, 'from "$1.ts"');
+  return HEADER + source.replace(/from "(\.\/[a-z0-9-]+)\.js"/g, 'from "$1.ts"');
 }
 
 const stale = [];
