@@ -12,6 +12,7 @@ function due(overrides: Partial<DueDelivery> = {}): DueDelivery {
     agentName: "trader-bot",
     url: "https://agent.example.com/hook",
     secret: SIGNING_SECRET,
+    authToken: null,
     eventType: "news",
     payload: { type: "news", id: 1, title: "美联储" },
     attempts: 1,
@@ -160,6 +161,34 @@ Deno.test("times out a slow receiver and records it as a failed attempt", async 
   await dispatcher(store, hangingFetch, { requestTimeoutMs: 20 })(trigger());
   strictEqual(marks[0]!.outcome.ok, false);
   ok(marks[0]!.outcome.error!.includes("request failed"));
+});
+
+Deno.test("sends the bearer token alongside the HMAC headers when the subscription has one", async () => {
+  const token = "grok-routine-key-0123456789ab";
+  const { store, marks } = fakeStore([due({ authToken: token })]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  strictEqual(sent[0]!.headers["authorization"], `Bearer ${token}`);
+  const timestamp = Number(sent[0]!.headers["x-hive-timestamp"]);
+  ok(verifyWebhookSignature(SIGNING_SECRET, timestamp, sent[0]!.body, sent[0]!.headers["x-hive-signature"]!, timestamp));
+  strictEqual(marks[0]!.outcome.ok, true);
+});
+
+Deno.test("sends no Authorization header when the subscription has no bearer token", async () => {
+  const { store } = fakeStore([due({ authToken: null })]);
+  const { impl, sent } = fakeFetch(() => new Response(null, { status: 200 }));
+  await dispatcher(store, impl)(trigger());
+  strictEqual(sent[0]!.headers["authorization"], undefined);
+  ok(sent[0]!.headers["x-hive-signature"]!.startsWith("sha256="));
+});
+
+Deno.test("never records the bearer token in outcomes, even when the receiver echoes it", async () => {
+  const token = "grok-routine-key-0123456789ab";
+  const { store, marks } = fakeStore([due({ authToken: token })]);
+  const { impl } = fakeFetch(() => new Response(`rejected ${token}`, { status: 401 }));
+  await dispatcher(store, impl)(trigger());
+  strictEqual(marks[0]!.outcome.ok, false);
+  ok(!JSON.stringify(marks).includes(token));
 });
 
 Deno.test("refuses to send unsigned: a missing signing secret is recorded as a failure with a long backoff", async () => {

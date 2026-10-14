@@ -15,6 +15,8 @@ export interface DueDelivery {
   url: string;
   /** Null when the subscription's Vault secret is missing; such deliveries are never sent unsigned. */
   secret: string | null;
+  /** Optional bearer token for receivers that authenticate with Authorization: Bearer. Never logged or recorded. */
+  authToken: string | null;
   eventType: string;
   payload: unknown;
   attempts: number;
@@ -104,6 +106,7 @@ export function createWebhookDispatcher(deps: DispatcherDeps): (request: Request
           [TIMESTAMP_HEADER]: String(timestamp),
           [EVENT_HEADER]: due.eventType,
           [DELIVERY_HEADER]: String(due.deliveryId),
+          ...(due.authToken ? { authorization: `Bearer ${due.authToken}` } : {}),
         },
         body,
       });

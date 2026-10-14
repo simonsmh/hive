@@ -130,6 +130,20 @@ describe("parseSubscriptionInput", () => {
     }
   });
 
+  it("distinguishes an absent bearer token (keep), null (clear) and a string (replace)", () => {
+    expect(parseSubscriptionInput(valid, { requireAll: true }).auth_token).toBeUndefined();
+    expect(parseSubscriptionInput({ auth_token: null }, { requireAll: false }).auth_token).toBeNull();
+    expect(parseSubscriptionInput({ auth_token: "grok-key-0123456789ab" }, { requireAll: false }).auth_token).toBe("grok-key-0123456789ab");
+  });
+
+  it("rejects bearer tokens that are too short, contain spaces or non-ASCII, or are not strings", () => {
+    for (const bad of ["short", "has space 0123456789abcdef", "密钥0123456789abcdef0123", 12345678]) {
+      expect(() => parseSubscriptionInput({ auth_token: bad }, { requireAll: false })).toThrow(
+        "auth_token must be 16-512 visible ASCII characters without spaces",
+      );
+    }
+  });
+
   it("rejects non-object bodies", () => {
     expect(() => parseSubscriptionInput([], { requireAll: true })).toThrow(SubscriptionInputError);
     expect(() => parseSubscriptionInput(null, { requireAll: false })).toThrow(/JSON object/);

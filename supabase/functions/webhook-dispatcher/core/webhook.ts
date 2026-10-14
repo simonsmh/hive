@@ -19,6 +19,7 @@ const SIGNATURE_TOLERANCE_SECONDS = 300;
 const MIN_SECRET_LENGTH = 32;
 const MAX_SECRET_LENGTH = 256;
 const MAX_FILTER_ITEMS = 50;
+const AUTH_TOKEN_PATTERN = /^[\x21-\x7e]{16,512}$/;
 
 /** Delay before the next attempt, after `attempt` failed attempts (1-based): 30s, 60s, 120s, ... capped at 1h. */
 export function computeBackoffSeconds(attempt: number): number {
@@ -71,6 +72,8 @@ export interface SubscriptionInput {
   agent_name?: string;
   url?: string;
   secret: string | null;
+  /** Undefined keeps the stored token, null clears it, a string replaces it. */
+  auth_token?: string | null;
   event_types?: WebhookEventType[];
   filters?: SubscriptionFilters;
   enabled?: boolean;
@@ -191,6 +194,17 @@ export function parseSubscriptionInput(raw: unknown, options: { requireAll: bool
   const filterResult = body.filters === undefined ? undefined : parseSubscriptionFilters(body.filters);
   if (filterResult) problems.push(...filterResult.problems);
 
+  let authToken: string | null | undefined;
+  if (body.auth_token === null) {
+    authToken = null;
+  } else if (body.auth_token !== undefined) {
+    if (typeof body.auth_token !== "string" || !AUTH_TOKEN_PATTERN.test(body.auth_token)) {
+      problems.push("auth_token must be 16-512 visible ASCII characters without spaces");
+    } else {
+      authToken = body.auth_token;
+    }
+  }
+
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") problems.push("enabled must be a boolean");
   if (body.rotate_secret !== undefined && typeof body.rotate_secret !== "boolean") problems.push("rotate_secret must be a boolean");
 
@@ -200,6 +214,7 @@ export function parseSubscriptionInput(raw: unknown, options: { requireAll: bool
     agent_name: typeof agentName === "string" ? agentName : undefined,
     url: typeof url === "string" ? url : undefined,
     secret,
+    auth_token: authToken,
     event_types: eventTypes,
     filters: filterResult?.filters,
     enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,

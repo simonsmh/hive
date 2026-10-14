@@ -251,6 +251,9 @@ declare
   v_alert_sub uuid;
   v_filtered_sub uuid;
   v_disabled_sub uuid;
+  v_sources_sub uuid;
+  v_token_sub uuid;
+  v_hits integer;
   v_result jsonb;
   v_count integer;
   v_status text;
@@ -386,6 +389,56 @@ begin
   select count(*) into v_count from vault.secrets where name like 'webhook_sub:' || v_news_sub::text || ':%';
   if v_count <> 1 then raise exception 'rotation should leave exactly one Vault entry, found %', v_count; end if;
 
+  -- A sources filter applies to news only: an alert from another source still reaches the subscriber.
+  v_sources_sub := public.hive_upsert_webhook_subscription(null, 'verify-sources-agent', 'https://sources.example.com/hook',
+    'verify-sources-secret-0123456789abcdef', array['alert'], '{"sources":["jin10"]}', true);
+  v_token_sub := public.hive_upsert_webhook_subscription(null, 'verify-token-agent', 'https://token.example.com/hook',
+    'verify-token-secret-0123456789abcdef', array['alert'], '{}', true, 'verify-bearer-0123456789abcdef', false);
+  insert into public.alerts (dedup_key, kind, symbol, severity, payload)
+    values ('verify-sources-alert:' || gen_random_uuid()::text, 'price_cross', 'BTC', 'info', '{"source":"okx"}');
+  select count(*) into v_count from public.webhook_deliveries where subscription_id = v_sources_sub and event_type = 'alert';
+  if v_count <> 1 then raise exception 'sources filter blocked an alert (found %)', v_count; end if;
+
+  -- The bearer token is returned by the claim only, never stored in the row, and absent when not configured.
+  select count(*) into v_count from vault.secrets where name like 'webhook_auth:' || v_token_sub::text || ':%';
+  if v_count <> 1 then raise exception 'bearer token should be stored once in Vault, found %', v_count; end if;
+  -- One claim covers both subscribers: a claim leases every due row, not only the rows of one agent.
+  select count(*) filter (where c.agent_name = 'verify-token-agent' and c.auth_token = 'verify-bearer-0123456789abcdef'),
+         count(*) filter (where c.agent_name = 'verify-sources-agent' and c.auth_token is null)
+    into v_hits, v_count
+    from public.hive_webhook_claim(1000, 120) c;
+  if v_hits <> 1 then raise exception 'token subscriber did not receive the alert with its decrypted bearer token (found %)', v_hits; end if;
+  if v_count <> 1 then raise exception 'sources subscriber did not receive the alert without a bearer token (found %)', v_count; end if;
+
+  perform public.hive_upsert_webhook_subscription(v_token_sub, null, null, 'token-secret-rotated-0123456789abcdef', null, null, null, null, false);
+  select count(*) into v_count from public.webhook_subscriptions where id = v_token_sub and auth_token_secret_id is not null;
+  if v_count <> 1 then raise exception 'updating the signing secret dropped the bearer token'; end if;
+
+  perform public.hive_upsert_webhook_subscription(v_token_sub, null, null, null, null, null, null, 'rotated-bearer-0123456789abcdef', false);
+  select ds.decrypted_secret into v_rotated from public.webhook_subscriptions s
+    join vault.decrypted_secrets ds on ds.id = s.auth_token_secret_id where s.id = v_token_sub;
+  if v_rotated <> 'rotated-bearer-0123456789abcdef' then raise exception 'bearer token rotation did not take effect'; end if;
+  select count(*) into v_count from vault.secrets where name like 'webhook_auth:' || v_token_sub::text || ':%';
+  if v_count <> 1 then raise exception 'token rotation should leave exactly one Vault entry, found %', v_count; end if;
+
+  begin
+    perform public.hive_upsert_webhook_subscription(v_token_sub, null, null, null, null, null, null, 'conflicting-bearer-0123456789', true);
+    raise exception 'setting and clearing the bearer token in one call was accepted';
+  exception when sqlstate '22023' then
+    null;
+  end;
+
+  perform public.hive_upsert_webhook_subscription(v_token_sub, null, null, null, null, null, null, null, true);
+  select count(*) into v_count from public.webhook_subscriptions where id = v_token_sub and auth_token_secret_id is null;
+  if v_count <> 1 then raise exception 'clearing the bearer token did not unlink it'; end if;
+  select count(*) into v_count from vault.secrets where name like 'webhook_auth:' || v_token_sub::text || ':%';
+  if v_count <> 0 then raise exception 'clearing the bearer token left a Vault entry behind'; end if;
+
+  perform public.hive_upsert_webhook_subscription(v_token_sub, null, null, null, null, null, null, 'final-bearer-0123456789abcdef', false);
+  if public.hive_delete_webhook_subscription(v_token_sub) is not true then raise exception 'token subscriber delete failed'; end if;
+  select count(*) into v_count from vault.secrets where name like 'webhook_auth:' || v_token_sub::text || ':%';
+  if v_count <> 0 then raise exception 'deleting a subscription left its bearer token in Vault'; end if;
+
   if public.hive_delete_webhook_subscription(v_disabled_sub) is not true then raise exception 'delete did not report success'; end if;
   select count(*) into v_count from public.webhook_subscriptions where id = v_disabled_sub;
   if v_count <> 0 then raise exception 'deleted subscription still present'; end if;
@@ -421,7 +474,7 @@ begin
   -- Only service_role may run the new write paths.
   if has_function_privilege('anon', 'public.hive_news_ingest(text,jsonb)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.hive_webhook_claim(integer,integer)', 'EXECUTE')
-     or has_function_privilege('anon', 'public.hive_upsert_webhook_subscription(uuid,text,text,text,text[],jsonb,boolean)', 'EXECUTE') then
+     or has_function_privilege('anon', 'public.hive_upsert_webhook_subscription(uuid,text,text,text,text[],jsonb,boolean,text,boolean)', 'EXECUTE') then
     raise exception 'news or webhook RPCs executable by anon or authenticated';
   end if;
   if has_table_privilege('authenticated', 'public.webhook_deliveries', 'SELECT')

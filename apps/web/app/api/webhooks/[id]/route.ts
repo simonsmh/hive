@@ -27,6 +27,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       agent_name: input.agent_name,
       url: input.url,
       secret,
+      auth_token: input.auth_token,
       event_types: input.event_types,
       filters: input.filters,
       enabled: input.enabled,

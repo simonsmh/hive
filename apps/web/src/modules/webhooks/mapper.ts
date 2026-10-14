@@ -19,6 +19,7 @@ export interface SubscriptionRow {
   filters: unknown;
   enabled: boolean;
   secret_id: string | null;
+  auth_token_secret_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +32,7 @@ export interface SubscriptionView {
   filters: Record<string, unknown>;
   enabled: boolean;
   secret_configured: boolean;
+  auth_token_configured: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -85,6 +87,7 @@ export function toSubscriptionView(row: SubscriptionRow): SubscriptionView {
     filters: asRecord(row.filters),
     enabled: row.enabled,
     secret_configured: row.secret_id !== null,
+    auth_token_configured: row.auth_token_secret_id !== null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

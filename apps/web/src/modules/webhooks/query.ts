@@ -4,7 +4,8 @@ import { ConflictError, NotFoundError } from "@/lib/api";
 import { assertNoError, getDb } from "@/lib/supabase";
 import { summarizeDeliveries, toDeliveryView, toSubscriptionView, type DeliveryRow, type DeliverySummary, type DeliveryView, type SubscriptionRow, type SubscriptionView } from "./mapper";
 
-const SUBSCRIPTION_COLUMNS = "id, agent_name, url, event_types, filters, enabled, secret_id, created_at, updated_at";
+const SUBSCRIPTION_COLUMNS =
+  "id, agent_name, url, event_types, filters, enabled, secret_id, auth_token_secret_id, created_at, updated_at";
 const DELIVERY_COLUMNS =
   "id, event_type, event_key, status, attempts, max_attempts, next_attempt_at, response_status, last_error, delivered_at, created_at, updated_at, webhook_subscriptions(agent_name)";
 
@@ -16,6 +17,8 @@ export interface SubscriptionWrite {
   agent_name: string | undefined;
   url: string | undefined;
   secret: string | null;
+  /** Undefined keeps the stored token, null clears it, a string replaces it. Write-only: never read back. */
+  auth_token: string | null | undefined;
   event_types: string[] | undefined;
   filters: SubscriptionFilters | undefined;
   enabled: boolean | undefined;
@@ -43,6 +46,8 @@ export async function writeSubscription(write: SubscriptionWrite): Promise<Subsc
     p_event_types: write.event_types ?? null,
     p_filters: write.filters ?? null,
     p_enabled: write.enabled ?? null,
+    p_auth_token: write.auth_token ?? null,
+    p_clear_auth_token: write.id !== null && write.auth_token === null,
   });
   if (error) {
     if (error.code === "23505") throw new ConflictError("agent_name already exists");

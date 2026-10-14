@@ -29,6 +29,7 @@ export async function POST(request: Request): Promise<Response> {
       agent_name: input.agent_name,
       url: input.url,
       secret,
+      auth_token: input.auth_token,
       event_types: input.event_types,
       filters: input.filters,
       enabled: input.enabled,
