@@ -10,5 +10,8 @@ verify_jwt = false
 [functions.jin10-poller]
 verify_jwt = false
 
+[functions.okx-news-poller]
+verify_jwt = false
+
 [functions.webhook-dispatcher]
 verify_jwt = false
