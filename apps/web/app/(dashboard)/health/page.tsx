@@ -29,7 +29,7 @@ export default async function HealthPage() {
 
 function HealthBody({ rows }: { rows: SourceHealthRow[] }) {
   if (rows.length === 0) {
-    return <EmptyState title="暂无数据源记录" hint="Worker 启动并完成首次采集后，这里会显示各数据源状态。" />;
+    return <EmptyState title="暂无数据源记录" hint="采集函数首次运行并写入数据后，这里会显示各数据源状态。" />;
   }
 
   const { report } = buildHealthReport(rows, Date.now());

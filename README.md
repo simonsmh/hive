@@ -100,13 +100,15 @@ scripts/
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env.local`（本地）或在 Vercel 控制台中配置。**不要把真实密钥提交到仓库。**
+本地运行时，把变量写入 `apps/web/.env.local`（Next.js 只读取应用目录内的 `.env*` 文件，`.env.example` 列出了全部变量）；部署时在 Vercel 控制台中配置。**不要把真实密钥提交到仓库。**
 
 | 变量 | used by | 说明 |
 | --- | --- | --- |
 | `SUPABASE_URL` | web | Supabase 项目地址，形如 `https://<project-ref>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | web | service role key，仅服务端使用 |
 | `HIVE_API_TOKEN` | web | Agent 使用的 Bearer 令牌。未配置时 API 返回 500（fail closed）。生成：`openssl rand -hex 32` |
+| `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
+| `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
 | `EDGE_CRON_SECRET` | jin10-poller、webhook-dispatcher（Edge secret） | pg_net 调用这两个函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时两个函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
@@ -278,7 +280,7 @@ done
 
 1. 导入本仓库，**Root Directory 设置为 `apps/web`**。
 2. `apps/web/vercel.json` 已指定安装与构建命令（在仓库根目录执行 `pnpm install --frozen-lockfile`，构建 `@hive/web...` 及其依赖）。
-3. 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`HIVE_API_TOKEN`。
+3. 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`HIVE_API_TOKEN`、`HIVE_DASHBOARD_PASSWORD`、`HIVE_SESSION_SECRET`。缺少后两者时仪表盘无法登录，设置方法见下文「仪表盘与访问密码」。
 4. **不要添加 Vercel Cron**（Hobby 计划只支持每日一次）。分钟级任务请放在 pg_cron 或 Edge Function 中。
 
 ### 可选 / 遗留：Railway Worker（apps/worker）
@@ -293,6 +295,49 @@ Edge Function 已取代 Worker，**默认不需要部署**。仅在需要回退�
 4. 环境变量：`SUPABASE_DB_URL`（Session pooler），以及可选的 `HIVE_SYMBOLS`、`HIVE_POLL_INTERVAL_SECONDS`、`SUPABASE_DB_CA_CERT`。
 5. 确保只运行一个副本即可。即使多个副本启动，advisory lock 也只会让其中一个轮询，其余待命，因此可以安全地重启或滚动发布。
 6. 使用 Worker 时，记得在 Supabase 中暂停 Edge Function 的调度：`select cron.unschedule('hive-okx-collector');`。
+
+## 仪表盘与访问密码（apps/web）
+
+`apps/web` 同时提供移动端优先的中文 PWA 仪表盘。根路径 `/` 会跳转到第一个面板。所有页面都需要登录，`/login`、`/offline` 与静态资源除外。
+
+| 路径 | 面板 | 数据来源 |
+| --- | --- | --- |
+| `/health` | 数据源健康，附 webhook 推送的 24 小时投递摘要 | `source_health`、`webhook_deliveries` |
+| `/alerts` | 最近 50 条告警（过期与恢复） | `alerts` |
+| `/news` | 最近 20 个新闻事件，同一事件的多条来源聚合显示 | `news_events`、`news_items` |
+| `/quotes` | OKX 永续合约最新价与日线走势 | `quotes_latest`、`candles`、`symbol_map` |
+
+面板在 `apps/web/src/modules/registry.ts` 中注册。新增面板需要追加一条注册项，并创建 `app/(dashboard)/<id>/page.tsx`，导航与 PWA 快捷方式会自动生成。
+
+### 设置访问密码
+
+在 Vercel 项目的 **Settings → Environment Variables** 中添加以下两个变量，然后**重新部署**，新值才会生效：
+
+| 变量 | 说明 |
+| --- | --- |
+| `HIVE_DASHBOARD_PASSWORD` | 登录密码。建议使用长随机串：`openssl rand -base64 24` |
+| `HIVE_SESSION_SECRET` | 会话 Cookie 的签名密钥，至少 32 个字符：`openssl rand -hex 32` |
+
+行为说明：
+
+- 两个变量都必须存在，否则登录页返回「服务器未配置登录参数」，无法进入仪表盘（fail closed）。
+- 密码只在服务端比较（SHA-256 摘要的常量时间比较），不会发送到浏览器，也不会出现在任何 `NEXT_PUBLIC_*` 变量中。
+- 登录成功后下发 `hive_session` Cookie（HttpOnly、Secure、SameSite=Lax），有效期 7 天。
+- 修改 `HIVE_DASHBOARD_PASSWORD` 只影响之后的登录，已登录的会话仍然有效直到过期。要立即让所有会话失效，请更换 `HIVE_SESSION_SECRET` 并重新部署。
+- 登录失败会延迟约 500 毫秒，没有其他速率限制。请使用足够长的随机密码。
+- `/api/*` 不经过登录页，仍使用 `HIVE_API_TOKEN` 的 Bearer 认证，供 Agent 调用。浏览器登录与 Agent 访问互不影响。
+
+本地运行：
+
+```bash
+# apps/web/.env.local 中至少设置 HIVE_DASHBOARD_PASSWORD 与 HIVE_SESSION_SECRET；
+# 未设置 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY 时可以登录，但各面板会显示配置缺失的提示。
+pnpm --filter @hive/web dev
+```
+
+然后打开 <http://localhost:3000>。
+
+安装到手机主屏幕：iOS Safari 点击「分享 → 添加到主屏幕」，Android Chrome 点击菜单中的「安装应用」。Service Worker 只缓存静态外壳与离线页，页面数据与 `/api/*` 不会写入缓存。
 
 ## API（供 Agent 调用）
 
@@ -370,7 +415,7 @@ Agent 集成建议：
 ## 安全
 
 - 本项目只使用 OKX **公开**行情接口，不需要也不会读取任何 API Key，不做交易。
-- service role key、`HIVE_API_TOKEN`、`COLLECTOR_SECRET`、`EDGE_CRON_SECRET` 与 Vault 中的密钥只能放在服务端环境变量或 Supabase 的密钥存储中。API 对令牌比较使用常量时间比较，且令牌未配置时拒绝所有请求。Edge Function 同样使用常量时间比较，且未配置 `COLLECTOR_SECRET` 时拒绝所有请求。
+- service role key、`HIVE_API_TOKEN`、`HIVE_DASHBOARD_PASSWORD`、`HIVE_SESSION_SECRET`、`COLLECTOR_SECRET`、`EDGE_CRON_SECRET` 与 Vault 中的密钥只能放在服务端环境变量或 Supabase 的密钥存储中。仪表盘的密码与会话密钥不会出现在任何客户端代码或 `NEXT_PUBLIC_*` 变量中。API 对令牌比较使用常量时间比较，且令牌未配置时拒绝所有请求。Edge Function 同样使用常量时间比较，且未配置 `COLLECTOR_SECRET` 时拒绝所有请求。
 - 所有表开启 RLS；匿名与 `authenticated` 角色没有直接表权限。采集写入函数与 Vault 相关函数只授予 service role 执行。webhook 签名密钥存放在 Supabase Vault 中。
 - `.env*` 已加入 `.gitignore`，只提交 `.env.example`。
 

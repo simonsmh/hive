@@ -88,7 +88,7 @@ function CandleBlock({ symbol, bars }: { symbol: string; bars: CandleBar[] }) {
   const first = bars[0];
   const last = bars.at(-1);
   if (!latest || !first || !last) {
-    return <EmptyState title={`${symbol} 暂无日线数据`} hint="Worker 采集 1D K 线后会显示在这里。" />;
+    return <EmptyState title={`${symbol} 暂无日线数据`} hint="采集函数写入 1D 日线后会显示在这里。" />;
   }
   const low = Math.min(...bars.map((b) => b.low));
   const high = Math.max(...bars.map((b) => b.high));
