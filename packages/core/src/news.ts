@@ -1,6 +1,6 @@
 /** Jin10 flash newsfeed, normalised into rows for the hive_news_ingest RPC. Pure: no I/O. */
 
-export const NEWS_SOURCES = ["jin10"] as const;
+export const NEWS_SOURCES = ["jin10", "okx-news"] as const;
 export type NewsSource = (typeof NEWS_SOURCES)[number];
 
 /** Jin10 publishes flash timestamps in Beijing time (UTC+8) without a zone designator. */

@@ -16,6 +16,7 @@ const checkOnly = process.argv.includes("--check");
 const FUNCTIONS = {
   "okx-collector": ["types", "okx", "symbols", "auth", "collector"],
   "jin10-poller": ["auth", "news"],
+  "okx-news-poller": ["auth", "news", "okx-news"],
   "webhook-dispatcher": ["auth", "webhook"],
 };
 
