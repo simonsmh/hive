@@ -2,6 +2,7 @@
 -- and writes through hive_news_ingest, the same dedup and heartbeat path as jin10. The source string is 'okx-news';
 -- webhook subscriptions filter on it in `sources`.
 -- hive_news_latest_published gives the poller its watermark, so it resumes from the newest stored item after an outage.
+-- hive_news_ingest keeps the 20261013000017 dispatcher kick: a poll that inserts at least one item wakes webhook-dispatcher.
 
 insert into public.source_health (source, enabled, max_staleness_minutes) values
   ('okx-news', true, 5)
@@ -77,6 +78,10 @@ begin
   values (p_source::public.market_source, now(), 0, null, now())
   on conflict (source) do update
     set last_success_at = now(), consecutive_failures = 0, last_error = null, updated_at = now();
+
+  if v_inserted > 0 then
+    perform public.hive_invoke_edge_function('webhook-dispatcher');
+  end if;
 
   return jsonb_build_object('inserted', v_inserted, 'duplicates', v_duplicates);
 end

@@ -226,7 +226,7 @@ done
 
 1. 在 Tokyo（ap-northeast-1）创建项目，Postgres 17，使用免费计划。记录 `<project-ref>`。
 2. 应用迁移（`scripts/apply-migrations.sh`，按文件名顺序）。全新项目执行 `20261013000001` 至 `20261013000020`；已部署阶段 1 的项目只需执行新增的 `20261013000011` 至 `20261013000020`：
->   - `…000011_news_source_enum.sql`：为 `market_source` 增加 `jin10`
+   - `…000011_news_source_enum.sql`：为 `market_source` 增加 `jin10`
    - `…000012_news_ingest.sql`：`news_items.author`、`source_health.jin10` 种子、`hive_news_ingest` 写入函数
    - `…000013_webhook_subscriptions.sql`：`alerts.severity` / `resolved_at`，`webhook_subscriptions`、`webhook_deliveries`，预过滤触发器与分发/管理函数
    - `…000014_health_alerts.sql`：健康检查的开启/恢复语义，改为每分钟执行

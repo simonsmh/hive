@@ -353,8 +353,11 @@ begin
   v_items := '[
     {"external_id":"VERIFY-OKX-1","title":"比特币","body":"比特币现货 ETF 获批","url":"https://www.okx.com/zh-hans/feed/post/VERIFY-OKX-1","author":"Reuters","published_at":"2026-10-13T09:45:00Z","score":1}
   ]';
+  select count(*) into v_kick_before from net.http_request_queue where url like '%/webhook-dispatcher';
   v_result := public.hive_news_ingest('okx-news', v_items::jsonb);
   if (v_result->>'inserted')::integer <> 1 then raise exception 'expected 1 okx-news item inserted, got %', v_result; end if;
+  select count(*) into v_kick_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if v_kick_after - v_kick_before <> 1 then raise exception 'an okx-news poll with new items must queue one dispatcher kick'; end if;
   v_result := public.hive_news_ingest('okx-news', v_items::jsonb);
   if (v_result->>'inserted')::integer <> 0 or (v_result->>'duplicates')::integer <> 1 then
     raise exception 'okx-news re-poll must not insert (got %)', v_result;
