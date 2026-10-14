@@ -7,6 +7,7 @@ describe("sourceLabel", () => {
     expect(sourceLabel("jin10")).toBe("Jin10 快讯");
     expect(sourceLabel("okx-news")).toBe("OKX 快讯");
     expect(sourceLabel("yahoo")).toBe("Yahoo 行情");
+    expect(sourceLabel("ths")).toBe("同花顺行情");
   });
 
   it("falls back to the upper-cased key for unknown sources", () => {
