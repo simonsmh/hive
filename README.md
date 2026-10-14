@@ -42,10 +42,39 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **Worker（apps/worker，可选 / 遗留）**：部署在 Railway，使用 `pg_try_advisory_lock` 竞争领导权。它与 Edge Function 共享同一套采集逻辑和表，但使用的是另一套锁，**不要同时运行**。
 - **数据库（supabase/）**：所有表开启 RLS，匿名与 `authenticated` 角色没有任何直接表权限，读取只能通过 Vercel API（service role）。写入采集数据的 `hive_collector_*` 函数同样只允许 service role 执行。
 - **健康检查与告警**：pg_cron 每分钟执行 `hive_run_health_check()`。已启用且超过 `max_staleness_minutes` 未成功的数据源写入一条未恢复的 `source_stale` 告警，同一数据源同时只保留一条未恢复告警。数据源恢复后，该告警写入 `resolved_at` 并新增一条 `source_recovered` 事件。
-- **新闻采集（supabase/functions/jin10-poller）**：pg_cron 每 30 秒调用一次。函数请求 Jin10 快讯接口，经 `hive_news_ingest` 按 `source + external_id` 去重写入 `news_items` 与 `news_events`，并更新 `source_health.jin10`。该接口是非官方接口，格式变化或被拦截时记录错误，数据源会因超过 5 分钟未成功而进入过期告警。
-- **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。pg_cron 每分钟调用一次分发函数，它按 `next_attempt_at` 取出到期投递，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
+- **新闻采集（supabase/functions/jin10-poller）**：pg_cron 每 30 秒调用一次。函数请求 Jin10 快讯接口，经 `hive_news_ingest` 按 `source + external_id` 去重写入 `news_items` 与 `news_events`，并更新 `source_health.jin10`。本轮询若插入了新快讯，`hive_news_ingest` 会在事务提交后通过 pg_net 唤醒一次分发函数（见下文「延迟」）。该接口是非官方接口，格式变化或被拦截时记录错误，数据源会因超过 5 分钟未成功而进入过期告警。
+- **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。分发函数由 pg_cron 每 30 秒调用一次作为兜底，并在新快讯入库后被唤醒。每次运行按 `next_attempt_at` 取出到期投递，只要剩余预算足够就持续领取整批，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
+
+## 延迟（Jin10 快讯 → webhook）
+
+以下为设计估算，尚未在生产环境测量。上线后用文末的查询确认。
+
+| 环节 | 机制 | 典型 | 最坏 |
+| --- | --- | --- | --- |
+| 轮询等待 | pg_cron 每 30 秒调用 `jin10-poller` | 约 15 秒 | 30 秒 |
+| 入库与过滤 | `hive_news_ingest` 单事务写入快讯，触发器同时写入 `webhook_deliveries` | 小于 1 秒 | - |
+| 分发唤醒 | 事务提交后由 pg_net 排队调用 `webhook-dispatcher`。本轮询无新快讯时不唤醒 | 约 1–2 秒 | - |
+| 兜底 cron | `hive-webhook-dispatch` 每 30 秒，覆盖唤醒失败与重试退避 | - | 30 秒 |
+| 签名与投递 | HMAC 签名后 POST，单次请求超时 8 秒 | 取决于接收方 | 8 秒 |
+
+- **无积压时**：快讯到 webhook 送达典型约 15–20 秒，最坏约 35 秒加接收方响应时间。以上不含 Jin10 自身发布到接口可见的延迟。
+- **改造前**：轮询 0–30 秒加分发 cron 0–60 秒，最坏约 90 秒，平均约 45 秒。分发每分钟只领取 20 条，突发时积压需要数分钟才能排空，这可能是观察到的 2–4 分钟尾部延迟。请用下方查询在生产确认。
+- **积压**：每次运行循环领取整批（每批 20 条，4 并发）。只有剩余预算（90 秒）能覆盖最坏一批（约 40 秒）时才继续领取，因此不会留下未处理且被租约锁住的投递。
+- **重试**：失败后按 30 秒起的指数退避，兜底 cron 的 30 秒粒度不会额外拉长重试。
+- **不调整的部分**：轮询仍为 30 秒，避免把非官方 Jin10 接口的请求频率翻倍。
+- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。采集、轮询、分发兜底各每天 2,880 次，分发唤醒最多每天 2,880 次，合计最多约 34.5 万次/月。
+
+生产环境观测最近一天的快讯送达延迟（`published_at` 为 Jin10 快讯时间，`delivered_at` 为首次成功投递时间）：
+
+```sql
+select count(*) as delivered,
+       round(avg(extract(epoch from delivered_at - (payload->>'published_at')::timestamptz))::numeric, 1) as avg_seconds,
+       round(max(extract(epoch from delivered_at - (payload->>'published_at')::timestamptz))::numeric, 1) as max_seconds
+  from public.webhook_deliveries
+ where event_type = 'news' and status = 'delivered' and delivered_at > now() - interval '1 day';
+```
 
 ## 目录
 
@@ -61,7 +90,7 @@ supabase/
   functions/jin10-poller/      Edge Function（Deno）：Jin10 快讯轮询与入库
   functions/webhook-dispatcher/ Edge Function（Deno）：webhook 签名、投递与退避
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
-  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–15 为阶段 2）
+  migrations/ 按文件名顺序执行的 SQL 迁移（01–10 为阶段 1，11–17 为阶段 2）
   tests/      verify.sql：迁移后的 schema 与采集路径冒烟测试（事务内执行并回滚）
 scripts/
   apply-migrations.sh  依次应用迁移
@@ -191,12 +220,13 @@ done
 ### Supabase（采集、新闻与推送）
 
 1. 在 Tokyo（ap-northeast-1）创建项目，Postgres 17，使用免费计划。记录 `<project-ref>`。
-2. 应用迁移（`scripts/apply-migrations.sh`，按文件名顺序）。全新项目执行 `20261013000001` 至 `20261013000015`；已部署阶段 1 的项目只需执行新增的 `20261013000011` 至 `20261013000015`：
+2. 应用迁移（`scripts/apply-migrations.sh`，按文件名顺序）。全新项目执行 `20261013000001` 至 `20261013000017`；已部署阶段 1 的项目只需执行新增的 `20261013000011` 至 `20261013000017`：
    - `…000011_news_source_enum.sql`：为 `market_source` 增加 `jin10`
    - `…000012_news_ingest.sql`：`news_items.author`、`source_health.jin10` 种子、`hive_news_ingest` 写入函数
    - `…000013_webhook_subscriptions.sql`：`alerts.severity` / `resolved_at`，`webhook_subscriptions`、`webhook_deliveries`，预过滤触发器与分发/管理函数
    - `…000014_health_alerts.sql`：健康检查的开启/恢复语义，改为每分钟执行
-   - `…000015_edge_news_cron.sql`：`hive_invoke_edge_function`，`hive-jin10-poller`（30 秒）、`hive-webhook-dispatch`（每分钟）、`hive-news-prune`（每天 03:27 UTC）
+   - `…000015_edge_news_cron.sql`：`hive_invoke_edge_function`，`hive-jin10-poller`（30 秒）、`hive-webhook-dispatch`（原为每分钟）、`hive-news-prune`（每天 03:27 UTC）
+   - `…000017_news_dispatch_kick.sql`：新快讯入库后唤醒分发函数；`hive-webhook-dispatch` 改为每 30 秒（见下文「延迟」）。仅替换函数与调度，不修改数据
    - `…000016_webhook_auth_token.sql`：订阅可选的 Bearer 令牌（`auth_token_secret_id`，存于 Vault）；`sources` 过滤只作用于新闻，告警不再受其限制。增量迁移，不修改已有数据。
 3. 部署 Edge Functions。在仓库根目录执行：
 
@@ -359,7 +389,7 @@ Agent 集成建议：
 - **Jin10 快讯为非官方接口**：请求头与查询参数来自 Jin10 网页端，并未在生产环境验证。若接口返回非 200、非 JSON 或格式不符，函数记录错误并返回 `degraded`，`source_health.jin10` 随之过期并触发告警。请在上线后检查 `source_health` 与 `net._http_response`，必要时用 `JIN10_*` 变量覆盖。
 - **关键词之外的评分未实现**：推送前仅做规则过滤，没有 LLM 评分。`hive_subscription_matches` 是后续接入评分的位置。
 - **遗留对象**：阶段 1 的 `webhooks`、`deliveries` 表与 `hive_deliveries` pgmq 队列、`hive_enqueue_alert` 函数仍然存在，但已不再被写入。删除需要单独的迁移，待确认没有外部依赖后再处理。
-- **写入顺序的延迟**：分发 cron 为每分钟一次，因此从新闻或告警写入到 webhook 送达的延迟最多约 1 分钟，加上重试退避。
+- **写入顺序的延迟**：告警由 `hive_run_health_check()` 每分钟写入，之后由分发函数的 30 秒兜底 cron 送出（最多约 30 秒）。新闻的唤醒路径见下文「延迟」。
 
 ## 后续计划
 
