@@ -1,7 +1,7 @@
 import { isAuthorized } from "./core/auth.ts";
 import { NewsFormatError, toIngestRows, type NewsIngestRow, type NewsItemInput } from "./core/news.ts";
 import { OKX_NEWS_PATH, parseOkxNewsPage, type OkxNewsPage } from "./core/okx-news.ts";
-import { type OkxCredentials, okxAuthHeaders } from "./okx-signing.ts";
+import { type OkxCredentials, okxAuthHeaders } from "./core/okx-signing.ts";
 
 export const DEFAULT_OKX_NEWS_CONFIG = { baseUrl: "https://www.okx.com" } as const;
 
