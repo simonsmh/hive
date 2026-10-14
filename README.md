@@ -115,6 +115,7 @@ scripts/
 | `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
+| `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` | okx-news-poller（Edge secret） | 只读 OKX API Key 的三项凭据，用于签名快讯请求。**必须三者同时设置**，否则不签名。只会在 okx-news-poller 中读取，不要提交到仓库 |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` | okx-collector | Supabase 自动注入到 Edge Function，无需手动设置 |
 | `SUPABASE_DB_URL` | worker（可选 / 遗留） | 直连 Postgres 的连接串。**必须使用 Session pooler（5432）或直连**，不能用 Transaction pooler（6543），因为 Worker 依赖会话级 advisory lock |
 | `SUPABASE_DB_CA_CERT` | worker（可选 / 遗留） | 可选。数据库端点的 PEM 证书，配置后启用证书校验；未配置时接受未校验的 TLS 连接 |
@@ -254,7 +255,7 @@ done
    supabase secrets set COLLECTOR_SECRET="$COLLECTOR_SECRET" EDGE_CRON_SECRET="$EDGE_CRON_SECRET"
    ```
 
-   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller 与 webhook-dispatcher 使用。可以设为相同值，但建议分开。
+   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller 与 webhook-dispatcher 使用。可以设为相同值，但建议分开。okx-news-poller 还需要只读 OKX Key：`supabase secrets set OKX_API_KEY=… OKX_API_SECRET=… OKX_API_PASSPHRASE=…`（三者需同时设置）。
 
 5. 写入 Vault（只需执行一次，SQL Editor 或 `psql`）。阶段 1 的两个密钥照旧；阶段 2 新增两个：
 
@@ -419,7 +420,7 @@ Agent 集成建议：
 
 ## 安全
 
-- 本项目只使用 OKX **公开**行情接口，不需要也不会读取任何 API Key，不做交易。
+- 行情采集（okx-collector、apps/worker）只使用 OKX **公开**行情接口，不读取任何 API Key。快讯轮询（okx-news-poller）需要一组**只读** OKX API Key（`OKX_API_KEY` 等），仅用于签名快讯请求。本项目不做交易，不使用可交易权限的 Key。
 - service role key、`HIVE_API_TOKEN`、`HIVE_DASHBOARD_PASSWORD`、`HIVE_SESSION_SECRET`、`COLLECTOR_SECRET`、`EDGE_CRON_SECRET` 与 Vault 中的密钥只能放在服务端环境变量或 Supabase 的密钥存储中。仪表盘的密码与会话密钥不会出现在任何客户端代码或 `NEXT_PUBLIC_*` 变量中。API 对令牌比较使用常量时间比较，且令牌未配置时拒绝所有请求。Edge Function 同样使用常量时间比较，且未配置 `COLLECTOR_SECRET` 时拒绝所有请求。
 - 所有表开启 RLS；匿名与 `authenticated` 角色没有直接表权限。采集写入函数与 Vault 相关函数只授予 service role 执行。webhook 签名密钥存放在 Supabase Vault 中。
 - `.env*` 已加入 `.gitignore`，只提交 `.env.example`。
@@ -435,7 +436,7 @@ Agent 集成建议：
 ## 范围说明
 
 - **X（Twitter）不接入**：不使用 X API，没有 X 轮询函数，也没有 X 专用的 ingest 端点、健康阈值或告警。
-- **OKX 快讯使用 Orbit 接口**：`GET /api/v5/orbit/news-search` 无需密钥，只拉取 `importance=high` 的快讯，`source` 为 `okx-news`（与 `okx` 行情源区分）。该接口不在 OKX 公开公告接口的类型（`new-listings`、`delistings`、`trading-updates-us-aus`、`api`）之中，返回字段（如 `duplicateAuthors`）可能变化，格式不符时数据源降级并告警。
+- **OKX 快讯使用 Orbit 接口**：`GET /api/v5/orbit/news-search` 只拉取 `importance=high` 的快讯，`source` 为 `okx-news`（与 `okx` 行情源区分）。**实测不带 `OK-ACCESS-KEY` 的请求返回 401**（`code 50103`），携带无效 Key 返回 `50111`，因此必须配置 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE`（只读 Key 即可），函数按 OKX v5 规则签名。三者缺一时请求不签名，`source_health.okx-news.last_error` 会记录 OKX 返回的消息。该接口不在 OKX 公开公告接口的类型（`new-listings`、`delistings`、`trading-updates-us-aus`、`api`）之中，返回字段（如 `duplicateAuthors`）可能变化，格式不符时数据源降级并告警。
 - **快讯关键词不在入库时过滤**：Hive 入库全部高重要性快讯。Agent 需要的关键词可以写在订阅的 `filters.keywords` 中，推送前由 Hive 过滤；未设置 `keywords` 的订阅会收到全部 `okx-news` 快讯，需要按关键词筛选的 Agent 请设置该字段或在客户端再次过滤。
 - **Jin10 快讯为非官方接口**：请求头与查询参数来自 Jin10 网页端，并未在生产环境验证。若接口返回非 200、非 JSON 或格式不符，函数记录错误并返回 `degraded`，`source_health.jin10` 随之过期并触发告警。请在上线后检查 `source_health` 与 `net._http_response`，必要时用 `JIN10_*` 变量覆盖。
 - **关键词之外的评分未实现**：推送前仅做规则过滤，没有 LLM 评分。`hive_subscription_matches` 是后续接入评分的位置。
