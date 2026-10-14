@@ -15,6 +15,7 @@ interface ClaimRow {
   agent_name: string;
   url: string;
   secret: string | null;
+  auth_token: string | null;
   event_type: string;
   payload: unknown;
   attempts: number;
@@ -22,8 +23,8 @@ interface ClaimRow {
 }
 
 /**
- * PostgREST RPC store. hive_webhook_claim returns the decrypted signing secret, so rows are only ever
- * handled in memory here and never logged.
+ * PostgREST RPC store. hive_webhook_claim returns the decrypted signing secret and bearer token, so rows
+ * are only ever handled in memory here and never logged.
  */
 export function createRestDispatchStore(options: RestStoreOptions): DispatchStore {
   const base = options.supabaseUrl.replace(/\/+$/, "");
@@ -55,6 +56,7 @@ export function createRestDispatchStore(options: RestStoreOptions): DispatchStor
         agentName: row.agent_name,
         url: row.url,
         secret: row.secret,
+        authToken: row.auth_token ?? null,
         eventType: row.event_type,
         payload: row.payload,
         attempts: Number(row.attempts),
