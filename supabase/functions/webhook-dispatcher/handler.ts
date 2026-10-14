@@ -158,39 +158,48 @@ export function createWebhookDispatcher(deps: DispatcherDeps): (request: Request
     }
 
     const started = now();
-    let due: DueDelivery[];
-    try {
-      due = await deps.store.claim(batchSize, leaseSeconds);
-    } catch (error) {
-      log(`claim failed: ${describeError(error)}`);
-      return json(500, { status: "error", error: "could not claim deliveries" });
-    }
-
     const summary: DispatchSummary = {
       status: "idle",
-      claimed: due.length,
+      claimed: 0,
       delivered: 0,
       failed: 0,
       dead: 0,
       skipped: 0,
       durationMs: 0,
     };
-    for (let i = 0; i < due.length; i += concurrency) {
-      if (now() - started > budgetMs) {
-        summary.skipped = due.length - i;
+    const worstCaseBatchMs = Math.ceil(batchSize / concurrency) * requestTimeoutMs;
+
+    for (;;) {
+      let due: DueDelivery[];
+      try {
+        due = await deps.store.claim(batchSize, leaseSeconds);
+      } catch (error) {
+        log(`claim failed: ${describeError(error)}`);
+        if (summary.claimed === 0) return json(500, { status: "error", error: "could not claim deliveries" });
         break;
       }
-      const chunk = due.slice(i, i + concurrency);
-      const statuses = await Promise.all(chunk.map((item) => deliver(item)));
-      for (const status of statuses) {
-        if (status === "delivered") summary.delivered += 1;
-        else if (status === "dead") summary.dead += 1;
-        else summary.failed += 1;
+      summary.claimed += due.length;
+
+      for (let i = 0; i < due.length; i += concurrency) {
+        if (now() - started > budgetMs) {
+          summary.skipped += due.length - i;
+          break;
+        }
+        const chunk = due.slice(i, i + concurrency);
+        const statuses = await Promise.all(chunk.map((item) => deliver(item)));
+        for (const status of statuses) {
+          if (status === "delivered") summary.delivered += 1;
+          else if (status === "dead") summary.dead += 1;
+          else summary.failed += 1;
+        }
       }
+
+      // Claim another full batch only if it can finish inside the budget, so no claimed row is left leased.
+      if (due.length < batchSize || now() - started + worstCaseBatchMs > budgetMs) break;
     }
 
     summary.durationMs = now() - started;
-    if (due.length > 0) summary.status = summary.failed + summary.dead + summary.skipped > 0 ? "partial" : "ok";
+    if (summary.claimed > 0) summary.status = summary.failed + summary.dead + summary.skipped > 0 ? "partial" : "ok";
     return json(200, summary);
   };
 }
