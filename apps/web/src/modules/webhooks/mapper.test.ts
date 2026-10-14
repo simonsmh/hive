@@ -81,10 +81,11 @@ describe("summarizeDeliveries", () => {
         delivery({ id: 3, status: "pending", last_error: "timeout", created_at: "2026-10-13T12:10:00Z" }),
         delivery({ id: 4, status: "pending", last_error: null, created_at: "2026-10-13T12:11:00Z" }),
         delivery({ id: 5, status: "sending", last_error: null, created_at: "2026-10-13T12:12:00Z" }),
+        delivery({ id: 6, status: "expired", last_error: "expired before delivery", created_at: "2026-10-13T12:13:00Z" }),
       ],
       24,
     );
-    expect(summary.counts).toEqual({ pending: 2, sending: 1, delivered: 1, dead: 1 });
+    expect(summary.counts).toEqual({ pending: 2, sending: 1, delivered: 1, dead: 1, expired: 1 });
     expect(summary.recent_failures.map((d) => d.id)).toEqual(["3", "2"]);
     expect(summary.window_hours).toBe(24);
   });
@@ -92,7 +93,7 @@ describe("summarizeDeliveries", () => {
   it("returns zero counts for an empty window", () => {
     expect(summarizeDeliveries([], 24)).toEqual({
       window_hours: 24,
-      counts: { pending: 0, sending: 0, delivered: 0, dead: 0 },
+      counts: { pending: 0, sending: 0, delivered: 0, dead: 0, expired: 0 },
       recent_failures: [],
     });
   });

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-export const DELIVERY_STATUSES = ["pending", "sending", "delivered", "dead"] as const;
+export const DELIVERY_STATUSES = ["pending", "sending", "delivered", "dead", "expired"] as const;
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 
 export const DELIVERY_STATUS_LABELS: Record<DeliveryStatus, string> = {
@@ -8,6 +8,7 @@ export const DELIVERY_STATUS_LABELS: Record<DeliveryStatus, string> = {
   sending: "发送中",
   delivered: "已送达",
   dead: "已放弃",
+  expired: "已过期",
 };
 
 /** Row shape of public.webhook_subscriptions as selected by the API. secret_id itself is never exposed. */
@@ -120,7 +121,7 @@ const MAX_RECENT_FAILURES = 5;
 
 /** Counts deliveries by status and keeps the newest failed ones (pending retries or dead letters) for the panel. */
 export function summarizeDeliveries(rows: readonly DeliveryRow[], windowHours: number): DeliverySummary {
-  const counts: Record<DeliveryStatus, number> = { pending: 0, sending: 0, delivered: 0, dead: 0 };
+  const counts: Record<DeliveryStatus, number> = { pending: 0, sending: 0, delivered: 0, dead: 0, expired: 0 };
   const views = rows.map(toDeliveryView);
   for (const view of views) {
     if (view.status !== "unknown") counts[view.status] += 1;
