@@ -235,3 +235,63 @@ Deno.test("delivers in parallel chunks and reports each outcome", async () => {
   strictEqual(body.delivered, 5);
   deepStrictEqual(marks.map((m) => m.id).sort((a, b) => a - b), [100, 101, 102, 103, 104]);
 });
+
+function pagedStore(pages: DueDelivery[][]) {
+  const marks: { id: number; outcome: DeliveryOutcome }[] = [];
+  let claims = 0;
+  const store: DispatchStore = {
+    async claim() {
+      claims += 1;
+      return pages[claims - 1] ?? [];
+    },
+    async mark(id, outcome) {
+      marks.push({ id, outcome });
+      return outcome.ok ? "delivered" : "pending";
+    },
+  };
+  return { store, marks, claims: () => claims };
+}
+
+Deno.test("drains a backlog larger than one batch within a single run", async () => {
+  const pages = [
+    [due({ deliveryId: 1 }), due({ deliveryId: 2 })],
+    [due({ deliveryId: 3 }), due({ deliveryId: 4 })],
+    [due({ deliveryId: 5 })],
+  ];
+  const { store, marks, claims } = pagedStore(pages);
+  const { impl } = fakeFetch(() => new Response(null, { status: 200 }));
+  const body = await (await dispatcher(store, impl, { batchSize: 2, concurrency: 2 })(trigger())).json();
+  strictEqual(claims(), 3);
+  strictEqual(body.claimed, 5);
+  strictEqual(body.delivered, 5);
+  strictEqual(body.status, "ok");
+  deepStrictEqual(marks.map((m) => m.id).sort((a, b) => a - b), [1, 2, 3, 4, 5]);
+});
+
+Deno.test("does not claim a batch it cannot finish inside the budget, so nothing is left leased", async () => {
+  const pages = [[due({ deliveryId: 1 })], [due({ deliveryId: 2 })]];
+  const { store, marks, claims } = pagedStore(pages);
+  const { impl } = fakeFetch(() => new Response(null, { status: 200 }));
+  const body = await (await dispatcher(store, impl, { batchSize: 1, concurrency: 1, budgetMs: 100, requestTimeoutMs: 1000 })(trigger())).json();
+  strictEqual(claims(), 1);
+  strictEqual(body.claimed, 1);
+  deepStrictEqual(marks.map((m) => m.id), [1]);
+});
+
+Deno.test("keeps the delivered rows when a later claim in the same run fails", async () => {
+  let claims = 0;
+  const store: DispatchStore = {
+    async claim() {
+      claims += 1;
+      if (claims === 1) return [due({ deliveryId: 1 }), due({ deliveryId: 2 })];
+      throw new Error("PostgREST rpc returned HTTP 500");
+    },
+    async mark() {
+      return "delivered";
+    },
+  };
+  const { impl } = fakeFetch(() => new Response(null, { status: 200 }));
+  const response = await dispatcher(store, impl, { batchSize: 2, concurrency: 2 })(trigger());
+  strictEqual(response.status, 200);
+  strictEqual((await response.json()).delivered, 2);
+});

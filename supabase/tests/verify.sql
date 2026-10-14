@@ -259,6 +259,8 @@ declare
   v_status text;
   v_claim record;
   v_opened integer;
+  v_kick_before integer;
+  v_kick_after integer;
   v_secret_name text;
   v_rotated text;
   v_items text := '[
@@ -324,6 +326,25 @@ begin
   exception when others then
     if sqlerrm not like 'unsupported news source%' then raise; end if;
   end;
+
+  -- Kick: a poll that inserts news queues one dispatcher request; a duplicate-only poll queues none.
+  delete from vault.secrets where name in ('edge_base_url', 'edge_cron_secret');
+  perform vault.create_secret('http://127.0.0.1:9/functions/v1', 'edge_base_url', 'verify');
+  perform vault.create_secret('verify-edge-secret', 'edge_cron_secret', 'verify');
+  select count(*) into v_kick_before from net.http_request_queue where url like '%/webhook-dispatcher';
+  v_result := public.hive_news_ingest('jin10', '[
+    {"external_id":"VERIFY-3","title":null,"body":"无关快讯 VERIFY-3","url":"https://flash.jin10.com/detail/VERIFY-3","author":null,"published_at":"2026-10-13T09:42:00Z","score":0}
+  ]'::jsonb);
+  select count(*) into v_kick_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if (v_result->>'inserted')::integer <> 1 or v_kick_after - v_kick_before <> 1 then
+    raise exception 'a poll with new news must queue exactly one dispatcher kick (inserted %, queued %)', v_result->>'inserted', v_kick_after - v_kick_before;
+  end if;
+  v_kick_before := v_kick_after;
+  v_result := public.hive_news_ingest('jin10', '[
+    {"external_id":"VERIFY-3","title":null,"body":"无关快讯 VERIFY-3","url":"https://flash.jin10.com/detail/VERIFY-3","author":null,"published_at":"2026-10-13T09:42:00Z","score":0}
+  ]'::jsonb);
+  select count(*) into v_kick_after from net.http_request_queue where url like '%/webhook-dispatcher';
+  if v_kick_after <> v_kick_before then raise exception 'a duplicate-only poll must not kick the dispatcher'; end if;
 
   -- Fan-out: only the keyword subscriber matching VERIFY-1 gets a news delivery.
   select count(*) into v_count from public.webhook_deliveries where subscription_id = v_news_sub and event_type = 'news';
@@ -498,8 +519,8 @@ begin
   -- Schedules for the new jobs.
   perform 1 from cron.job where jobname = 'hive-jin10-poller' and schedule = '30 seconds';
   if not found then raise exception 'pg_cron job hive-jin10-poller (30 seconds) missing'; end if;
-  perform 1 from cron.job where jobname = 'hive-webhook-dispatch' and schedule = '* * * * *';
-  if not found then raise exception 'pg_cron job hive-webhook-dispatch (every minute) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-webhook-dispatch' and schedule = '30 seconds';
+  if not found then raise exception 'pg_cron job hive-webhook-dispatch (30 seconds) missing'; end if;
 
   v_result := public.hive_prune_news_and_webhooks();
   if not (v_result ? 'webhook_deliveries' and v_result ? 'news_items') then
