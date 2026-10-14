@@ -677,4 +677,147 @@ begin
 end
 $$;
 
+-- ths-collector: schema additions, seeds, session gate, daily snapshot write path, prune, lease and schedules.
+-- Uses VERIFYTHS keys and 1990s/1999 dates so nothing else is touched; the transaction rolls back at the end.
+do $$
+declare
+  v_count integer;
+  v_pruned integer;
+  v_version integer;
+  v_price numeric;
+  v_expected integer;
+  v_schedule text;
+  v_command text;
+  v_holder uuid := gen_random_uuid();
+begin
+  select count(*) into v_count from information_schema.columns
+   where table_schema = 'public'
+     and ((table_name = 'symbol_map' and column_name in ('ths_code', 'ths_kind', 'ths_auction'))
+       or (table_name = 'source_health' and column_name = 'session_only'));
+  if v_count <> 4 then raise exception 'ths columns missing (found %, expected 4)', v_count; end if;
+
+  if to_regprocedure('public.hive_a_share_session_open(timestamptz)') is null
+     or to_regprocedure('public.hive_collector_upsert_daily_snapshot(date,text,jsonb)') is null
+     or to_regprocedure('public.hive_prune_ths_snapshots(integer)') is null then
+    raise exception 'ths functions missing';
+  end if;
+
+  -- Seeds: documented thscodes only, disabled, auction opt-out.
+  perform 1 from public.symbol_map
+   where symbol = 'SH000001' and ths_code = '000001.SH' and ths_kind = 'index' and not enabled and not ths_auction;
+  if not found then raise exception 'ths seed SH000001 missing or wrong'; end if;
+  perform 1 from public.symbol_map
+   where symbol = 'MOUTAI' and ths_code = '600519.SH' and ths_kind = 'stock' and not enabled and not ths_auction;
+  if not found then raise exception 'ths seed MOUTAI missing or wrong'; end if;
+  select count(*) into v_count from public.symbol_map
+   where symbol in ('SH000001', 'SZ399001', 'SH000300', 'MOUTAI', 'WULIANGYE') and ths_code is not null and enabled;
+  if v_count <> 0 then raise exception 'ths seeds must ship disabled (% enabled)', v_count; end if;
+
+  -- Source switch: off, session-only, 10 minute staleness. collector_state row exists.
+  perform 1 from public.source_health
+   where source = 'ths' and not enabled and session_only and max_staleness_minutes = 10;
+  if not found then raise exception 'source_health ths must be disabled, session_only, 10 minutes'; end if;
+  perform 1 from public.collector_state where source = 'ths';
+  if not found then raise exception 'collector_state row for ths missing'; end if;
+
+  -- Constraints reject auction opt-in on an index, a malformed thscode, and a code without a kind.
+  begin
+    insert into public.symbol_map (symbol, enabled, ths_code, ths_kind, ths_auction)
+    values ('VERIFYTHSIDX', false, '000001.SH', 'index', true);
+    raise exception 'ths_auction on an index was accepted';
+  exception when check_violation then
+    if sqlerrm not like '%symbol_map_ths_auction_check%' then raise; end if;
+  end;
+  begin
+    insert into public.symbol_map (symbol, enabled, ths_code, ths_kind)
+    values ('VERIFYTHSBAD', false, '1234.SH', 'stock');
+    raise exception 'malformed ths_code was accepted';
+  exception when check_violation then
+    if sqlerrm not like '%symbol_map_ths_code_format%' then raise; end if;
+  end;
+  begin
+    insert into public.symbol_map (symbol, enabled, ths_code, ths_kind)
+    values ('VERIFYTHSPAIR', false, '600519.SH', null);
+    raise exception 'ths_code without ths_kind was accepted';
+  exception when check_violation then
+    if sqlerrm not like '%symbol_map_ths_pair_check%' then raise; end if;
+  end;
+
+  -- Session window in Asia/Shanghai, weekdays 09:15 inclusive to 15:15 exclusive.
+  if not public.hive_a_share_session_open('2026-10-14T01:15:00Z') then raise exception 'session must open at 09:15 Beijing'; end if;
+  if public.hive_a_share_session_open('2026-10-14T01:14:59Z') then raise exception 'session opened before 09:15 Beijing'; end if;
+  if not public.hive_a_share_session_open('2026-10-14T07:14:59Z') then raise exception 'session closed too early at 15:14 Beijing'; end if;
+  if public.hive_a_share_session_open('2026-10-14T07:15:00Z') then raise exception 'session must close at 15:15 Beijing'; end if;
+  if public.hive_a_share_session_open('2026-10-17T02:00:00Z') then raise exception 'session must be closed on Saturday'; end if;
+
+  -- Daily snapshot: one row per (date, kind), payload overwritten, non-ths kinds refused.
+  perform public.hive_collector_upsert_daily_snapshot('1999-01-04', 'ths_verify', '{"v": 1}'::jsonb);
+  perform public.hive_collector_upsert_daily_snapshot('1999-01-04', 'ths_verify', '{"v": 2}'::jsonb);
+  select count(*), max(payload->>'v')::integer into v_count, v_version from public.daily_snapshot
+   where snapshot_date = '1999-01-04' and kind = 'ths_verify';
+  if v_count <> 1 or v_version <> 2 then raise exception 'daily snapshot upsert failed (rows %, v %)', v_count, v_version; end if;
+  begin
+    perform public.hive_collector_upsert_daily_snapshot('1999-01-04', 'okx_verify', '{}'::jsonb);
+    raise exception 'daily snapshot accepted a non-ths kind';
+  exception when others then
+    if sqlerrm <> 'daily snapshot kind must start with ths_' then raise; end if;
+  end;
+
+  -- Prune removes old ths_ snapshots only.
+  insert into public.daily_snapshot (snapshot_date, kind, payload) values
+    ('1990-01-02', 'ths_verify_old', '{}'::jsonb),
+    ('1990-01-02', 'verify_other_kind', '{}'::jsonb);
+  v_pruned := public.hive_prune_ths_snapshots(30);
+  if v_pruned < 1 then raise exception 'prune did not delete an old ths snapshot'; end if;
+  perform 1 from public.daily_snapshot where snapshot_date = '1990-01-02' and kind = 'ths_verify_old';
+  if found then raise exception 'prune kept an old ths snapshot'; end if;
+  perform 1 from public.daily_snapshot where snapshot_date = '1990-01-02' and kind = 'verify_other_kind';
+  if not found then raise exception 'prune deleted a non-ths snapshot'; end if;
+
+  -- Quote path with source ths keeps the timestamp guard.
+  perform public.hive_collector_upsert_quote('VERIFYTHS', 'ths', 100, 1000000000000);
+  perform public.hive_collector_upsert_quote('VERIFYTHS', 'ths', 90, 999999999000);
+  select price into v_price from public.quotes_latest where symbol = 'VERIFYTHS' and source = 'ths';
+  if v_price <> 100 then raise exception 'ths quote guard failed: expected 100, got %', v_price; end if;
+
+  -- Lease for ths is exclusive and releases on finish.
+  if not public.hive_collector_begin('ths', v_holder, 90) then raise exception 'ths lease should be granted'; end if;
+  if public.hive_collector_begin('ths', gen_random_uuid(), 90) then raise exception 'ths lease granted while held'; end if;
+  perform public.hive_collector_finish('ths', v_holder, 'ok', 0, '{}'::jsonb);
+
+  -- Health gate: an enabled ths source with no success opens a stale alert only while the session is open now and
+  -- was open 10 minutes ago. Outside that window it stays quiet.
+  update public.source_health set enabled = true, last_success_at = null, consecutive_failures = 0 where source = 'ths';
+  perform public.hive_run_health_check();
+  v_expected := case when public.hive_a_share_session_open(now())
+                       and public.hive_a_share_session_open(now() - interval '10 minutes') then 1 else 0 end;
+  select count(*) into v_count from public.alerts
+   where kind = 'source_stale' and resolved_at is null and payload->>'source' = 'ths';
+  if v_count <> v_expected then raise exception 'ths stale gating: expected % alerts, got %', v_expected, v_count; end if;
+
+  -- Schedules: collector every two minutes in the UTC window, and the nightly prune.
+  select schedule, command into v_schedule, v_command from cron.job where jobname = 'hive-ths-collector';
+  if v_schedule is distinct from '*/2 1-7 * * 1-5' or v_command not like '%hive_invoke_edge_function(''ths-collector'')%' then
+    raise exception 'pg_cron job hive-ths-collector missing or misconfigured (schedule %)', v_schedule;
+  end if;
+  select schedule into v_schedule from cron.job where jobname = 'hive-ths-prune';
+  if v_schedule is distinct from '40 3 * * *' then raise exception 'pg_cron job hive-ths-prune missing or misconfigured'; end if;
+
+  -- Only service_role may run the ths write paths.
+  if has_function_privilege('anon', 'public.hive_collector_upsert_daily_snapshot(date,text,jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_collector_upsert_daily_snapshot(date,text,jsonb)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.hive_prune_ths_snapshots(integer)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_prune_ths_snapshots(integer)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.hive_a_share_session_open(timestamptz)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_a_share_session_open(timestamptz)', 'EXECUTE') then
+    raise exception 'ths functions executable by client roles';
+  end if;
+  if not has_function_privilege('service_role', 'public.hive_collector_upsert_daily_snapshot(date,text,jsonb)', 'EXECUTE') then
+    raise exception 'service_role must execute the ths snapshot write path';
+  end if;
+
+  raise notice 'verify.sql: ths-collector checks passed';
+end
+$$;
+
 rollback;

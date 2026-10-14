@@ -21,3 +21,6 @@ verify_jwt = false
 
 [functions.yahoo-collector]
 verify_jwt = false
+
+[functions.ths-collector]
+verify_jwt = false
