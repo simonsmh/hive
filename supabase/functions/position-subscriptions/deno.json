@@ -1,0 +1,11 @@
+{
+  "tasks": {
+    "sync": "node ../../../scripts/sync-edge-core.mjs",
+    "test": "deno test"
+  },
+  "lint": {
+    "rules": {
+      "exclude": ["require-await"]
+    }
+  }
+}
