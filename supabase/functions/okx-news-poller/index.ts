@@ -1,6 +1,6 @@
 import { createOkxNewsHandler, DEFAULT_OKX_NEWS_CONFIG } from "./handler.ts";
 import { createRestOkxNewsStore } from "./store.ts";
-import type { OkxCredentials } from "./okx-signing.ts";
+import type { OkxCredentials } from "./core/okx-signing.ts";
 
 const FETCH_TIMEOUT_MS = 8_000;
 

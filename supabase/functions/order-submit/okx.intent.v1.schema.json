@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/okx.intent.v1.json",
+  "title": "okx.intent.v1",
+  "description": "Order intent accepted by POST /functions/v1/order-submit. Shape checks are in this schema. Gates that need market data or account state (leverage cap, allowlist, notional, loss caps, kill switch, rate limit) run server-side and return rejected_risk.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "intentId", "idempotencyKey", "action", "instId", "side", "posSide", "tdMode", "sz", "source", "createdAt"],
+  "properties": {
+    "schema": { "const": "okx.intent.v1" },
+    "intentId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "action": { "enum": ["open", "close", "amend_tpsl", "reduce"] },
+    "instId": { "type": "string", "pattern": "^[A-Z0-9]+-USDT-SWAP$" },
+    "side": { "enum": ["buy", "sell"] },
+    "posSide": { "enum": ["net", "long", "short"] },
+    "tdMode": { "enum": ["isolated", "cross"] },
+    "lever": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+    "sz": { "type": ["string", "number"], "description": "OKX contract count, positive decimal." },
+    "ordType": { "enum": ["market", "limit"], "default": "market" },
+    "px": { "type": ["string", "number", "null"], "description": "Required for limit orders." },
+    "reduceOnly": { "type": "boolean", "default": false, "description": "Must be false for open and true for close and reduce." },
+    "slTriggerPx": { "type": ["string", "number", "null"] },
+    "slOrdPx": { "type": ["string", "number", "null"], "description": "-1 for a market stop. Required with slTriggerPx." },
+    "tpTriggerPx": { "type": ["string", "number", "null"] },
+    "tpOrdPx": { "type": ["string", "number", "null"], "description": "-1 for a market take-profit. Required with tpTriggerPx." },
+    "theme": { "type": ["string", "null"], "maxLength": 64, "description": "Required for open." },
+    "themeStopCapU": { "type": ["number", "null"], "exclusiveMinimum": 0, "description": "Required for open. Max loss in USDT for this theme." },
+    "maxLossU": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+    "reason": { "type": ["string", "null"], "maxLength": 500 },
+    "source": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "ttlSec": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 120 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "action": { "const": "open" } }, "required": ["action"] },
+      "then": {
+        "required": ["lever", "theme", "themeStopCapU", "slTriggerPx", "slOrdPx"],
+        "properties": {
+          "reduceOnly": { "const": false },
+          "lever": { "type": "number", "exclusiveMinimum": 0 },
+          "theme": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "themeStopCapU": { "type": "number", "exclusiveMinimum": 0 },
+          "slTriggerPx": { "type": ["string", "number"] },
+          "slOrdPx": { "type": ["string", "number"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "enum": ["close", "reduce"] } }, "required": ["action"] },
+      "then": { "properties": { "reduceOnly": { "const": true } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "amend_tpsl" } }, "required": ["action"] },
+      "then": { "anyOf": [{ "required": ["slTriggerPx", "slOrdPx"] }, { "required": ["tpTriggerPx", "tpOrdPx"] }] }
+    },
+    {
+      "if": {
+        "properties": { "ordType": { "const": "limit" }, "action": { "not": { "const": "amend_tpsl" } } },
+        "required": ["ordType"]
+      },
+      "then": { "required": ["px"], "properties": { "px": { "type": ["string", "number"] } } }
+    }
+  ]
+}

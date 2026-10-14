@@ -24,3 +24,7 @@ verify_jwt = false
 
 [functions.ths-collector]
 verify_jwt = false
+
+# Callers send HIVE_ORDER_TOKEN as a bearer token, not a Supabase JWT, so the gateway JWT check must be off.
+[functions.order-submit]
+verify_jwt = false

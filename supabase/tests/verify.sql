@@ -19,7 +19,7 @@ begin
   foreach t in array array[
     'symbol_map', 'candles', 'quotes_latest', 'daily_snapshot', 'source_health',
     'news_events', 'news_items', 'fills', 'alert_rules', 'alerts', 'deliveries', 'webhooks',
-    'webhook_subscriptions', 'webhook_deliveries'
+    'webhook_subscriptions', 'webhook_deliveries', 'kill_switch', 'risk_limits', 'order_intents', 'orders'
   ] loop
     perform 1 from pg_tables where schemaname = 'public' and tablename = t;
     if not found then raise exception 'missing table public.%', t; end if;
@@ -817,6 +817,80 @@ begin
   end if;
 
   raise notice 'verify.sql: ths-collector checks passed';
+end
+$$;
+
+-- order-submit: kill switch and demo limits are seeded, the intent insert is idempotent, and clients cannot reach any of it.
+do $$
+declare
+  v_first jsonb;
+  v_second jsonb;
+  v_count integer;
+  v_status text;
+  v_intent jsonb;
+begin
+  perform 1 from public.kill_switch where id = 1 and engaged = false;
+  if not found then raise exception 'kill_switch row 1 must exist and be disengaged'; end if;
+
+  perform 1 from public.risk_limits
+   where mode = 'demo' and enabled and 'XAU-USDT-SWAP' = any (symbol_allowlist);
+  if not found then raise exception 'demo risk_limits must allowlist XAU-USDT-SWAP'; end if;
+
+  v_intent := jsonb_build_object(
+    'intent_id', 'verify-intent-1', 'idempotency_key', 'verify-key-1', 'mode', 'demo', 'schema_version', 'okx.intent.v1',
+    'action', 'open', 'source', 'verify', 'inst_id', 'XAU-USDT-SWAP', 'side', 'sell', 'pos_side', 'net', 'td_mode', 'isolated',
+    'lever', 15, 'sz', 1, 'ord_type', 'market', 'reduce_only', false, 'sl_trigger_px', 4125, 'sl_ord_px', -1,
+    'theme', 'verify', 'theme_stop_cap_u', 0.1, 'intent_created_at', now(), 'ttl_sec', 120,
+    'cl_ord_id', 'verifyclordid000000000000000000001', 'request', '{}'::jsonb
+  );
+  v_first := public.hive_order_intent_insert(v_intent);
+  if (v_first->>'inserted')::boolean is not true then raise exception 'first intent insert should insert'; end if;
+
+  v_second := public.hive_order_intent_insert(v_intent || jsonb_build_object('intent_id', 'verify-intent-2'));
+  if (v_second->>'inserted')::boolean then raise exception 'repeat idempotency_key must not insert again'; end if;
+  if v_second->'row'->>'cl_ord_id' <> 'verifyclordid000000000000000000001' then
+    raise exception 'repeat intent insert must return the stored row';
+  end if;
+
+  v_count := public.hive_order_submissions_since('demo', now() - interval '1 minute', 'some-other-key');
+  if v_count < 1 then raise exception 'submissions_since should count the in-flight intent, got %', v_count; end if;
+  v_count := public.hive_order_submissions_since('demo', now() - interval '1 minute', 'verify-key-1');
+  if v_count <> 0 then raise exception 'submissions_since must exclude the caller key, got %', v_count; end if;
+
+  perform public.hive_order_intent_finish('verify-key-1', jsonb_build_object('status', 'acked', 'ord_id', '123', 'detail', null));
+  select status into v_status from public.order_intents where idempotency_key = 'verify-key-1';
+  if v_status <> 'acked' then raise exception 'finish did not persist acked, got %', v_status; end if;
+
+  perform public.hive_order_record(jsonb_build_object(
+    'intent_id', 'verify-intent-1', 'mode', 'demo', 'action', 'open', 'kind', 'order', 'inst_id', 'XAU-USDT-SWAP',
+    'side', 'sell', 'pos_side', 'net', 'ord_type', 'market', 'ord_id', '123',
+    'cl_ord_id', 'verifyclordid000000000000000000001', 'sz', 1, 'state', 'accepted'
+  ));
+  perform public.hive_order_set_state('verifyclordid000000000000000000001', 'canceled');
+  perform 1 from public.orders where cl_ord_id = 'verifyclordid000000000000000000001' and ord_id = '123' and state = 'canceled';
+  if not found then raise exception 'orders upsert/set_state did not persist'; end if;
+
+  begin
+    perform public.hive_order_intent_finish('verify-key-1', jsonb_build_object('status', 'filled'));
+    raise exception 'an unknown intent status was accepted';
+  exception when check_violation then
+    null;
+  end;
+
+  if has_table_privilege('anon', 'public.order_intents', 'SELECT')
+     or has_table_privilege('authenticated', 'public.orders', 'SELECT')
+     or has_table_privilege('authenticated', 'public.risk_limits', 'SELECT') then
+    raise exception 'anon/authenticated must not read order tables';
+  end if;
+  if has_function_privilege('anon', 'public.hive_order_intent_insert(jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_order_record(jsonb)', 'EXECUTE') then
+    raise exception 'order RPCs executable by client roles';
+  end if;
+  if not has_function_privilege('service_role', 'public.hive_order_intent_insert(jsonb)', 'EXECUTE') then
+    raise exception 'service_role must execute the order intent insert';
+  end if;
+
+  raise notice 'verify.sql: order-submit checks passed';
 end
 $$;
 
