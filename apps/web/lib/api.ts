@@ -1,4 +1,5 @@
 import { isAuthorized, SubscriptionInputError } from "@hive/core";
+import { readCookieValue, SESSION_COOKIE, verifySessionToken } from "../src/modules/auth/session";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -41,16 +42,21 @@ export function errorResponse(status: number, message: string, extraHeaders: Rec
   return jsonResponse({ error: message }, status, extraHeaders);
 }
 
-/** Returns a 401 response unless the request carries the configured bearer token. */
-export function authorize(request: Request): Response | null {
+/**
+ * Returns a 401 response unless the request is authenticated, either by the configured
+ * bearer token (agents and scripts) or by a valid dashboard session cookie (the browser UI;
+ * the cookie is HttpOnly and SameSite=Lax, so cross-site requests cannot ride it).
+ * The bearer check runs first so API clients never depend on cookie state.
+ */
+export async function authorize(request: Request): Promise<Response | null> {
   const expected = process.env.HIVE_API_TOKEN;
   if (!expected) {
     throw new ConfigError("HIVE_API_TOKEN is not configured");
   }
-  if (!isAuthorized(request.headers.get("authorization"), expected)) {
-    return errorResponse(401, "unauthorized", { "www-authenticate": 'Bearer realm="hive"' });
-  }
-  return null;
+  if (isAuthorized(request.headers.get("authorization"), expected)) return null;
+  const session = readCookieValue(request.headers.get("cookie"), SESSION_COOKIE);
+  if (await verifySessionToken(session, process.env.HIVE_SESSION_SECRET)) return null;
+  return errorResponse(401, "unauthorized", { "www-authenticate": 'Bearer realm="hive"' });
 }
 
 /** Wraps a route body so auth/param/config failures map to the right status without leaking internals. */

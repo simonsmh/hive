@@ -10,7 +10,7 @@ const DEFAULT_LIMIT = 500;
 
 export async function GET(request: Request): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     const params = new URL(request.url).searchParams;

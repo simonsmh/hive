@@ -50,36 +50,40 @@ async function QuoteSection({ quotes, requested }: { quotes: QuoteView[]; reques
   const candles = await loadPanelData(`candles ${selected}`, async () => toCandleBars(await loadDailyCandles(selected)));
 
   return (
-    <>
-      <ul className="list">
-        {quotes.map((quote) => (
-          <li key={quote.symbol} className="quote-row">
-            <strong>{quote.symbol}</strong>
-            {quote.price === null ? (
-              <span className="muted">暂无报价</span>
-            ) : (
-              <span className="price">{formatPrice(quote.price)}</span>
-            )}
-          </li>
-        ))}
-      </ul>
+    <div className="quotes-layout">
+      <section aria-label="最新报价">
+        <ul className="list">
+          {quotes.map((quote) => (
+            <li key={quote.symbol} className="quote-row">
+              <strong>{quote.symbol}</strong>
+              {quote.price === null ? (
+                <span className="muted">暂无报价</span>
+              ) : (
+                <span className="price">{formatPrice(quote.price)}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
 
-      <h2>日线走势（UTC 日线，最近 {CANDLE_HISTORY} 根）</h2>
-      <nav className="chips" aria-label="选择标的">
-        {symbols.map((symbol) => (
-          <Link
-            key={symbol}
-            href={`/quotes?symbol=${encodeURIComponent(symbol)}`}
-            className="chip"
-            aria-current={symbol === selected ? "true" : undefined}
-          >
-            {symbol}
-          </Link>
-        ))}
-      </nav>
+      <section className="quotes-chart" aria-label="K 线走势">
+        <h2>日线走势（UTC 日线，最近 {CANDLE_HISTORY} 根）</h2>
+        <nav className="chips" aria-label="选择标的">
+          {symbols.map((symbol) => (
+            <Link
+              key={symbol}
+              href={`/quotes?symbol=${encodeURIComponent(symbol)}`}
+              className="chip"
+              aria-current={symbol === selected ? "true" : undefined}
+            >
+              {symbol}
+            </Link>
+          ))}
+        </nav>
 
-      {candles.ok ? <CandleBlock symbol={selected} bars={candles.data} /> : <ErrorState message={candles.message} />}
-    </>
+        {candles.ok ? <CandleBlock symbol={selected} bars={candles.data} /> : <ErrorState message={candles.message} />}
+      </section>
+    </div>
   );
 }
 

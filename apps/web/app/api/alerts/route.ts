@@ -13,7 +13,7 @@ const MAX_LIMIT = 200;
 
 export async function GET(request: Request): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     const url = new URL(request.url);
