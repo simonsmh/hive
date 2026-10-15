@@ -448,6 +448,39 @@ p {
   padding: 0 12px;
 }
 
+.toggle-rows {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 14px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  cursor: pointer;
+}
+
+.toggle-row + .toggle-row {
+  border-top: 1px solid var(--border);
+}
+
+.toggle-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--accent);
+  flex: none;
+  cursor: pointer;
+}
+
 .install-banner {
   position: fixed;
   left: 12px;

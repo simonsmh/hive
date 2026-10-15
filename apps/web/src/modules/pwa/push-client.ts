@@ -1,0 +1,96 @@
+/**
+ * Browser-side Web Push plumbing: permission, subscription lifecycle, and syncing
+ * the subscription to /api/push/subscriptions. Everything degrades to a typed state
+ * the settings UI can render (unsupported browsers, denied permission, no VAPID key).
+ */
+
+export interface PushFilters {
+  news: boolean;
+  alerts: boolean;
+}
+
+export type PushSupport = "ready" | "unsupported" | "no-vapid-key";
+
+export function pushSupport(publicKey: string | null): PushSupport {
+  if (!publicKey) return "no-vapid-key";
+  if (typeof window === "undefined") return "unsupported";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    return "unsupported";
+  }
+  return "ready";
+}
+
+export function urlBase64ToUint8Array(base64Url: string): Uint8Array {
+  const padded = base64Url.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(base64Url.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function registration(): Promise<ServiceWorkerRegistration> {
+  return navigator.serviceWorker.ready;
+}
+
+export async function currentSubscription(): Promise<PushSubscription | null> {
+  const reg = await registration();
+  return reg.pushManager.getSubscription();
+}
+
+interface SubscriptionPayload {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  filters: PushFilters;
+}
+
+function toPayload(subscription: PushSubscription, filters: PushFilters): SubscriptionPayload {
+  const json = subscription.toJSON();
+  return {
+    endpoint: subscription.endpoint,
+    keys: { p256dh: json.keys?.p256dh ?? "", auth: json.keys?.auth ?? "" },
+    filters,
+  };
+}
+
+async function postSubscription(subscription: PushSubscription, filters: PushFilters): Promise<void> {
+  const response = await fetch("/api/push/subscriptions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(toPayload(subscription, filters)),
+  });
+  if (!response.ok) throw new Error(`subscription sync failed (${response.status})`);
+}
+
+/** Asks for permission, subscribes, and registers the subscription with the server. */
+export async function subscribePush(publicKey: string, filters: PushFilters): Promise<PushSubscription> {
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") throw new Error("permission-not-granted");
+  const reg = await registration();
+  const existing = await reg.pushManager.getSubscription();
+  const subscription =
+    existing ??
+    (await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+    }));
+  await postSubscription(subscription, filters);
+  return subscription;
+}
+
+/** Re-syncs filter choices for an existing subscription. */
+export async function updatePushFilters(filters: PushFilters): Promise<void> {
+  const subscription = await currentSubscription();
+  if (subscription) await postSubscription(subscription, filters);
+}
+
+/** Removes the server registration first, then the browser subscription. */
+export async function unsubscribePush(): Promise<void> {
+  const subscription = await currentSubscription();
+  if (!subscription) return;
+  await fetch("/api/push/subscriptions", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint: subscription.endpoint }),
+  }).catch(() => undefined);
+  await subscription.unsubscribe();
+}

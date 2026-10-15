@@ -621,6 +621,7 @@ Edge Function 已取代 Worker，**默认不需要部署**。仅在需要回退�
 | `/alerts` | 最近 50 条告警（过期与恢复） | `alerts` |
 | `/news` | 最近 20 个新闻事件，同一事件的多条来源聚合显示 | `news_events`、`news_items` |
 | `/quotes` | OKX 永续合约最新价与日线走势 | `quotes_latest`、`candles`、`symbol_map` |
+| `/settings` | 设置：推送通知订阅、API 访问说明 | `push_subscriptions` |
 
 面板在 `apps/web/src/modules/registry.ts` 中注册。新增面板需要追加一条注册项，并创建 `app/(dashboard)/<id>/page.tsx`，导航与 PWA 快捷方式会自动生成。
 
@@ -640,7 +641,17 @@ Edge Function 已取代 Worker，**默认不需要部署**。仅在需要回退�
 - 登录成功后下发 `hive_session` Cookie（HttpOnly、Secure、SameSite=Lax），有效期 7 天。
 - 修改 `HIVE_DASHBOARD_PASSWORD` 只影响之后的登录，已登录的会话仍然有效直到过期。要立即让所有会话失效，请更换 `HIVE_SESSION_SECRET` 并重新部署。
 - 登录失败会延迟约 500 毫秒，没有其他速率限制。请使用足够长的随机密码。
-- `/api/*` 不经过登录页，仍使用 `HIVE_API_TOKEN` 的 Bearer 认证，供 Agent 调用。浏览器登录与 Agent 访问互不影响。
+- `/api/*` 不经过登录页：Agent 用 `HIVE_API_TOKEN` 的 Bearer 认证，浏览器界面用登录后的会话 Cookie，两者互不影响（推送订阅接口只认会话 Cookie）。
+
+### 推送通知（Web Push）
+
+设置页可订阅新闻与重要告警的浏览器推送：订阅存 `push_subscriptions`，Edge Function `push-notify` 每分钟由 pg_cron 唤醒，把近 10 分钟的新闻事件与 critical 告警按订阅的筛选扇出，`push_deliveries` 领取式去重，推送服务返回 404/410 的订阅会被自动删除。发送端密钥（VAPID）需要生成一次：
+
+```bash
+node -e "const {generateKeyPairSync}=require('node:crypto');const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'});const p=publicKey.export({format:'jwk'}),d=privateKey.export({format:'jwk'});const b=(s)=>Buffer.from(s,'base64url');const pub=Buffer.concat([Buffer.from([4]),b(p.x),b(p.y)]);console.log('PUBLIC',pub.toString('base64url'));console.log('PRIVATE',d.d)"
+```
+
+配置位置：Vercel 环境变量 `NEXT_PUBLIC_VAPID_PUBLIC_KEY`（与公钥相同，公开无妨）；Supabase Edge Function secrets `VAPID_PUBLIC_KEY`、`VAPID_PRIVATE_KEY`、`VAPID_SUBJECT`（如 `mailto:ops@example.com`）。私钥只放在 Edge secrets 中，不要提交仓库。未配置时设置页会显示「推送未配置」，`push-notify` 返回 500 且不发送。
 
 本地运行：
 

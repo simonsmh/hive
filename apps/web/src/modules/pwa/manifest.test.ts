@@ -27,6 +27,6 @@ describe("web app manifest", () => {
 
   it("exposes one Chinese shortcut per dashboard panel", () => {
     expect(data.shortcuts?.map((s) => s.name)).toEqual(PANELS.slice().sort((a, b) => a.order - b.order).map((p) => p.title));
-    expect(data.shortcuts?.map((s) => s.url)).toEqual(["/health", "/quotes", "/news", "/alerts"]);
+    expect(data.shortcuts?.map((s) => s.url)).toEqual(["/health", "/quotes", "/news", "/alerts", "/settings"]);
   });
 });
