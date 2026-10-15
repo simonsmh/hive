@@ -12,7 +12,8 @@ export interface PushSubscriptionRow {
 
 export interface NewsEventRow {
   id: string;
-  title: string;
+  /** The schema permits nulls; buildCandidates falls back like the news panel does. */
+  title: string | null;
   first_published_at: string;
 }
 
@@ -46,6 +47,11 @@ export interface PushNotifyDeps {
   vapid: VapidKeys | undefined;
   store: PushStore;
   now?: () => number;
+  /**
+   * Event lookback window. 30 minutes gives the 200-send-per-run cap a 30x
+   * backlog buffer before an unsent event ages out of the window; a persisted
+   * cursor would be needed only far beyond this deployment's scale.
+   */
   lookbackMinutes?: number;
   maxSendsPerRun?: number;
   sendPush?: SendPushFunction;
@@ -90,7 +96,7 @@ export function buildCandidates(events: readonly NewsEventRow[], alerts: readonl
       eventKey: `news:${event.id}`,
       kind: "news",
       title: "Hive 新闻",
-      body: truncate(event.title, 180),
+      body: truncate(event.title?.trim() || "未命名事件", 180),
       url: "/news",
     });
   }
@@ -109,7 +115,7 @@ export function buildCandidates(events: readonly NewsEventRow[], alerts: readonl
 
 export function createPushNotifyHandler(deps: PushNotifyDeps) {
   const now = deps.now ?? Date.now;
-  const lookbackMinutes = deps.lookbackMinutes ?? 10;
+  const lookbackMinutes = deps.lookbackMinutes ?? 30;
   const maxSends = deps.maxSendsPerRun ?? 200;
   const sendPush = deps.sendPush ?? sendWebPush;
   const log = deps.log ?? (() => undefined);

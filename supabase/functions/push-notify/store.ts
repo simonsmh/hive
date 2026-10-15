@@ -69,13 +69,13 @@ export function createRestPushStore(options: RestStoreOptions): PushStore {
     },
 
     async claimDelivery(subscriptionId: string, eventKey: string): Promise<boolean> {
-      const rows = await request(
-        "POST",
-        "push_deliveries",
-        { subscription_id: subscriptionId, event_key: eventKey },
-        "resolution=ignore-duplicates, return=representation",
-      );
-      return Array.isArray(rows) && rows.length > 0;
+      // Lease semantics live in hive_push_claim: a fresh conflicting claim reports
+      // "already taken", a claim older than 30 minutes is refreshed and acquired.
+      const claimed = await request("POST", "rpc/hive_push_claim", {
+        p_subscription_id: subscriptionId,
+        p_event_key: eventKey,
+      });
+      return claimed === true;
     },
 
     async releaseDelivery(subscriptionId: string, eventKey: string): Promise<void> {

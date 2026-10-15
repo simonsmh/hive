@@ -37,6 +37,20 @@ export async function currentSubscription(): Promise<PushSubscription | null> {
   return reg.pushManager.getSubscription();
 }
 
+/**
+ * Whether a browser subscription was created for this application server key.
+ * After a VAPID key rotation the old subscription is unusable: the server signs
+ * with the new key while the push service still expects the old one, so the
+ * subscription must be recreated instead of reused.
+ */
+export function sameApplicationServerKey(serverKey: ArrayBuffer | null, publicKey: string): boolean {
+  if (!serverKey) return false;
+  const expected = urlBase64ToUint8Array(publicKey);
+  if (serverKey.byteLength !== expected.byteLength) return false;
+  const actual = new Uint8Array(serverKey);
+  return actual.every((byte, index) => byte === expected[index]);
+}
+
 interface SubscriptionPayload {
   endpoint: string;
   keys: { p256dh: string; auth: string };
@@ -67,12 +81,17 @@ export async function subscribePush(publicKey: string, filters: PushFilters): Pr
   if (permission !== "granted") throw new Error("permission-not-granted");
   const reg = await registration();
   const existing = await reg.pushManager.getSubscription();
+  if (existing && !sameApplicationServerKey(existing.options?.applicationServerKey ?? null, publicKey)) {
+    // Stale key: drop it so the fresh subscription below is bound to the current key.
+    await existing.unsubscribe();
+  }
   const subscription =
-    existing ??
-    (await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
-    }));
+    existing && sameApplicationServerKey(existing.options?.applicationServerKey ?? null, publicKey)
+      ? existing
+      : await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+        });
   await postSubscription(subscription, filters);
   return subscription;
 }

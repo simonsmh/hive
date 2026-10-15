@@ -645,7 +645,7 @@ Edge Function 已取代 Worker，**默认不需要部署**。仅在需要回退�
 
 ### 推送通知（Web Push）
 
-设置页可订阅新闻与重要告警的浏览器推送：订阅存 `push_subscriptions`，Edge Function `push-notify` 每分钟由 pg_cron 唤醒，把近 10 分钟的新闻事件与 critical 告警按订阅的筛选扇出，`push_deliveries` 领取式去重，推送服务返回 404/410 的订阅会被自动删除。发送端密钥（VAPID）需要生成一次：
+设置页可订阅新闻与重要告警的浏览器推送：订阅存 `push_subscriptions`，Edge Function `push-notify` 每分钟由 pg_cron 唤醒，把近 30 分钟的新闻事件与 critical 告警按订阅的筛选扇出。`push_deliveries` 领取式去重（`hive_push_claim`，领取带 30 分钟租约，函数中途崩溃后租约过期可恢复发送），推送服务返回 404/410 的订阅会被自动删除，投递记录每天凌晨由 `hive-push-prune` 清理 7 天以上的行。轮换 VAPID 密钥后浏览器会自动重建订阅（旧密钥绑定的订阅会被丢弃重订）。发送端密钥（VAPID）需要生成一次：
 
 ```bash
 node -e "const {generateKeyPairSync}=require('node:crypto');const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'});const p=publicKey.export({format:'jwk'}),d=privateKey.export({format:'jwk'});const b=(s)=>Buffer.from(s,'base64url');const pub=Buffer.concat([Buffer.from([4]),b(p.x),b(p.y)]);console.log('PUBLIC',pub.toString('base64url'));console.log('PRIVATE',d.d)"

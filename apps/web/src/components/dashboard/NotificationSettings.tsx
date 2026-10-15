@@ -8,6 +8,7 @@ import {
   unsubscribePush,
   updatePushFilters,
   type PushFilters,
+  type PushSupport,
 } from "@/src/modules/pwa/push-client";
 
 type Phase = "loading" | "unsubscribed" | "subscribed" | "denied" | "working";
@@ -33,10 +34,17 @@ function loadFilters(): PushFilters {
  * per-minute push-notify run can fan out news and critical alerts.
  */
 export function NotificationSettings({ publicKey }: { publicKey: string | null }) {
-  const support = pushSupport(publicKey);
+  // Browser capability detection must wait for hydration: the server render has no
+  // window, so evaluating pushSupport() during render would emit unsupported
+  // markup that mismatches the client's first render. Start browser-neutral.
+  const [support, setSupport] = useState<PushSupport | null>(null);
   const [phase, setPhase] = useState<Phase>("loading");
   const [filters, setFilters] = useState<PushFilters>({ news: true, alerts: true });
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSupport(pushSupport(publicKey));
+  }, [publicKey]);
 
   useEffect(() => {
     if (support !== "ready") return;
@@ -49,6 +57,10 @@ export function NotificationSettings({ publicKey }: { publicKey: string | null }
       .then((subscription) => setPhase(subscription ? "subscribed" : "unsubscribed"))
       .catch(() => setPhase("unsubscribed"));
   }, [support]);
+
+  if (support === null) {
+    return <p className="meta">正在检测推送支持…</p>;
+  }
 
   if (support === "no-vapid-key") {
     return (

@@ -177,6 +177,12 @@ Deno.test("releases the claim and records the failure when sending throws", asyn
   strictEqual(calls.failedMarks.length, 2);
 });
 
+Deno.test("buildCandidates tolerates a null news title instead of failing the run", () => {
+  const candidates = buildCandidates([{ ...EVENT, id: "ev-null", title: null }], []);
+  strictEqual(candidates.length, 1);
+  strictEqual(candidates[0]!.body, "未命名事件");
+});
+
 Deno.test("parsePushFilters and buildCandidates units", () => {
   deepStrictEqual(parsePushFilters(null), { news: true, alerts: true });
   deepStrictEqual(parsePushFilters({ news: false }), { news: false, alerts: true });
