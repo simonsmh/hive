@@ -152,7 +152,7 @@ describe("sessionCookieAttributes", () => {
 });
 
 describe("checkApiToken", () => {
-  const token = "<redacted>";
+  const token = "test-api-token-0123456789abcdef";
 
   it("accepts only the exact token", async () => {
     expect(await checkApiToken(token, token)).toBe(true);
