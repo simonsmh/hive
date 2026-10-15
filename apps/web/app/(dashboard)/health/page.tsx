@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { LiveRefresh } from "@/src/components/dashboard/LiveRefresh";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatAge, formatBeijingTime } from "@/src/modules/format";
+import { digestHealth } from "@/src/modules/live/digest";
 import { WebhookDeliverySection } from "@/src/components/dashboard/WebhookDeliverySection";
 import { buildHealthReport, type SourceHealthRow, type SourceHealthView } from "@/src/modules/health/mapper";
 import { loadSourceHealth } from "@/src/modules/health/query";
@@ -21,6 +23,9 @@ export default async function HealthPage() {
   ]);
   return (
     <PanelFrame title={panel.title} subtitle="各数据源最近一次成功采集。已启用且过期的数据源会使 /api/health 返回 503。">
+      {health.ok ? (
+        <LiveRefresh topic="health" field="digest" baseline={digestHealth(health.data)} label="" auto />
+      ) : null}
       {health.ok ? <HealthBody rows={health.data} /> : <ErrorState message={health.message} />}
       {deliveries.ok ? <WebhookDeliverySection summary={deliveries.data} /> : <ErrorState message={deliveries.message} />}
     </PanelFrame>

@@ -8,6 +8,7 @@ import { DELETE as deleteWebhook, PATCH as patchWebhook } from "../app/api/webho
 import { GET as listDeliveries } from "../app/api/webhook-deliveries/route";
 import { GET as listAlerts } from "../app/api/alerts/route";
 import { GET as listNews } from "../app/api/news/route";
+import { GET as getStream } from "../app/api/stream/route";
 
 vi.mock("server-only", () => ({}));
 
@@ -45,6 +46,7 @@ describe("API auth and validation (no database)", () => {
     ["webhook deliveries", () => listDeliveries(new Request(`${base}/api/webhook-deliveries`))],
     ["alerts", () => listAlerts(new Request(`${base}/api/alerts`))],
     ["news", () => listNews(new Request(`${base}/api/news`))],
+    ["stream", () => getStream(new Request(`${base}/api/stream`))],
   ])("%s rejects requests without a bearer token", async (_name, call) => {
     const response = await call();
     expect(response.status).toBe(401);
