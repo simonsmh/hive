@@ -42,7 +42,6 @@ const GROK_SHORT = {
 };
 
 const LIMITS: RiskLimitsView = {
-  symbolAllowlist: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "XAU-USDT-SWAP"],
   maxNotionalUsdt: 500,
   maxLeverage: 20,
   maxOrdersPerMin: 5,
@@ -185,30 +184,12 @@ describe("preflightRisk", () => {
     expect(preflightRisk(parsed(), null, CLEAR)).toBe("no_risk_limits");
   });
 
-  it("rejects symbols outside the allowlist, including closes", () => {
-    expect(preflightRisk(parsed({ instId: "DOGE-USDT-SWAP" }), LIMITS, CLEAR)).toBe("symbol_not_allowed");
-    expect(
-      preflightRisk(parsed({ action: "close", reduceOnly: true, instId: "DOGE-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null }), LIMITS, CLEAR),
-    ).toBe("symbol_not_allowed");
-  });
-
-  it("lets amend_tpsl and reduce run outside the allowlist when the instrument has an enabled subscription", () => {
-    const subscribed = { killEngaged: false, submissionsLastMinute: 0, hasEnabledSubscription: true };
-    const reduce = { action: "reduce", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
-    const amend = { action: "amend_tpsl", instId: "QQQ-USDT-SWAP", tpTriggerPx: "741", tpOrdPx: "-1", slTriggerPx: "721", slOrdPx: "-1", reduceOnly: true };
-    expect(preflightRisk(parsed(reduce), LIMITS, subscribed)).toBeNull();
-    expect(preflightRisk(parsed(amend), LIMITS, subscribed)).toBeNull();
-  });
-
-  it("keeps the allowlist for amend_tpsl and reduce without a subscription, and for opens and closes", () => {
-    const none = { killEngaged: false, submissionsLastMinute: 0, hasEnabledSubscription: false };
-    const reduce = { action: "reduce", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
-    expect(preflightRisk(parsed(reduce), LIMITS, none)).toBe("symbol_not_allowed");
-    expect(preflightRisk(parsed({ instId: "QQQ-USDT-SWAP" }), LIMITS, { ...none, hasEnabledSubscription: true })).toBe(
-      "symbol_not_allowed",
-    );
+  it("does not gate on the instrument: opens, closes and reduces on any USDT swap pass when the other gates are clear", () => {
     const close = { action: "close", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
-    expect(preflightRisk(parsed(close), LIMITS, { ...none, hasEnabledSubscription: true })).toBe("symbol_not_allowed");
+    const reduce = { action: "reduce", reduceOnly: true, instId: "QQQ-USDT-SWAP", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(preflightRisk(parsed({ instId: "DOGE-USDT-SWAP" }), LIMITS, CLEAR)).toBeNull();
+    expect(preflightRisk(parsed(close), LIMITS, CLEAR)).toBeNull();
+    expect(preflightRisk(parsed(reduce), LIMITS, CLEAR)).toBeNull();
   });
 
   it("enforces the per-minute submission rate", () => {

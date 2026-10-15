@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hive.local/schemas/okx.intent.v1.json",
   "title": "okx.intent.v1",
-  "description": "Order intent accepted by POST /functions/v1/order-submit. Shape checks are in this schema. Gates that need market data or account state (leverage cap, allowlist, notional, loss caps, kill switch, rate limit) run server-side and return rejected_risk.",
+  "description": "Order intent accepted by POST /functions/v1/order-submit. Shape checks are in this schema. Gates that need market data or account state (leverage cap, notional, loss caps, kill switch, rate limit) run server-side and return rejected_risk.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "intentId", "idempotencyKey", "action", "instId", "side", "posSide", "tdMode", "sz", "source", "createdAt"],

@@ -18,7 +18,6 @@ export interface RestStoreOptions {
 }
 
 interface RiskLimitsDbRow {
-  symbol_allowlist: string[];
   max_notional_usdt: number | string;
   max_leverage: number | string;
   max_orders_per_min: number | string;
@@ -139,7 +138,7 @@ export function createRestOrderStore(options: RestStoreOptions): OrderStore {
 
     async riskLimits(mode: TradeMode): Promise<RiskLimitsView | null> {
       const query = new URLSearchParams({
-        select: "symbol_allowlist,max_notional_usdt,max_leverage,max_orders_per_min",
+        select: "max_notional_usdt,max_leverage,max_orders_per_min",
         mode: `eq.${mode}`,
         enabled: "eq.true",
         limit: "1",
@@ -148,23 +147,10 @@ export function createRestOrderStore(options: RestStoreOptions): OrderStore {
       const row = rows[0];
       if (!row) return null;
       return {
-        symbolAllowlist: row.symbol_allowlist,
         maxNotionalUsdt: Number(row.max_notional_usdt),
         maxLeverage: Number(row.max_leverage),
         maxOrdersPerMin: Number(row.max_orders_per_min),
       };
-    },
-
-    async hasEnabledSubscription(mode: TradeMode, instId: string): Promise<boolean> {
-      const query = new URLSearchParams({
-        select: "id",
-        mode: `eq.${mode}`,
-        inst_id: `eq.${instId}`,
-        enabled: "eq.true",
-        limit: "1",
-      });
-      const rows = (await request("GET", `/rest/v1/position_subscriptions?${query.toString()}`)) as { id: string }[];
-      return rows.length > 0;
     },
 
     async insertIntent(record: IntentRecord): Promise<InsertResult> {

@@ -711,7 +711,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
 | 幂等（见下） | 重复 key 返回原结果，或 `409` |
 | `expired` | `422` `expired` |
 | kill switch（`kill_switch.engaged`） | `423` `rejected_risk`（`kill_switch_engaged`）。engage 后 close 与 reduce 也会被拒绝，需要先关闭 kill switch 或直接在 OKX 平仓 |
-| `risk_limits`（标的白名单、单分钟提交数）；缺少启用的限额行时 fail closed。`amend_tpsl` 与 `reduce` 不受白名单限制，只要该标的有启用的持仓订阅（见 P0c） | `422` `rejected_risk` |
+| `risk_limits`（单分钟提交数）；缺少启用的限额行时 fail closed。标的不做白名单检查，`risk_limits.symbol_allowlist` 已不再使用，其他风控照常生效 | `422` `rejected_risk` |
 | 开仓：杠杆上限、名义金额上限（`sz × ctVal × 价格`），止损方向，`themeStopCapU` / `maxLossU`（`名义 × |入场 − SL| / 入场`） | `422` `rejected_risk`（`notional_exceeds_limit`、`loss_exceeds_theme_cap` 等）。入场价取市价开仓的最新价（ticker `last`）或限价单的 `px` |
 | OKX 下单 | 成功返回 `200` `acked` 与 `ordId` / `algoId`；OKX 明确拒绝返回 `502` `exchange_error`（`okx_rejected:<sCode>`）；鉴权被 OKX 拒绝返回 `401` `rejected_auth`（`okx_auth:<code>`） |
 
@@ -752,7 +752,7 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 - `open` 附带的 SL/TP 随订单成交由 OKX 挂载，Hive 不跟踪它的 `algoId`。`amend_tpsl` 只会撤销 Hive 自己下的条件单，不会撤销开仓时挂载的 SL。
 - `amend_tpsl` 的价格门使用持仓均价（`/account/positions` 的 `avgPx`），不是当前价。
 - 所有 OKX 请求和响应字段都按 OKX v5 文档实现，但**尚未在真实模拟盘上端到端验证**，合入后需要用一笔小额模拟单确认。
-- 限额数值（`demo-default`：白名单 BTC/ETH/SOL/XAU，单笔名义上限 500 USDT，杠杆上限 20，每分钟 5 笔）是起始值，需要确认后再调整。
+- 限额数值（`demo-default`：单笔名义上限 500 USDT，杠杆上限 20，每分钟 5 笔）是起始值，需要确认后再调整。标的白名单已移除，`symbol_allowlist` 列保留但不被 order-submit 读取。
 
 ## 持仓管理（P0c，live，pg_cron 每 3 分钟）
 
@@ -765,9 +765,9 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 
 **没有标的白名单**。持仓管理不包含任何写死的标的列表（不是只允许 XAU/BTC/ETH/SOL）。只要 `position_subscriptions` 中存在该标的的启用订阅（`mode` 一致），它就能被管理，**QQQ-USDT-SWAP 与其他 USDT 永续同样适用**。`themeStopCapU` 必须在 `(0, 0.1]` 之间，由表约束与 upsert 校验共同保证。
 
-**order-submit 的改动**。`amend_tpsl` 与 `reduce` 不再因为标的不在 `risk_limits.symbol_allowlist` 中而拒绝，前提是该标的存在启用的持仓订阅。开仓（`open`）仍然受白名单约束。没有启用订阅、不在白名单中的 `amend_tpsl` / `reduce` 仍返回 `symbol_not_allowed`。
+**order-submit 的改动**。order-submit 不再检查标的白名单：开仓（`open`）、平仓（`close`）、减仓（`reduce`）与改止盈（`amend_tpsl`）都不会因标的而被拒绝，不再返回 `symbol_not_allowed`，也不再为此查询 `position_subscriptions`。kill switch、限频、杠杆上限、名义金额上限、止损方向、`themeStopCapU` / `maxLossU` 等其他风控仍然生效。
 
-**live 风控行（`live-default`）**。迁移 `20261014000025` 在没有启用的 live 限额行时写入一行，`symbol_allowlist` 为空、`max_notional_usdt=500`、`max_leverage=15`、`max_orders_per_min=10`。空白名单意味着 live **开仓**全部被拒绝，只有订阅的持仓动作可以通过。停用：`update public.risk_limits set enabled = false where name = 'live-default';`（同时停用持仓动作，因为 order-submit 将缺少限额行视为 fail closed）。
+**live 风控行（`live-default`）**。迁移 `20261014000025` 在没有启用的 live 限额行时写入一行，`symbol_allowlist` 为空、`max_notional_usdt=500`、`max_leverage=15`、`max_orders_per_min=10`。`symbol_allowlist` 已不再被 order-submit 读取，因此该列为空不会再拒绝任何 live 开仓；live 开仓仍受 kill switch、`OKX_TRADE_LIVE_ENABLED`、杠杆与名义金额上限、止损与 `themeStopCapU` 约束。停用：`update public.risk_limits set enabled = false where name = 'live-default';`（同时停用持仓动作，因为 order-submit 将缺少限额行视为 fail closed）。
 
 ### 组件与迁移
 
@@ -850,7 +850,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
 
 ### 幂等与失败语义
 
-- **减仓**的幂等键不按时间分桶，并且包含 `halfReduceAttempts`。订单被 order-submit 接受后，同一订阅不会再次减仓。只有**没有下单**的拒绝（例如 kill switch、限频、`symbol_not_allowed`、OKX 明确拒绝）才会释放租约，并将 `half_reduce_attempts` 加一，之后的重试使用新键。
+- **减仓**的幂等键不按时间分桶，并且包含 `halfReduceAttempts`。订单被 order-submit 接受后，同一订阅不会再次减仓。只有**没有下单**的拒绝（例如 kill switch、限频、OKX 明确拒绝）才会释放租约，并将 `half_reduce_attempts` 加一，之后的重试使用新键。
 - 减仓结果**无法确认**（网络超时、`outcome_unknown`、超时）时，`half_reduce_done` 置为 `true` 并在 `last_note` 写入 `check_okx`。此后该订阅不会再自动减仓，需要先在 OKX 上核对。核对后若确认未减仓，可用 `resetState: true` 重新登记（注意：这会把订阅视为全新持仓）。
 - **改止盈**的幂等键按 3 分钟分桶，与 okx.intent.v1 的约定一致。
 - 租约为 300 秒。崩溃后的运行会在租约过期后才能重新获得减仓资格，而且 order-submit 的 10 分钟窗口会阻止重复下单。
@@ -861,7 +861,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
 - `themeStopCapU` 只作为配置上限（`<= 0.1`），**不是**保护单替换时的实时亏损闸门。保护单按 `amend_tpsl` 原样重发，不携带 `themeStopCapU`，否则 `priceRisk` 会在持仓已亏损时拒绝替换 SL/TP。
 - `order-submit` 的 `amend_tpsl` 只撤销 Hive 自己记录过的条件单，开仓时由 OKX 挂载的 SL/TP 不在其中，因此 position-manager 自行撤销同方向残留的 reduce-only 条件单。
 - `tp_px` 会随动态 TP 更新为最近一次下达给 OKX 的价格；再次执行种子会把它重置回种子中的 `tpPx`，下一个周期会再次修正。
-- 只有 `open` 受 `live-default` 空白名单约束，因此 live 新开仓默认全部拒绝。
+- 白名单闸门已移除，`live-default` 的空 `symbol_allowlist` 不再使 live 新开仓被拒绝。live 新开仓现在只受其他风控闸门约束。
 
 ### 未实现（P0d，本 PR 不包含）
 
