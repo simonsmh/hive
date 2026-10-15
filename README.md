@@ -48,6 +48,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
 - **Yahoo 行情（supabase/functions/yahoo-collector）**：pg_cron 每 2 分钟调用一次（`hive-yahoo-collector`，每天 720 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `yahoo_symbol` 非空的符号，请求 Yahoo 公开图表接口 `/v8/finance/chart/{yahoo_symbol}`，无需密钥。每个符号每次运行发起一次 `interval=1m&range=1d&includePrePost=true` 请求，同时得到最新报价（最新 1m 收盘价）与最近 60 根 1m K 线；日线（`interval=1d&range=3mo`）每个符号每小时至多请求一次。数据经 `hive_collector_*` 写入，`source = 'yahoo'`。租约使用 `collector_state` 中的 `yahoo` 行，与 OKX 互不影响。遇到 429 或 403 时本次运行不再发起新请求，并退避 10 分钟。`source_health.yahoo` 默认禁用，见「部署 > Yahoo 行情」。
 - **同花顺行情（supabase/functions/ths-collector，可选）**：pg_cron 每 2 分钟调用一次，只在北京时间工作日 09:15–15:15 请求上游。指数与个股报价写入 `quotes_latest`（`source = 'ths'`），涨跌停池、热门股、龙虎榜、竞价、涨跌家数等写入 `daily_snapshot`。默认关闭，部署步骤与调用预算见下文「部署 > ths 行情」。
+- **Google Finance 财报（supabase/functions/google-finance-collector，可选）**：只在财报电话会议窗口内运行。读取 Google Finance 财报页的 FinHub 接口，写入财报指引卡片与电话会议文字稿（增量），指引数值变化以 `critical` 告警推送。没有常驻 cron，默认不调度，见下文「部署 > Google Finance 财报」。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
 
@@ -119,6 +120,7 @@ supabase/
   functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
   functions/ths-collector/     Edge Function（Deno）：同花顺（HiThink）行情、盘口池与交易日历
+  functions/google-finance-collector/ Edge Function（Deno）：Google Finance 财报指引与电话会议文字稿（仅财报窗口内）
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
   functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（P0b，demo 默认，live 需显式开启）
   functions/position-manager/  Edge Function（Deno）：持仓管理（P0c，pg_cron 每 3 分钟）：动态 ATR 止盈、半程减仓
@@ -263,7 +265,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector; do
+for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -288,6 +290,8 @@ done
    - `…000021_alert_evaluator.sql`：`alert_rules.kind` 允许 `pct_move`；`SKHY` 写入 `symbol_map`（启用，幂等）；SNDK、MU、SKHY 的 `pct_move` 规则种子；`hive_alert_evaluator_record` 写入函数；`hive-alert-evaluator`（每分钟）
    - `…000022_yahoo_collector.sql`：`collector_state` 与 `source_health` 的 `yahoo` 行（健康告警默认禁用）；`hive-yahoo-collector`（每 2 分钟）
    - `…000023_ths_collector.sql`：`symbol_map` 增加 `ths_code`、`ths_kind`、`ths_auction`（默认关闭）；`source_health.session_only`（ths 的过期告警只在交易时段判断）；`hive_run_health_check` 按该标记跳过窗口外的检查；`hive_collector_upsert_daily_snapshot` 与 `hive_prune_ths_snapshots`；`hive-ths-collector`（每 2 分钟）与 `hive-ths-prune`。全部幂等，`ths` 数据源保持关闭，直到按下文「ths 行情」启用。若 Yahoo 的 `…000022_yahoo_collector.sql` 尚未应用，先按顺序执行它。
+   - `…000026_google_finance_source_enum.sql`：为 `market_source` 增加 `google-finance-earnings`（须单独迁移）
+   - `…000027_google_finance_earnings.sql`：`earnings_watch`（TSM:NYSE 为主行，2330:TPE 为别名，均默认关闭）、`earnings_guidance_snapshots`、`earnings_transcript_segments`；`hive_earnings_record` 写入函数；`hive_google_finance_earnings_tick()`（不调度）；`hive_prune_earnings`（每天 03:43 UTC，保留 90 天）；`earnings_guidance` 告警为 `critical`。全部幂等。
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -299,6 +303,8 @@ done
    supabase functions deploy alert-evaluator --no-verify-jwt
    supabase functions deploy yahoo-collector --no-verify-jwt
    supabase functions deploy ths-collector --no-verify-jwt
+   supabase functions deploy google-finance-collector --no-verify-jwt
+
    ```
 
    `--no-verify-jwt` 与 `supabase/config.toml` 中的 `verify_jwt = false` 保持一致。pg_net 不携带 Supabase JWT，因此每个函数都改用自己的共享密钥校验 Bearer，未通过校验的请求返回 401。
@@ -498,6 +504,90 @@ update public.symbol_map set ths_auction = true where symbol = 'MOUTAI';
 **密钥与安全**
 
 - `HITHINK_FINANCE_API_KEY` 只通过 Edge secret 注入。代码、日志与错误信息都不包含密钥，测试中有覆盖。
+
+### Google Finance 财报（google-finance-collector，可选）
+
+数据来自 Google Finance 财报页使用的 FinHub 接口，与浏览器页面请求相同的 batchexecute RPC，不解析 DOM。两个调用都不需要 Cookie 或密钥，只需要 Google 页面中的 `bl`（build label）与会话 id，由函数从财报页 HTML 获取并缓存 6 小时：
+
+- At-a-glance 财报指引卡片：RPC `Xs5i3b`，请求体 `f.req=[[["Xs5i3b","[[null,[\"TSM\",\"NYSE\"]]]",null,"generic"]]]`
+- 电话会议文字稿：`finance.hub.proto.FinanceHubService/GetEarningsTranscript`，请求体 `f.req=[null,"[[[null,[\"TSM\",\"NYSE\"]],0]"]]`。这是优先使用的接口，结构比 `Xs5i3b` 稳定。
+
+**风险与边界**
+
+- 这是 Google 的非官方内部接口，没有服务条款保证，可能随时变更或限流。遇到限流时函数会退避 15 分钟（`blocked`）。
+- **RPC id 漂移**：`Xs5i3b` 会随 Google 前端发布而变化。出现 `rpc_missing` 或格式错误时，需要重新从浏览器 HAR 中抓取新的 id，并更新 `packages/core/src/google-finance.ts` 中的 `GLANCE_RPC_ID`，再执行 `pnpm sync:edge-core`。
+- 指引数值由规则从卡片与文字稿中抽取（营收、毛利率、营业利润率、资本开支、FY 增速），只作为告警的依据，不做交易判断。
+
+**调度（只在财报窗口内运行）**
+
+- 迁移不注册任何 cron 任务。`hive_google_finance_earnings_tick()` 只在某个 `enabled` 行位于窗口内时调用 Edge Function，窗口外仅执行一次 SQL 检查，不发起网络请求。
+- 窗口由 `earnings_watch.call_time` 决定：`call_time - pre_minutes`（默认 30 分钟）至 `call_time + post_minutes`（默认 180 分钟）。函数内会再次检查窗口，窗口外的定时请求返回 `idle`。
+- `call_time` 是 `timestamptz`，请从公司 IR 日历取绝对时间。Google 页面上的 Call Time 按浏览器时区显示，不要直接照抄本地时间。
+- 默认状态（`TSM:NYSE` 与 `2330:TPE` 均 `enabled = false`）下，本功能不产生任何请求。`source_health` 中 `google-finance-earnings` 默认禁用，因此窗口外不会产生过期告警。
+
+**符号映射**
+
+- `TSM:NYSE` → `earnings_watch.symbol = 'TSM'`，为主行。`symbol_map` 中 `TSM` 对应 OKX 永续 `TSM-USDT-SWAP`，告警与文字稿都归到 `TSM`。
+- `2330:TPE`（台积电台湾股）是同一公司的别名，默认关闭，避免同一场电话会议被重复采集。告警的去重键按 Hive 符号计算，同时启用两者也只产生一条告警。
+
+**推送与 Grok**
+
+- 指引变化写入 `alerts`，`kind = earnings_guidance`，`severity = critical`，`dedup_key = earnings:<symbol>:<event_date>:<field>:<value>`。重复轮询不会产生重复告警。`earnings_guidance` 归入 critical 优先级，过期时间为空，过期阈值 120 秒。
+- 卡片与文字稿写入 `earnings_guidance_snapshots` 和 `earnings_transcript_segments`，按内容哈希去重，只保存增量，**不产生告警**，因此不会向 Grok 推送整段文字稿。
+- Grok 的 webhook 订阅需要只接收该类告警：`filters` 中设置 `{"alert_kinds":["earnings_guidance"]}`。本 PR 不修改任何已有订阅。
+
+**部署步骤（由协调人执行，PR 不包含任何密钥）**
+
+1. 应用迁移 `…000026_google_finance_source_enum.sql` 与 `…000027_google_finance_earnings.sql`（按顺序，需先完成前面的迁移）。
+2. 部署函数，`--no-verify-jwt` 与 `config.toml` 中的 `verify_jwt = false` 保持一致：
+
+   ```bash
+   supabase functions deploy google-finance-collector --no-verify-jwt
+   ```
+
+3. 不需要新增 Edge secret 或 Vault 密钥。函数复用 `EDGE_CRON_SECRET`（Edge secret）以及 Vault 中的 `edge_base_url`、`edge_cron_secret`。
+
+**冒烟测试（TSM:NYSE，`dryRun` 只抓取与解析，不写库）**
+
+```bash
+curl -sS -X POST "https://<project-ref>.supabase.co/functions/v1/google-finance-collector" \
+  -H "Authorization: Bearer $EDGE_CRON_SECRET" \
+  -H 'content-type: application/json' \
+  -d '{"exchangeSymbol":"TSM","exchange":"NYSE","dryRun":true}'
+```
+
+返回的顶层 `status` 为 `ok` 或 `degraded`，`results[0]` 中 `glanceCards` 大于 0（实测 TSM 返回 9 张卡片）、`findings` 中能看到营收、毛利率等字段即表示解析正常。`dryRun` 时 `results[0].cards` 会返回卡片原文，便于核对。显式请求会忽略 `enabled` 与窗口，因此可以在窗口外测试。请求体也可以写 `{"symbol":"TSM"}`，此时选择 `symbol = TSM` 的主行（`TSM:NYSE`）。去掉 `dryRun` 即写入数据库。
+
+**启用一次财报窗口（在财报前执行，结束后撤销）**
+
+```sql
+update public.earnings_watch
+   set enabled = true, call_time = '<IR 日历上的绝对时间, timestamptz>'
+ where google_symbol = 'TSM:NYSE';
+
+select cron.schedule('hive-google-finance-collector', '*/2 * * * *', $$select public.hive_google_finance_earnings_tick()$$);
+```
+
+**结束后撤销**
+
+```sql
+select cron.unschedule('hive-google-finance-collector');
+update public.earnings_watch set enabled = false, call_time = null where google_symbol = 'TSM:NYSE';
+```
+
+**检查**
+
+```sql
+select google_symbol, enabled, call_time, last_polled_at, finhub_refreshed_at from public.earnings_watch;
+select symbol, fetched_at, key_numbers from public.earnings_guidance_snapshots order by fetched_at desc limit 5;
+select triggered_at, payload->>'field' as field, payload->>'value' as value, payload->>'evidence' as evidence
+  from public.alerts where kind = 'earnings_guidance' order by triggered_at desc limit 10;
+select count(*) from public.earnings_transcript_segments where symbol = 'TSM';
+select source, last_outcome, last_finished_at, last_summary from public.collector_state where source = 'google-finance-earnings';
+select jobname, schedule, active from cron.job where jobname like '%google%';
+```
+
+`last_outcome` 为 `ok` 表示正常。`blocked` 表示被限流，函数已退避。`degraded` 表示部分请求失败。`cron.job` 在窗口结束并撤销后应为空。
 
 ### Vercel（apps/web）
 
@@ -879,7 +969,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
 `.github/workflows/ci.yml` 在每次 push 与 PR 上运行三个作业：
 
 1. **node**：`pnpm install --frozen-lockfile`、`pnpm build`（core → web → worker）、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector`、`order-submit`、`position-manager`、`position-subscriptions` 十个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
+2. **edge-functions**：`node scripts/sync-edge-core.mjs --check`，然后对 `okx-collector`、`jin10-poller`、`okx-news-poller`、`webhook-dispatcher`、`alert-evaluator`、`yahoo-collector`、`ths-collector`、`google-finance-collector`、`order-submit`、`position-manager`、`position-subscriptions` 十一个函数分别执行 `deno lint`、`deno check` 与 `deno test`。
 3. **migrations**：启动 `supabase/postgres:17.6.1.066` 服务容器，依次应用全部迁移，然后执行 `supabase/tests/verify.sql`。
 
 ## 范围说明
