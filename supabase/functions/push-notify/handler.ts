@@ -38,6 +38,9 @@ export interface PushStore {
   markFailure(subscription: PushSubscriptionRow): Promise<void>;
 }
 
+/** Injectable Web Push sender, defaulting to the real core implementation. */
+export type SendPushFunction = typeof sendWebPush;
+
 export interface PushNotifyDeps {
   cronSecret: string | undefined;
   vapid: VapidKeys | undefined;
@@ -45,7 +48,7 @@ export interface PushNotifyDeps {
   now?: () => number;
   lookbackMinutes?: number;
   maxSendsPerRun?: number;
-  sendPush?: typeof sendWebPush;
+  sendPush?: SendPushFunction;
   log?: (message: string) => void;
 }
 

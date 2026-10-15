@@ -7,8 +7,9 @@ import {
   type NewsEventRow,
   type PushStore,
   type PushSubscriptionRow,
+  type SendPushFunction,
 } from "./handler.ts";
-import type { PushSubscriptionKeys, VapidKeys, WebPushResult } from "./core/webpush.ts";
+import type { PushSubscriptionKeys, VapidKeys } from "./core/webpush.ts";
 
 const SECRET = "test-cron-secret";
 const NOW = Date.parse("2026-10-16T12:00:00.000Z");
@@ -76,20 +77,13 @@ function fakeStore(overrides: Partial<PushStore> = {}) {
   return { store, calls };
 }
 
-type SendPush = (
-  target: PushSubscriptionKeys,
-  payload: string,
-  vapid: VapidKeys,
-  options?: { ttlSeconds?: number; urgency?: "very-low" | "low" | "normal" | "high" },
-) => Promise<WebPushResult>;
-
-function makeHandler(store: PushStore, sendPush: SendPush, extra: Record<string, unknown> = {}) {
+function makeHandler(store: PushStore, sendPush: SendPushFunction, extra: Record<string, unknown> = {}) {
   return createPushNotifyHandler({
     cronSecret: SECRET,
     vapid: VAPID,
     store,
     now: () => NOW,
-    sendPush: sendPush as typeof import("./core/webpush.ts").sendWebPush,
+    sendPush,
     ...extra,
   });
 }
