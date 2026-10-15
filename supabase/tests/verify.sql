@@ -19,7 +19,8 @@ begin
   foreach t in array array[
     'symbol_map', 'candles', 'quotes_latest', 'daily_snapshot', 'source_health',
     'news_events', 'news_items', 'fills', 'alert_rules', 'alerts', 'deliveries', 'webhooks',
-    'webhook_subscriptions', 'webhook_deliveries', 'kill_switch', 'risk_limits', 'order_intents', 'orders'
+    'webhook_subscriptions', 'webhook_deliveries', 'kill_switch', 'risk_limits', 'order_intents', 'orders',
+    'earnings_watch', 'earnings_guidance_snapshots', 'earnings_transcript_segments'
   ] loop
     perform 1 from pg_tables where schemaname = 'public' and tablename = t;
     if not found then raise exception 'missing table public.%', t; end if;
@@ -1106,6 +1107,86 @@ begin
   if v_attempts <> 1 then raise exception 'reset_state must not clear half_reduce_attempts, got %', v_attempts; end if;
 
   raise notice 'verify.sql: position subscription checks passed';
+end
+$$;
+
+-- Google Finance earnings: nothing scheduled by default, the tick only calls the collector inside an enabled window,
+-- recording is idempotent, and guidance alerts are critical with a single delivery per subscriber.
+do $$
+declare
+  v_policy record;
+  v_result jsonb;
+  v_sub uuid;
+  v_count integer;
+  v_priority text;
+  v_dedup text := 'earnings:TSM:2026-10-15:revenue_guidance_usd_b:52.3-54.3';
+begin
+  perform 1 from cron.job where jobname like '%google%';
+  if found then raise exception 'google finance collector must not be scheduled by default'; end if;
+
+  perform 1 from public.earnings_watch where google_symbol = 'TSM:NYSE' and symbol = 'TSM' and is_primary and not enabled;
+  if not found then raise exception 'earnings_watch must seed TSM:NYSE as a disabled primary row for TSM'; end if;
+  if public.hive_google_finance_earnings_tick() is not null then raise exception 'tick must no-op while no window is enabled'; end if;
+
+  select * into v_policy from public.hive_delivery_policy('alert', 'earnings_guidance');
+  if v_policy.priority <> 'critical' or v_policy.stale_after_seconds <> 120 or v_policy.expires_after_seconds is not null then
+    raise exception 'earnings_guidance policy mismatch';
+  end if;
+
+  delete from vault.secrets where name in ('edge_base_url', 'edge_cron_secret');
+  perform vault.create_secret('http://127.0.0.1:9/functions/v1', 'edge_base_url', 'verify');
+  perform vault.create_secret('verify-edge-secret', 'edge_cron_secret', 'verify');
+  update public.earnings_watch set enabled = true, call_time = now() where google_symbol = 'TSM:NYSE';
+  if public.hive_google_finance_earnings_tick() is null then raise exception 'tick should queue the collector inside an enabled window'; end if;
+  update public.earnings_watch set enabled = false, call_time = null where google_symbol = 'TSM:NYSE';
+
+  begin
+    update public.earnings_watch set enabled = true where google_symbol = 'TSM:NYSE';
+    raise exception 'an enabled row without call_time was accepted';
+  exception when check_violation then null;
+  end;
+
+  v_sub := public.hive_upsert_webhook_subscription(null, 'verify-earnings-agent', 'https://earnings.example.com/hook',
+    'verify-earnings-secret-0123456789abcdef', array['alert'], '{"alert_kinds":["earnings_guidance"]}', true);
+
+  v_result := public.hive_earnings_record('TSM:NYSE', 'TSM',
+    jsonb_build_object('payload_hash', repeat('a', 64), 'cards', '[]'::jsonb,
+                       'key_numbers', '{"revenue_guidance_usd_b":[52.3,54.3]}'::jsonb, 'fetched_at', now()),
+    jsonb_build_array(jsonb_build_object('seg_hash', repeat('b', 64), 'start_sec', 1, 'end_sec', 2, 'body', 'verify segment')),
+    jsonb_build_array(jsonb_build_object('dedup_key', v_dedup, 'symbol', 'TSM', 'kind', 'earnings_guidance',
+                                         'severity', 'critical', 'payload', '{"source":"google-finance-earnings"}'::jsonb)));
+  if (v_result->>'snapshots')::integer <> 1 or (v_result->>'segments')::integer <> 1 or (v_result->>'alerts')::integer <> 1 then
+    raise exception 'first earnings record unexpected: %', v_result;
+  end if;
+
+  v_result := public.hive_earnings_record('TSM:NYSE', 'TSM',
+    jsonb_build_object('payload_hash', repeat('a', 64), 'cards', '[]'::jsonb,
+                       'key_numbers', '{"revenue_guidance_usd_b":[52.3,54.3]}'::jsonb, 'fetched_at', now()),
+    jsonb_build_array(jsonb_build_object('seg_hash', repeat('b', 64), 'start_sec', 1, 'end_sec', 2, 'body', 'verify segment')),
+    jsonb_build_array(jsonb_build_object('dedup_key', v_dedup, 'symbol', 'TSM', 'kind', 'earnings_guidance',
+                                         'severity', 'critical', 'payload', '{"source":"google-finance-earnings"}'::jsonb)));
+  if (v_result->>'snapshots')::integer <> 0 or (v_result->>'segments')::integer <> 0 or (v_result->>'alerts')::integer <> 0 then
+    raise exception 'repeat earnings record must not write anything: %', v_result;
+  end if;
+
+  select count(*) into v_count from public.alerts where dedup_key = v_dedup;
+  if v_count <> 1 then raise exception 'guidance alert expected once, found %', v_count; end if;
+  select d.priority into v_priority from public.webhook_deliveries d
+    join public.alerts a on d.event_key = 'alert:' || a.id
+   where a.dedup_key = v_dedup and d.subscription_id = v_sub;
+  if v_priority is distinct from 'critical' then raise exception 'guidance delivery expected critical priority, got %', v_priority; end if;
+
+  if has_function_privilege('anon', 'public.hive_earnings_record(text,text,jsonb,jsonb,jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_earnings_record(text,text,jsonb,jsonb,jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.hive_google_finance_earnings_tick()', 'EXECUTE') then
+    raise exception 'google finance RPCs executable by client roles';
+  end if;
+  if has_table_privilege('anon', 'public.earnings_watch', 'SELECT')
+     or has_table_privilege('authenticated', 'public.earnings_transcript_segments', 'SELECT') then
+    raise exception 'earnings tables are readable by client roles';
+  end if;
+
+  raise notice 'verify.sql: google finance earnings checks passed';
 end
 $$;
 
