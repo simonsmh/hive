@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupNewsByEvent, safeHttpUrl, type NewsEventRow, type NewsItemRow } from "./mapper";
+import { groupNewsByEvent, safeHttpUrl, toNewsItemApiView, type NewsEventRow, type NewsItemDetailRow, type NewsItemRow } from "./mapper";
 
 const events: NewsEventRow[] = [
   { id: "e1", title: "  美联储讲话  ", first_published_at: "2026-10-13T10:00:00Z" },
@@ -45,6 +45,42 @@ describe("groupNewsByEvent", () => {
 
   it("never exposes a non-http URL as a link", () => {
     expect(grouped[1]?.items[0]?.url).toBeNull();
+  });
+});
+
+describe("toNewsItemApiView", () => {
+  const detail: NewsItemDetailRow = {
+    id: 21,
+    event_id: "e9",
+    source: "jin10",
+    title: null,
+    body: "  黄金大涨  ",
+    url: "https://example.com/flash/21",
+    published_at: "2026-10-13T09:00:00Z",
+    credibility: "0.7",
+  };
+
+  it("carries the cluster id, the body and the reused item fields", () => {
+    expect(toNewsItemApiView(detail)).toEqual({
+      id: "21",
+      eventId: "e9",
+      source: "jin10",
+      title: "https://example.com/flash/21",
+      url: "https://example.com/flash/21",
+      publishedAt: "2026-10-13T09:00:00Z",
+      credibility: 0.7,
+      body: "黄金大涨",
+    });
+  });
+
+  it("caps very long bodies and keeps unclustered items with a null event id", () => {
+    const view = toNewsItemApiView({ ...detail, event_id: null, body: "x".repeat(2000) });
+    expect(view.eventId).toBeNull();
+    expect(view.body).toBe(`${"x".repeat(999)}…`);
+  });
+
+  it("returns an empty body when none was stored", () => {
+    expect(toNewsItemApiView({ ...detail, body: null }).body).toBe("");
   });
 });
 

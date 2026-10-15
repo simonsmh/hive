@@ -604,6 +604,8 @@ values ('BZ 10m move >=1%', 'BZ', 'pct_move', '{"interval":"1m","lookback":10,"m
 | `GET /api/candles` | `symbol`、`interval`（`1m`/`5m`/`15m`/`1H`/`1D`，必填）、`source`、`from`、`to`（毫秒或 ISO-8601）、`limit`（默认 500，最大 2000） | 有 `from` 时按时间正序返回最早的 `limit` 根；没有 `from` 时返回最近的 `limit` 根，仍按时间正序。注意分钟线只保留 30 天 |
 | `GET /api/atr` | `symbol`（必填）、`source`（默认 `okx`）、`period`（默认 14，1–100） | 基于已确认日线的 Wilder ATR。XAU 只使用工作日。数据不足返回 `422` |
 | `GET /api/health` | 无 | 各数据源状态。存在已启用且过期的数据源时返回 `503`，`status` 为 `degraded` |
+| `GET /api/alerts` | `kind`（`[a-z_]{1,64}`，如 `pct_move`、`source_stale`）、`symbol`、`severity`（`info`/`warning`/`critical`）、`unresolved`（`true` 仅未恢复，`false` 仅已恢复，省略则都返回）、`limit`（默认 50，1–200） | 告警列表，按触发时间倒序，返回 `{ alerts }`。每条含 `kind`、`symbol`、`severity`、`triggeredAt`、`resolved`、`resolvedAt`、`summary` 与 `details`（payload 的可读摘要，单值最长 120 字符） |
+| `GET /api/news` | `source`（`jin10`/`okx-news`）、`q`（标题或正文子串，大小写不敏感，最长 100 字符，不能含 `, ( ) " \ *`）、`since`（毫秒或 ISO-8601）、`limit`（默认 50，1–200） | 新闻条目，按发布时间倒序，返回 `{ items }`。每条含 `eventId`（同一事件的条目共享）、`source`、`title`、`url`、`publishedAt`、`credibility` 与 `body`（最长 1000 字符）。`q` 无索引，大范围搜索请配合 `since` |
 | `GET /api/webhooks` | 无 | 列出 webhook 订阅。不返回密钥，只返回 `secret_configured` |
 | `POST /api/webhooks` | JSON，见下文 | 创建订阅，返回 `201`。未提供 `secret` 时自动生成 `signing_secret`，**只返回这一次** |
 | `PATCH /api/webhooks/{id}` | JSON，部分更新；`rotate_secret: true` 轮换密钥 | 返回 `200`。轮换时返回新的 `signing_secret`，旧密钥立即失效 |
@@ -621,6 +623,12 @@ curl -H "Authorization: Bearer $HIVE_API_TOKEN" \
 
 curl -H "Authorization: Bearer $HIVE_API_TOKEN" \
   "https://<your-app>.vercel.app/api/atr?symbol=XAU&period=14"
+
+curl -H "Authorization: Bearer $HIVE_API_TOKEN" \
+  "https://<your-app>.vercel.app/api/alerts?unresolved=true&severity=critical&limit=20"
+
+curl -H "Authorization: Bearer $HIVE_API_TOKEN" \
+  "https://<your-app>.vercel.app/api/news?source=jin10&since=2026-10-15T00:00:00Z&q=美联储"
 ```
 
 ### Webhook 管理 API

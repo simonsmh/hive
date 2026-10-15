@@ -61,3 +61,41 @@ export function parseUuid(raw: string, name: string): string {
   if (!UUID_PATTERN.test(raw)) throw new ParamError(`${name} must be a UUID`);
   return raw.toLowerCase();
 }
+
+export function parseOptionalSymbol(raw: string | null): string | null {
+  if (raw === null || raw.trim() === "") return null;
+  return parseSymbol(raw);
+}
+
+export function parseOneOf<T extends string>(raw: string | null, name: string, allowed: readonly T[]): T | null {
+  if (raw === null || raw === "") return null;
+  if (!(allowed as readonly string[]).includes(raw)) {
+    throw new ParamError(`${name} must be one of ${allowed.join(", ")}`);
+  }
+  return raw as T;
+}
+
+export function parseBooleanFlag(raw: string | null, name: string): boolean | null {
+  if (raw === null || raw === "") return null;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new ParamError(`${name} must be true or false`);
+}
+
+export function parseToken(raw: string | null, name: string, pattern: RegExp, description: string): string | null {
+  if (raw === null || raw === "") return null;
+  if (!pattern.test(raw)) throw new ParamError(`${name} must match ${description}`);
+  return raw;
+}
+
+const SEARCH_FORBIDDEN_CHARS = /[,()"\\*]/;
+const MAX_SEARCH_LENGTH = 100;
+
+/** Free-text search term. Characters that would break PostgREST filter syntax are rejected rather than escaped. */
+export function parseSearchTerm(raw: string | null, name: string): string | null {
+  const term = (raw ?? "").trim();
+  if (term === "") return null;
+  if (term.length > MAX_SEARCH_LENGTH) throw new ParamError(`${name} must be at most ${MAX_SEARCH_LENGTH} characters`);
+  if (SEARCH_FORBIDDEN_CHARS.test(term)) throw new ParamError(`${name} must not contain , ( ) " \\ or *`);
+  return term;
+}

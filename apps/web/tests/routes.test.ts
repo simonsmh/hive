@@ -6,6 +6,8 @@ import { GET as getHealth } from "../app/api/health/route";
 import { GET as listWebhooks, POST as createWebhook } from "../app/api/webhooks/route";
 import { DELETE as deleteWebhook, PATCH as patchWebhook } from "../app/api/webhooks/[id]/route";
 import { GET as listDeliveries } from "../app/api/webhook-deliveries/route";
+import { GET as listAlerts } from "../app/api/alerts/route";
+import { GET as listNews } from "../app/api/news/route";
 
 vi.mock("server-only", () => ({}));
 
@@ -41,6 +43,8 @@ describe("API auth and validation (no database)", () => {
     ],
     ["webhooks delete", () => deleteWebhook(new Request(`${base}/api/webhooks/x`, { method: "DELETE" }), ctx("x"))],
     ["webhook deliveries", () => listDeliveries(new Request(`${base}/api/webhook-deliveries`))],
+    ["alerts", () => listAlerts(new Request(`${base}/api/alerts`))],
+    ["news", () => listNews(new Request(`${base}/api/news`))],
   ])("%s rejects requests without a bearer token", async (_name, call) => {
     const response = await call();
     expect(response.status).toBe(401);
@@ -122,6 +126,42 @@ describe("API auth and validation (no database)", () => {
     expect(limit.status).toBe(400);
     const agent = await listDeliveries(new Request(`${base}/api/webhook-deliveries?agent=Bad%20Agent`, { headers: auth }));
     expect(agent.status).toBe(400);
+  });
+
+  it("rejects a wrong bearer token on the alerts and news reads", async () => {
+    const wrong = { headers: { authorization: "Bearer wrong" } };
+    expect((await listAlerts(new Request(`${base}/api/alerts`, wrong))).status).toBe(401);
+    expect((await listNews(new Request(`${base}/api/news`, wrong))).status).toBe(401);
+  });
+
+  it("rejects invalid alert filters once authenticated", async () => {
+    const cases = [
+      "kind=Bad-Kind",
+      "symbol=../x",
+      "severity=urgent",
+      "unresolved=yes",
+      "limit=0",
+      "limit=201",
+    ];
+    for (const query of cases) {
+      const response = await listAlerts(new Request(`${base}/api/alerts?${query}`, { headers: auth }));
+      expect(response.status, query).toBe(400);
+    }
+  });
+
+  it("rejects invalid news filters once authenticated", async () => {
+    const cases = [
+      "source=binance",
+      "q=a,b",
+      "q=(x)",
+      "q=" + "x".repeat(101),
+      "since=yesterday",
+      "limit=500",
+    ];
+    for (const query of cases) {
+      const response = await listNews(new Request(`${base}/api/news?${query}`, { headers: auth }));
+      expect(response.status, query).toBe(400);
+    }
   });
 
   it("returns 500 (fail closed) when the token is not configured", async () => {
