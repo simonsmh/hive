@@ -36,11 +36,10 @@ Deno.test("reads the kill switch and treats a missing row as engaged", async () 
 
 Deno.test("loads the enabled risk limits for the mode and maps them to camelCase", async () => {
   const { calls, fetchImpl } = fakeFetch(() => [
-    { symbol_allowlist: ["XAU-USDT-SWAP"], max_notional_usdt: "500", max_leverage: 20, max_orders_per_min: 5 },
+    { max_notional_usdt: "500", max_leverage: 20, max_orders_per_min: 5 },
   ]);
   const limits = await createRestOrderStore({ supabaseUrl: BASE, serviceKey: "k", fetchImpl }).riskLimits("demo");
   deepStrictEqual(limits, {
-    symbolAllowlist: ["XAU-USDT-SWAP"],
     maxNotionalUsdt: 500,
     maxLeverage: 20,
     maxOrdersPerMin: 5,
@@ -143,21 +142,3 @@ Deno.test("surfaces a PostgREST error so the handler can fail closed", async () 
 function ok(condition: boolean): void {
   strictEqual(condition, true);
 }
-
-Deno.test("looks up an enabled subscription for the mode and instrument", async () => {
-  const found = fakeFetch(() => [{ id: "sub-1" }]);
-  strictEqual(
-    await createRestOrderStore({ supabaseUrl: BASE, serviceKey: "k", fetchImpl: found.fetchImpl }).hasEnabledSubscription("live", "QQQ-USDT-SWAP"),
-    true,
-  );
-  strictEqual(
-    found.calls[0]?.path,
-    "/rest/v1/position_subscriptions?select=id&mode=eq.live&inst_id=eq.QQQ-USDT-SWAP&enabled=eq.true&limit=1",
-  );
-
-  const none = fakeFetch(() => []);
-  strictEqual(
-    await createRestOrderStore({ supabaseUrl: BASE, serviceKey: "k", fetchImpl: none.fetchImpl }).hasEnabledSubscription("live", "QQQ-USDT-SWAP"),
-    false,
-  );
-});

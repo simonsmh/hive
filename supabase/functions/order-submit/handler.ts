@@ -5,7 +5,6 @@ import {
   type ClientOrderIds,
   type IntentAction,
   isExpired,
-  isInPositionAction,
   needsPriceGate,
   type OkxIntent,
   parseIntent,
@@ -101,8 +100,6 @@ export type InsertResult = { inserted: true } | { inserted: false; existing: Sto
 export interface OrderStore {
   killSwitchEngaged(): Promise<boolean>;
   riskLimits(mode: TradeMode): Promise<RiskLimitsView | null>;
-  /** True when position_subscriptions has an enabled row for this mode and instrument. */
-  hasEnabledSubscription(mode: TradeMode, instId: string): Promise<boolean>;
   insertIntent(record: IntentRecord): Promise<InsertResult>;
   finishIntent(idempotencyKey: string, outcome: IntentOutcome): Promise<void>;
   submissionsSince(mode: TradeMode, sinceMs: number, excludeIdempotencyKey: string): Promise<number>;
@@ -428,13 +425,7 @@ async function execute(intent: OkxIntent, ids: ClientOrderIds, deps: OrderSubmit
     deps.store.submissionsSince(deps.mode, nowMs - RATE_WINDOW_MS, intent.idempotencyKey),
   ]);
 
-  // Subscriptions are looked up only for in-position actions on instruments the allowlist does not already cover.
-  const hasEnabledSubscription =
-    isInPositionAction(intent) && limits !== null && !limits.symbolAllowlist.includes(intent.instId)
-      ? await deps.store.hasEnabledSubscription(deps.mode, intent.instId)
-      : false;
-
-  const preflight = preflightRisk(intent, limits, { killEngaged, submissionsLastMinute, hasEnabledSubscription });
+  const preflight = preflightRisk(intent, limits, { killEngaged, submissionsLastMinute });
   if (preflight !== null) return terminal("rejected_risk", preflight, ids.clOrdId);
   if (limits === null) return terminal("rejected_risk", "no_risk_limits", ids.clOrdId);
 

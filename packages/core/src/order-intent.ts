@@ -53,7 +53,6 @@ export interface OkxIntent {
 export type ParseResult = { ok: true; intent: OkxIntent } | { ok: false; error: string };
 
 export interface RiskLimitsView {
-  symbolAllowlist: string[];
   maxNotionalUsdt: number;
   maxLeverage: number;
   maxOrdersPerMin: number;
@@ -269,22 +268,14 @@ export function clientOrderIds(idempotencyKey: string): ClientOrderIds {
   };
 }
 
-/** Actions that only act on an existing position. They reduce exposure, so they may run outside the allowlist. */
-export function isInPositionAction(intent: OkxIntent): boolean {
-  return intent.action === "amend_tpsl" || intent.action === "reduce";
-}
-
 /** Rejection codes returned before any price lookup or OKX call. Null means every preflight gate passed. */
 export function preflightRisk(
   intent: OkxIntent,
   limits: RiskLimitsView | null,
-  context: { killEngaged: boolean; submissionsLastMinute: number; hasEnabledSubscription?: boolean },
+  context: { killEngaged: boolean; submissionsLastMinute: number },
 ): string | null {
   if (context.killEngaged) return "kill_switch_engaged";
   if (!limits) return "no_risk_limits";
-  const inAllowlist = limits.symbolAllowlist.includes(intent.instId);
-  const managedPosition = isInPositionAction(intent) && context.hasEnabledSubscription === true;
-  if (!inAllowlist && !managedPosition) return "symbol_not_allowed";
   if (context.submissionsLastMinute >= limits.maxOrdersPerMin) return "rate_limited";
   if (intent.action !== "open") return null;
 
