@@ -43,15 +43,17 @@ export async function loadRecentNews(): Promise<{ events: NewsEventRow[]; items:
 
 /**
  * Change key for the news feed, shared by the SSE stream and the news page's
- * LiveRefresh baseline. Covers the newest event id, the newest item id and both
- * counts, so a source attached to an existing event also triggers a refresh.
+ * LiveRefresh baseline. Covers every returned event/item id plus both counts,
+ * so a source attached to an existing event also triggers a refresh — even
+ * when the item cap displaces the oldest row without moving the newest id or
+ * the total count.
  */
 export function digestNewsFeed(
   events: readonly { id: number | string }[],
   items: readonly { id: number | string }[],
 ): string {
   return digestNewest(
-    [String(events[0]?.id ?? ""), String(items[0]?.id ?? "")],
+    [...events.map((event) => String(event.id)), ...items.map((item) => String(item.id))],
     events.length + items.length,
   );
 }

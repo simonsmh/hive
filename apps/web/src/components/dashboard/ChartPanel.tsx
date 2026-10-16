@@ -62,7 +62,7 @@ export function ChartPanel({
   }, [bars]);
 
   const loadBars = useCallback(
-    (target: ChartInterval, requestId: number) => {
+    (target: ChartInterval, requestId: number, replay?: { price: number; tsMs: number }) => {
       setLoading(true);
       setError(null);
       setHoverIndex(null);
@@ -81,7 +81,12 @@ export function ChartPanel({
         .then((next) => {
           if (requestRef.current !== requestId) return;
           barsIntervalRef.current = target;
-          setBars(next);
+          // Fold the boundary-crossing quote back in: the server snapshot can
+          // still predate it (the collector persists the ticker before the
+          // candles), and dropping it would leave the chart one interval
+          // behind until the next tick. applyLivePrice is a no-op when the
+          // snapshot already covers the quote.
+          setBars(replay ? applyLivePrice(next, replay.price, replay.tsMs, INTERVAL_MS[target]) : next);
           setLoading(false);
         })
         .catch((cause: unknown) => {
@@ -116,7 +121,7 @@ export function ChartPanel({
     // synthetic bar (sampled high/low, zero volume); reconcile it against the
     // authoritative series instead of letting the approximation linger.
     if (!loading && needsCandleReconcile(barsRef.current, tsMs, intervalMs)) {
-      loadBars(interval, ++requestRef.current);
+      loadBars(interval, ++requestRef.current, { price: quote.price!, tsMs });
       return;
     }
     setBars((previous) => applyLivePrice(previous, quote.price!, tsMs, intervalMs));
