@@ -6,7 +6,7 @@ import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
 import { sourceLabel } from "@/src/modules/sources";
 import { groupNewsByEvent, type NewsEventView } from "@/src/modules/news/mapper";
-import { NEWS_EVENT_LIMIT, loadRecentNews } from "@/src/modules/news/query";
+import { NEWS_EVENT_LIMIT, digestNewsFeed, loadRecentNews } from "@/src/modules/news/query";
 
 const panel = requirePanel("news");
 
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 export default async function NewsPage() {
   const result = await loadPanelData("news", async () => {
     const { events, items } = await loadRecentNews();
-    return groupNewsByEvent(events, items);
+    return { groups: groupNewsByEvent(events, items), digest: digestNewsFeed(events, items) };
   });
 
   return (
@@ -24,18 +24,18 @@ export default async function NewsPage() {
       {result.ok ? (
         <LiveRefresh
           topic="news"
-          field="newestId"
-          baseline={String(result.data[0]?.id ?? "")}
+          field="digest"
+          baseline={result.data.digest}
           label="有新新闻，点击查看"
         />
       ) : null}
       {!result.ok ? (
         <ErrorState message={result.message} />
-      ) : result.data.length === 0 ? (
+      ) : result.data.groups.length === 0 ? (
         <EmptyState title="暂无新闻事件" hint="新闻采集接入后，同一事件的多条来源会聚合显示在这里。" />
       ) : (
         <ul className="list">
-          {result.data.map((event) => (
+          {result.data.groups.map((event) => (
             <EventItem key={event.id} event={event} />
           ))}
         </ul>

@@ -4,7 +4,7 @@ import { LiveRefresh } from "@/src/components/dashboard/LiveRefresh";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatBeijingTime } from "@/src/modules/format";
 import { toAlertView, type AlertView } from "@/src/modules/alerts/mapper";
-import { ALERT_LIMIT, loadRecentAlerts } from "@/src/modules/alerts/query";
+import { ALERT_LIMIT, digestAlertList, loadRecentAlerts } from "@/src/modules/alerts/query";
 import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
 
@@ -21,8 +21,8 @@ export default async function AlertsPage() {
       {result.ok ? (
         <LiveRefresh
           topic="alerts"
-          field="newest"
-          baseline={result.data[0] ? `${result.data[0].id}:${result.data[0].resolvedAt ?? ""}` : ""}
+          field="digest"
+          baseline={digestAlertList(result.data)}
           label="告警有更新，点击刷新"
         />
       ) : null}

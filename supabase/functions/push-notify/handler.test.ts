@@ -189,12 +189,12 @@ Deno.test("cleanup errors after a send failure do not abort the run", async () =
   strictEqual(calls.deleted.length, 0);
 });
 
-Deno.test("retires a subscription after repeated permanent 4xx rejections", async () => {
+Deno.test("retires a subscription after repeated permanent 400 rejections", async () => {
   const dying = { ...SUB, failure_count: 4 };
   const { store, calls } = fakeStore({
     listSubscriptions: () => Promise.resolve([dying]),
   });
-  const handler = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const handler = makeHandler(store, () => Promise.resolve({ status: 400, gone: false }));
   const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
   strictEqual(summary.retired, 1);
   deepStrictEqual(calls.deleted, [dying.id]);
@@ -208,11 +208,32 @@ Deno.test("does not retire a subscription before the permanent-failure limit", a
   const { store, calls } = fakeStore({
     listSubscriptions: () => Promise.resolve([flaky]),
   });
-  const handler = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const handler = makeHandler(store, () => Promise.resolve({ status: 400, gone: false }));
   const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
   strictEqual(summary.retired, 0);
   strictEqual(calls.deleted.length, 0);
   strictEqual(calls.failedMarks.length, 2);
+});
+
+Deno.test("401/403 rejections never retire a subscription and flag an auth incident", async () => {
+  const sub2 = { ...SUB, id: "sub-2", endpoint: "https://push.example/send/2" };
+  const { store, calls } = fakeStore({
+    listSubscriptions: () => Promise.resolve([
+      { ...SUB, failure_count: 4 },
+      { ...sub2, failure_count: 4 },
+    ]),
+  });
+  const handler = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const summary = (await (await handler(authedRequest())).json()) as Record<string, number | boolean>;
+  // Even at the old retirement threshold, auth rejections must not wipe rows:
+  // a bad VAPID key or push-service incident would otherwise delete every
+  // subscription and force manual re-subscription.
+  strictEqual(summary.retired, 0);
+  deepStrictEqual(calls.deleted, []);
+  strictEqual(summary.authIncident, true);
+  strictEqual(summary.authFailures, 4);
+  // Claims are released so delivery is retried on the next run.
+  ok(calls.released.length > 0);
 });
 
 Deno.test("a markSuccess failure after a 2xx send does not release the claim", async () => {

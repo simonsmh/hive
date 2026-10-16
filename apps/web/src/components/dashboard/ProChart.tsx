@@ -154,9 +154,10 @@ export function ProChart({
       ctx.globalAlpha = 1;
     });
 
-    // Moving averages.
+    // Moving averages: stroke color follows the period (not the position in the
+    // enabled list) so the line color always matches the toolbar swatch.
     maSeries.forEach((series, seriesIndex) => {
-      ctx.strokeStyle = MA_COLORS[seriesIndex % MA_COLORS.length]!;
+      ctx.strokeStyle = maColor(maPeriods[seriesIndex]!);
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       let started = false;

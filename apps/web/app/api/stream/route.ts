@@ -1,8 +1,8 @@
 import { authorize, handle } from "../../../lib/api";
-import { loadRecentAlerts } from "../../../src/modules/alerts/query";
+import { digestAlertList, loadRecentAlerts } from "../../../src/modules/alerts/query";
 import { loadSourceHealth } from "../../../src/modules/health/query";
-import { digestHealth, digestNewest, digestQuotes } from "../../../src/modules/live/digest";
-import { loadRecentNews } from "../../../src/modules/news/query";
+import { digestHealth, digestQuotes } from "../../../src/modules/live/digest";
+import { digestNewsFeed, loadRecentNews } from "../../../src/modules/news/query";
 import { buildQuoteBoard } from "../../../src/modules/quotes/mapper";
 import { loadEnabledSymbols, loadLatestQuotes } from "../../../src/modules/quotes/query";
 
@@ -77,30 +77,25 @@ export async function GET(request: Request): Promise<Response> {
         const tickSlow = async () => {
           try {
             const { events, items } = await loadRecentNews();
-            const digest = digestNewest(
-              [String(events[0]?.id ?? ""), String(items[0]?.id ?? "")],
-              events.length + items.length,
-            );
+            const digest = digestNewsFeed(events, items);
             if (digest !== lastNews) {
               lastNews = digest;
-              send("news", { at: new Date().toISOString(), events: events.length, newestId: String(events[0]?.id ?? "") });
+              send("news", { at: new Date().toISOString(), digest });
             }
           } catch {
             // Skip this tick.
           }
           try {
             const alerts = await loadRecentAlerts();
-            const digest = digestNewest(
-              alerts.slice(0, 10).map((alert) => `${alert.id}:${alert.resolved_at ?? ""}`),
-              alerts.length,
+            const digest = digestAlertList(
+              alerts.map((alert) => ({ id: alert.id, resolvedAt: alert.resolved_at })),
             );
             if (digest !== lastAlerts) {
               lastAlerts = digest;
-              const newest = alerts[0];
               send("alerts", {
                 at: new Date().toISOString(),
                 alerts: alerts.length,
-                newest: newest ? `${newest.id}:${newest.resolved_at ?? ""}` : "",
+                digest,
               });
             }
           } catch {

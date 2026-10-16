@@ -1,5 +1,6 @@
 import "server-only";
 import { assertNoError, getDb } from "@/lib/supabase";
+import { digestNewest } from "../live/digest";
 import type { NewsEventRow, NewsItemDetailRow, NewsItemRow } from "./mapper";
 import { newsSearchOrFilter } from "./search";
 
@@ -38,6 +39,23 @@ export async function loadRecentNews(): Promise<{ events: NewsEventRow[]; items:
   assertNoError(itemError);
 
   return { events, items: (itemData ?? []) as NewsItemRow[] };
+}
+
+/**
+ * Change key for the news feed, shared by the SSE stream and the news page's
+ * LiveRefresh baseline. Covers every returned event/item id plus both counts,
+ * so a source attached to an existing event also triggers a refresh — even
+ * when the item cap displaces the oldest row without moving the newest id or
+ * the total count.
+ */
+export function digestNewsFeed(
+  events: readonly { id: number | string }[],
+  items: readonly { id: number | string }[],
+): string {
+  return digestNewest(
+    [...events.map((event) => String(event.id)), ...items.map((item) => String(item.id))],
+    events.length + items.length,
+  );
 }
 
 export async function listNewsItems(filters: NewsItemFilters): Promise<NewsItemDetailRow[]> {

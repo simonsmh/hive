@@ -104,8 +104,14 @@ export async function authorize(request: Request): Promise<Response | null> {
  */
 export async function authorizeSession(request: Request): Promise<Response | null> {
   const session = readCookieValue(request.headers.get("cookie"), SESSION_COOKIE);
-  if (await verifySessionToken(session, process.env.HIVE_SESSION_SECRET)) return null;
-  return errorResponse(401, "unauthorized");
+  if (!(await verifySessionToken(session, process.env.HIVE_SESSION_SECRET))) {
+    return errorResponse(401, "unauthorized");
+  }
+  const method = request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && !isSameOriginRequest(request)) {
+    return errorResponse(403, "cross-origin request forbidden");
+  }
+  return null;
 }
 
 /** Wraps a route body so auth/param/config failures map to the right status without leaking internals. */

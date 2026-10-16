@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { authorize, handle, ConfigError } from "./api";
+import { authorize, authorizeSession, handle, ConfigError } from "./api";
 import { createSessionToken, SESSION_COOKIE } from "../src/modules/auth/session";
 
 const TOKEN = "test-hive-token-0123456789abcdef";
@@ -119,6 +119,57 @@ describe("authorize", () => {
       });
       expect(await authorize(request)).toBeNull();
     });
+  });
+});
+
+describe("authorizeSession", () => {
+  const sessionRequest = async (session: string | null, init: RequestInit = {}) =>
+    new Request("http://localhost/api/push/subscriptions", {
+      method: "POST",
+      body: "{}",
+      ...init,
+      headers: {
+        ...(session === null ? {} : { cookie: `${SESSION_COOKIE}=${session}` }),
+        ...(init.headers as Record<string, string> | undefined),
+      },
+    });
+
+  it("lets a same-origin session POST through", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+    const session = await createSessionToken(SESSION_SECRET);
+    const request = await sessionRequest(session, { headers: { origin: "http://localhost" } });
+    expect(await authorizeSession(request)).toBeNull();
+  });
+
+  it("rejects a cross-origin session POST with 403 (sibling-origin CSRF)", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+    const session = await createSessionToken(SESSION_SECRET);
+    // SameSite=Lax is site-scoped: a sibling origin under the same registrable
+    // domain could ride the session cookie with a CORS-safelisted POST to
+    // register or overwrite someone else's push endpoint.
+    const request = await sessionRequest(session, { headers: { origin: "http://evil.localhost" } });
+    expect((await authorizeSession(request))?.status).toBe(403);
+  });
+
+  it("rejects a session POST with no origin proof at all", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+    const session = await createSessionToken(SESSION_SECRET);
+    expect((await authorizeSession(await sessionRequest(session)))?.status).toBe(403);
+  });
+
+  it("still rejects an invalid session with 401 before any origin check", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+    const request = await sessionRequest("bogus", { headers: { origin: "http://localhost" } });
+    expect((await authorizeSession(request))?.status).toBe(401);
+  });
+
+  it("still lets session GETs through without origin headers", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+    const session = await createSessionToken(SESSION_SECRET);
+    const request = new Request("http://localhost/api/push/subscriptions", {
+      headers: { cookie: `${SESSION_COOKIE}=${session}` },
+    });
+    expect(await authorizeSession(request)).toBeNull();
   });
 });
 

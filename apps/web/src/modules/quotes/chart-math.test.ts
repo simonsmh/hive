@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { applyLivePrice, barChangePct, barIndexAtX, maxVolume, priceRange, smaSeries } from "./chart-math";
+import {
+  applyLivePrice,
+  barChangePct,
+  barIndexAtX,
+  maxVolume,
+  needsCandleReconcile,
+  priceRange,
+  smaSeries,
+} from "./chart-math";
 import type { CandleBar } from "./mapper";
 
 function bar(time: number, open: number, high: number, low: number, close: number, volume = 0): CandleBar {
@@ -74,5 +82,27 @@ describe("applyLivePrice", () => {
     expect(applyLivePrice(bars, 108, 30_000, 60_000)).toBe(bars);
     expect(applyLivePrice(bars, Number.NaN, 150_000, 60_000)).toBe(bars);
     expect(applyLivePrice([], 108, 150_000, 60_000)).toEqual([]);
+  });
+});
+
+describe("needsCandleReconcile", () => {
+  const synthetic = (time: number): CandleBar => ({ ...bar(time, 100, 102, 99, 101), confirmed: false });
+
+  it("flags a synthetic bar whose interval already closed", () => {
+    const bars = [bar(0, 100, 105, 99, 102), synthetic(60_000)];
+    expect(needsCandleReconcile(bars, 120_000, 60_000)).toBe(true);
+    expect(needsCandleReconcile(bars, 180_000, 60_000)).toBe(true);
+  });
+
+  it("ignores a synthetic bar that is still forming", () => {
+    const bars = [bar(0, 100, 105, 99, 102), synthetic(60_000)];
+    expect(needsCandleReconcile(bars, 90_000, 60_000)).toBe(false);
+  });
+
+  it("ignores confirmed bars, empty series and bad inputs", () => {
+    expect(needsCandleReconcile([bar(0, 100, 105, 99, 102)], 120_000, 60_000)).toBe(false);
+    expect(needsCandleReconcile([], 120_000, 60_000)).toBe(false);
+    expect(needsCandleReconcile([synthetic(60_000)], Number.NaN, 60_000)).toBe(false);
+    expect(needsCandleReconcile([synthetic(60_000)], 120_000, 0)).toBe(false);
   });
 });
