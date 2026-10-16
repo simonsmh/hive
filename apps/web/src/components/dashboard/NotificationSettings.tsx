@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import {
   currentSubscription,
+  NoServiceWorkerError,
   pushSupport,
   subscribePush,
+  syncSubscription,
   unsubscribePush,
   updatePushFilters,
   type PushFilters,
@@ -53,9 +55,30 @@ export function NotificationSettings({ publicKey }: { publicKey: string | null }
       setPhase("denied");
       return;
     }
+    // Re-sync the browser subscription with the server before reporting success:
+    // subscribing may have succeeded while the registration POST was lost, leaving
+    // the browser "subscribed" with no server row and no notifications arriving.
     currentSubscription()
-      .then((subscription) => setPhase(subscription ? "subscribed" : "unsubscribed"))
-      .catch(() => setPhase("unsubscribed"));
+      .then(async (subscription) => {
+        if (!subscription) {
+          setPhase("unsubscribed");
+          return;
+        }
+        try {
+          await syncSubscription(subscription, loadFilters());
+          setPhase("subscribed");
+        } catch {
+          setPhase("unsubscribed");
+          setError("浏览器有订阅记录，但同步到服务器失败，请点击订阅重试。");
+        }
+      })
+      .catch((cause) => {
+        if (cause instanceof NoServiceWorkerError) {
+          setSupport("no-service-worker");
+          return;
+        }
+        setPhase("unsubscribed");
+      });
   }, [support]);
 
   if (support === null) {
@@ -75,6 +98,14 @@ export function NotificationSettings({ publicKey }: { publicKey: string | null }
       <div className="empty">
         <strong>当前浏览器不支持推送</strong>
         请使用支持 Web Push 的浏览器；iPhone 需要先把 Hive 添加到主屏幕再开启。
+      </div>
+    );
+  }
+  if (support === "no-service-worker") {
+    return (
+      <div className="empty">
+        <strong>未检测到 Service Worker</strong>
+        浏览器没有注册推送用的 Service Worker（开发环境默认不注册）。请用生产构建访问后再开启推送。
       </div>
     );
   }

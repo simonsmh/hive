@@ -53,17 +53,31 @@ export function createRestPushStore(options: RestStoreOptions): PushStore {
     },
 
     async recentNewsEvents(sinceIso: string, limit: number): Promise<NewsEventRow[]> {
-      const rows = await request(
-        "GET",
-        `news_events?select=id,title,first_published_at&first_published_at=gte.${encodeURIComponent(sinceIso)}&order=first_published_at.desc&limit=${limit}`,
-      );
-      return (rows ?? []) as NewsEventRow[];
+      // Page through the window instead of a single top-N query: a poll batch can
+      // ingest more events than one page holds, and a fixed cap would silently drop
+      // the older ones from that batch forever.
+      const pageSize = 100;
+      const maxPages = Math.max(1, Math.ceil(limit / pageSize));
+      const events: NewsEventRow[] = [];
+      for (let page = 0; page < maxPages; page++) {
+        const rows = (await request(
+          "GET",
+          `news_events?select=id,title,first_published_at&first_published_at=gte.${encodeURIComponent(sinceIso)}&order=first_published_at.desc&limit=${pageSize}&offset=${page * pageSize}`,
+        )) as NewsEventRow[] | null;
+        if (!rows || rows.length === 0) break;
+        events.push(...rows);
+        if (rows.length < pageSize) break;
+      }
+      return events;
     },
 
     async recentAlerts(sinceIso: string, limit: number): Promise<AlertRow[]> {
+      // Apply the eligibility predicate in PostgREST, before the limit: filtering in
+      // memory after a top-N query would let 50 newer ordinary alerts permanently
+      // hide an older critical or source_stale alert that never gets delivered.
       const rows = await request(
         "GET",
-        `alerts?select=id,kind,symbol,severity,payload,triggered_at&triggered_at=gte.${encodeURIComponent(sinceIso)}&order=triggered_at.desc&limit=${limit}`,
+        `alerts?select=id,kind,symbol,severity,payload,triggered_at&triggered_at=gte.${encodeURIComponent(sinceIso)}&or=${encodeURIComponent("(severity.eq.critical,kind.eq.source_stale)")}&order=triggered_at.desc&limit=${limit}`,
       );
       return (rows ?? []) as AlertRow[];
     },

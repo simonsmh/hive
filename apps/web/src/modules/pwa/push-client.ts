@@ -9,7 +9,10 @@ export interface PushFilters {
   alerts: boolean;
 }
 
-export type PushSupport = "ready" | "unsupported" | "no-vapid-key";
+export type PushSupport = "ready" | "unsupported" | "no-vapid-key" | "no-service-worker";
+
+/** Thrown when the browser has no registered service worker (e.g. dev mode). */
+export class NoServiceWorkerError extends Error {}
 
 export function pushSupport(publicKey: string | null): PushSupport {
   if (!publicKey) return "no-vapid-key";
@@ -29,7 +32,15 @@ export function urlBase64ToUint8Array(base64Url: string): Uint8Array {
 }
 
 async function registration(): Promise<ServiceWorkerRegistration> {
-  return navigator.serviceWorker.ready;
+  // navigator.serviceWorker.ready never settles when no worker is registered
+  // (e.g. `next dev`, where the app deliberately skips registration), which used
+  // to leave the settings UI stuck in a loading state forever.
+  const existing = await Promise.race([
+    navigator.serviceWorker.getRegistration(),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 5000)),
+  ]);
+  if (existing) return existing;
+  throw new NoServiceWorkerError("no service worker is registered");
 }
 
 export async function currentSubscription(): Promise<PushSubscription | null> {
@@ -66,7 +77,13 @@ function toPayload(subscription: PushSubscription, filters: PushFilters): Subscr
   };
 }
 
-async function postSubscription(subscription: PushSubscription, filters: PushFilters): Promise<void> {
+/**
+ * (Re-)registers a browser subscription with the server. Used both on subscribe
+ * and on settings load: if subscribing succeeded but the first POST was lost, the
+ * browser alone would report "subscribed" while the server had no row and no
+ * notification would ever arrive.
+ */
+export async function syncSubscription(subscription: PushSubscription, filters: PushFilters): Promise<void> {
   const response = await fetch("/api/push/subscriptions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -92,14 +109,14 @@ export async function subscribePush(publicKey: string, filters: PushFilters): Pr
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
         });
-  await postSubscription(subscription, filters);
+  await syncSubscription(subscription, filters);
   return subscription;
 }
 
 /** Re-syncs filter choices for an existing subscription. */
 export async function updatePushFilters(filters: PushFilters): Promise<void> {
   const subscription = await currentSubscription();
-  if (subscription) await postSubscription(subscription, filters);
+  if (subscription) await syncSubscription(subscription, filters);
 }
 
 /** Removes the server registration first, then the browser subscription. */

@@ -138,8 +138,10 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
     const sinceIso = new Date(now() - lookbackMinutes * 60_000).toISOString();
     const [subscriptions, events, alerts] = await Promise.all([
       deps.store.listSubscriptions(),
-      deps.store.recentNewsEvents(sinceIso, 20),
-      deps.store.recentAlerts(sinceIso, 50),
+      // Safety caps, not per-run targets: the store fetches the whole window and
+      // the per-run send cap plus the claim ledger spread delivery across runs.
+      deps.store.recentNewsEvents(sinceIso, 500),
+      deps.store.recentAlerts(sinceIso, 500),
     ]);
     const candidates = buildCandidates(events, alerts);
 
