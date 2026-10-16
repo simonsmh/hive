@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Fragment } from "react";
+import { LiveRefresh } from "@/src/components/dashboard/LiveRefresh";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatBeijingTime } from "@/src/modules/format";
 import { toAlertView, type AlertView } from "@/src/modules/alerts/mapper";
@@ -17,6 +18,14 @@ export default async function AlertsPage() {
 
   return (
     <PanelFrame title={panel.title} subtitle={`最近 ${ALERT_LIMIT} 条告警，按触发时间倒序`}>
+      {result.ok ? (
+        <LiveRefresh
+          topic="alerts"
+          field="newest"
+          baseline={result.data[0] ? `${result.data[0].id}:${result.data[0].resolvedAt ?? ""}` : ""}
+          label="告警有更新，点击刷新"
+        />
+      ) : null}
       {!result.ok ? (
         <ErrorState message={result.message} />
       ) : result.data.length === 0 ? (

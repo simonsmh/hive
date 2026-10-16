@@ -713,6 +713,172 @@ p {
   }
 }
 
+/* Live data: stream status, update pill, price flashes, and the interactive chart. */
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.live-live .live-dot {
+  background: var(--down);
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+.live-down .live-dot {
+  background: var(--up);
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-pill {
+  display: block;
+  width: fit-content;
+  margin: 0 auto 12px;
+  position: sticky;
+  top: calc(env(safe-area-inset-top) + 68px);
+  z-index: 5;
+  appearance: none;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(31, 26, 18, 0.25);
+}
+
+@media (min-width: 1024px) {
+  .live-pill {
+    top: 12px;
+  }
+}
+
+.quote-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.quote-row strong {
+  margin-right: auto;
+}
+
+.quote-ts {
+  font-size: 11px;
+  min-width: 58px;
+  text-align: right;
+}
+
+.price {
+  border-radius: 6px;
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+
+.flash-up {
+  animation: flash-up 0.9s ease-out;
+}
+
+.flash-down {
+  animation: flash-down 0.9s ease-out;
+}
+
+@keyframes flash-up {
+  0% {
+    background: color-mix(in srgb, var(--up) 20%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+@keyframes flash-down {
+  0% {
+    background: color-mix(in srgb, var(--down) 20%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+button.chip {
+  font: inherit;
+  cursor: pointer;
+}
+
+.chart-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.chart-toolbar .chips {
+  margin: 4px 0 6px;
+}
+
+.ma-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.chip[aria-pressed="false"] {
+  opacity: 0.55;
+}
+
+.pro-chart canvas {
+  display: block;
+  width: 100%;
+  touch-action: pan-y;
+  cursor: crosshair;
+}
+
+.chart-legend {
+  margin-top: 6px;
+  gap: 4px 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar .live-status {
+  padding: 0 12px;
+  margin-top: -10px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;

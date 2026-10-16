@@ -33,6 +33,7 @@ export interface CandleRow {
   high: number | string;
   low: number | string;
   close: number | string;
+  volume?: number | string | null;
   confirmed: boolean;
 }
 
@@ -42,6 +43,7 @@ export interface CandleBar {
   high: number;
   low: number;
   close: number;
+  volume: number;
   confirmed: boolean;
 }
 
@@ -50,12 +52,14 @@ export function toCandleBars(rows: readonly CandleRow[]): CandleBar[] {
   const byTime = new Map<number, CandleBar>();
   for (const row of rows) {
     const time = Date.parse(row.ts);
+    const volume = Number(row.volume ?? 0);
     const bar = {
       time,
       open: Number(row.open),
       high: Number(row.high),
       low: Number(row.low),
       close: Number(row.close),
+      volume: Number.isFinite(volume) && volume > 0 ? volume : 0,
       confirmed: row.confirmed,
     };
     const valid =
@@ -80,55 +84,4 @@ export function summarizeLatest(bars: readonly CandleBar[]): LatestSummary | nul
   const previous = bars.at(-2);
   const changePct = previous && previous.close > 0 ? ((last.close - previous.close) / previous.close) * 100 : null;
   return { close: last.close, time: last.time, changePct };
-}
-
-export interface CandleGlyph {
-  x: number;
-  bodyTop: number;
-  bodyHeight: number;
-  wickTop: number;
-  wickBottom: number;
-  up: boolean;
-}
-
-export interface CandleGeometry {
-  width: number;
-  height: number;
-  bodyWidth: number;
-  priceMin: number;
-  priceMax: number;
-  glyphs: CandleGlyph[];
-}
-
-/** Maps bars to SVG coordinates. The price axis is padded so the highest high and lowest low stay inside the viewport. */
-export function buildCandleGeometry(bars: readonly CandleBar[], width: number, height: number, padding = 8): CandleGeometry | null {
-  if (bars.length === 0) return null;
-  const innerWidth = width - padding * 2;
-  const innerHeight = height - padding * 2;
-  let priceMin = Math.min(...bars.map((b) => b.low));
-  let priceMax = Math.max(...bars.map((b) => b.high));
-  if (priceMax === priceMin) {
-    const pad = Math.max(Math.abs(priceMax) * 0.005, 1e-9);
-    priceMin -= pad;
-    priceMax += pad;
-  }
-  const span = priceMax - priceMin;
-  const slot = innerWidth / bars.length;
-  const bodyWidth = Math.min(14, Math.max(1, slot * 0.6));
-  const toY = (price: number) => padding + ((priceMax - price) / span) * innerHeight;
-
-  const glyphs = bars.map((bar, index): CandleGlyph => {
-    const bodyTop = toY(Math.max(bar.open, bar.close));
-    const bodyBottom = toY(Math.min(bar.open, bar.close));
-    return {
-      x: padding + (index + 0.5) * slot,
-      bodyTop,
-      bodyHeight: Math.max(1, bodyBottom - bodyTop),
-      wickTop: toY(bar.high),
-      wickBottom: toY(bar.low),
-      up: bar.close >= bar.open,
-    };
-  });
-
-  return { width, height, bodyWidth, priceMin, priceMax, glyphs };
 }

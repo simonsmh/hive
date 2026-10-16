@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCandleGeometry,
   buildQuoteBoard,
   resolveSelectedSymbol,
   summarizeLatest,
@@ -15,6 +14,7 @@ const bar = (time: number, open: number, high: number, low: number, close: numbe
   high,
   low,
   close,
+  volume: 0,
   confirmed: true,
 });
 
@@ -77,38 +77,5 @@ describe("summarizeLatest", () => {
   it("has no change figure for a single bar, and nothing for no bars", () => {
     expect(summarizeLatest([bar(1, 1, 2, 1, 100)])?.changePct).toBeNull();
     expect(summarizeLatest([])).toBeNull();
-  });
-});
-
-describe("buildCandleGeometry", () => {
-  it("returns null when there is nothing to draw", () => {
-    expect(buildCandleGeometry([], 300, 120)).toBeNull();
-  });
-
-  it("keeps every high and low inside the padded viewport", () => {
-    const bars = [bar(1, 10, 12, 9, 11), bar(2, 11, 15, 10, 14), bar(3, 14, 14, 8, 9)];
-    const geometry = buildCandleGeometry(bars, 300, 120, 8);
-    expect(geometry).not.toBeNull();
-    const ys = geometry!.glyphs.flatMap((g) => [g.wickTop, g.wickBottom]);
-    for (const y of ys) {
-      expect(y).toBeGreaterThanOrEqual(8 - 1e-9);
-      expect(y).toBeLessThanOrEqual(120 - 8 + 1e-9);
-    }
-    expect(geometry!.priceMin).toBe(8);
-    expect(geometry!.priceMax).toBe(15);
-  });
-
-  it("marks up candles where close >= open and places one glyph per bar, left to right", () => {
-    const geometry = buildCandleGeometry([bar(1, 10, 12, 9, 11), bar(2, 11, 11, 8, 9)], 200, 100, 0);
-    const [first, second] = geometry!.glyphs;
-    expect(first?.up).toBe(true);
-    expect(second?.up).toBe(false);
-    expect(first!.x).toBeLessThan(second!.x);
-  });
-
-  it("gives a flat price series a visible body and a non-zero span", () => {
-    const geometry = buildCandleGeometry([bar(1, 5, 5, 5, 5)], 100, 100, 0);
-    expect(geometry!.priceMax).toBeGreaterThan(geometry!.priceMin);
-    expect(geometry!.glyphs[0]!.bodyHeight).toBeGreaterThanOrEqual(1);
   });
 });

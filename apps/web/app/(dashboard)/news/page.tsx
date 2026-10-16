@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { LiveRefresh } from "@/src/components/dashboard/LiveRefresh";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatBeijingTime, formatCredibility } from "@/src/modules/format";
 import { loadPanelData } from "@/src/modules/panel-data";
@@ -20,6 +21,14 @@ export default async function NewsPage() {
 
   return (
     <PanelFrame title={panel.title} subtitle={`最近 ${NEWS_EVENT_LIMIT} 个新闻事件，按首次发布时间倒序`}>
+      {result.ok ? (
+        <LiveRefresh
+          topic="news"
+          field="newestId"
+          baseline={String(result.data[0]?.id ?? "")}
+          label="有新新闻，点击查看"
+        />
+      ) : null}
       {!result.ok ? (
         <ErrorState message={result.message} />
       ) : result.data.length === 0 ? (

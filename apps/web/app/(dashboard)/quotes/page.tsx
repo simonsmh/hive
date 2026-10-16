@@ -1,24 +1,20 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { CandleChart } from "@/src/components/dashboard/CandleChart";
+import { ChartPanel } from "@/src/components/dashboard/ChartPanel";
+import { LiveQuoteList } from "@/src/components/dashboard/LiveQuoteList";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
-import { formatPrice, formatSignedPercent, formatUtcDate } from "@/src/modules/format";
 import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
-import {
-  buildQuoteBoard,
-  resolveSelectedSymbol,
-  summarizeLatest,
-  toCandleBars,
-  type CandleBar,
-  type QuoteView,
-} from "@/src/modules/quotes/mapper";
-import { CANDLE_HISTORY, loadDailyCandles, loadEnabledSymbols, loadLatestQuotes } from "@/src/modules/quotes/query";
+import { buildQuoteBoard, resolveSelectedSymbol, toCandleBars, type QuoteView } from "@/src/modules/quotes/mapper";
+import { loadCandles, loadEnabledSymbols, loadLatestQuotes } from "@/src/modules/quotes/query";
 
 const panel = requirePanel("quotes");
 
 export const metadata: Metadata = { title: panel.title };
 export const dynamic = "force-dynamic";
+
+const INITIAL_INTERVAL = "1D" as const;
+const INITIAL_BARS = 180;
 
 export default async function QuotesPage({
   searchParams,
@@ -32,7 +28,7 @@ export default async function QuotesPage({
   });
 
   return (
-    <PanelFrame title={panel.title} subtitle="OKX 永续合约最新价，红涨绿跌（北京时间）">
+    <PanelFrame title={panel.title} subtitle="OKX 永续合约，红涨绿跌（北京时间）；报价与 K 线实时更新">
       {!board.ok ? (
         <ErrorState message={board.message} />
       ) : board.data.length === 0 ? (
@@ -47,27 +43,18 @@ export default async function QuotesPage({
 async function QuoteSection({ quotes, requested }: { quotes: QuoteView[]; requested: string | undefined }) {
   const symbols = quotes.map((quote) => quote.symbol);
   const selected = resolveSelectedSymbol(requested, symbols) ?? symbols[0] ?? "";
-  const candles = await loadPanelData(`candles ${selected}`, async () => toCandleBars(await loadDailyCandles(selected)));
+  const candles = await loadPanelData(`candles ${selected}`, async () =>
+    toCandleBars(await loadCandles(selected, INITIAL_INTERVAL, INITIAL_BARS)),
+  );
 
   return (
     <div className="quotes-layout">
       <section aria-label="最新报价">
-        <ul className="list">
-          {quotes.map((quote) => (
-            <li key={quote.symbol} className="quote-row">
-              <strong>{quote.symbol}</strong>
-              {quote.price === null ? (
-                <span className="muted">暂无报价</span>
-              ) : (
-                <span className="price">{formatPrice(quote.price)}</span>
-              )}
-            </li>
-          ))}
-        </ul>
+        <LiveQuoteList initial={quotes} />
       </section>
 
       <section className="quotes-chart" aria-label="K 线走势">
-        <h2>日线走势（UTC 日线，最近 {CANDLE_HISTORY} 根）</h2>
+        <h2>K 线走势</h2>
         <nav className="chips" aria-label="选择标的">
           {symbols.map((symbol) => (
             <Link
@@ -81,41 +68,12 @@ async function QuoteSection({ quotes, requested }: { quotes: QuoteView[]; reques
           ))}
         </nav>
 
-        {candles.ok ? <CandleBlock symbol={selected} bars={candles.data} /> : <ErrorState message={candles.message} />}
+        {candles.ok ? (
+          <ChartPanel key={selected} symbol={selected} initialBars={candles.data} initialInterval={INITIAL_INTERVAL} />
+        ) : (
+          <ErrorState message={candles.message} />
+        )}
       </section>
     </div>
-  );
-}
-
-function CandleBlock({ symbol, bars }: { symbol: string; bars: CandleBar[] }) {
-  const latest = summarizeLatest(bars);
-  const first = bars[0];
-  const last = bars.at(-1);
-  if (!latest || !first || !last) {
-    return <EmptyState title={`${symbol} 暂无日线数据`} hint="采集函数写入 1D 日线后会显示在这里。" />;
-  }
-  const low = Math.min(...bars.map((b) => b.low));
-  const high = Math.max(...bars.map((b) => b.high));
-
-  return (
-    <>
-      <div className="candle-summary">
-        <strong className="price">{formatPrice(latest.close)}</strong>
-        {latest.changePct === null ? null : (
-          <span className={latest.changePct >= 0 ? "up" : "down"}>{formatSignedPercent(latest.changePct)}</span>
-        )}
-        <span className="muted">
-          {formatUtcDate(latest.time)} {last.confirmed ? "收盘" : "进行中"}
-        </span>
-      </div>
-      <CandleChart bars={bars} label={`${symbol} 最近 ${bars.length} 根日线`} />
-      <div className="candle-axis">
-        <span>{formatUtcDate(first.time)}</span>
-        <span>
-          {formatPrice(low)} – {formatPrice(high)}
-        </span>
-        <span>{formatUtcDate(last.time)}</span>
-      </div>
-    </>
   );
 }
