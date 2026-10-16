@@ -181,11 +181,22 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
           }
           if (result.status >= 200 && result.status < 300) {
             sent++;
-            await deps.store.markSuccess(subscription.id);
+            // Bookkeeping must never undo a confirmed delivery: a markSuccess
+            // failure is logged here instead of falling into the catch block,
+            // which would release the claim and resend an already-delivered push.
+            try {
+              await deps.store.markSuccess(subscription.id);
+            } catch (error) {
+              log(`push markSuccess failed for ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
+            }
           } else {
             failed++;
             await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
-            await deps.store.markFailure(subscription);
+            try {
+              await deps.store.markFailure(subscription);
+            } catch (error) {
+              log(`push markFailure failed for ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
+            }
           }
         } catch (error) {
           failed++;

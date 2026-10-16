@@ -177,6 +177,24 @@ Deno.test("releases the claim and records the failure when sending throws", asyn
   strictEqual(calls.failedMarks.length, 2);
 });
 
+Deno.test("a markSuccess failure after a 2xx send does not release the claim", async () => {
+  let markSuccessCalls = 0;
+  const { store, calls } = fakeStore({
+    markSuccess: () => {
+      markSuccessCalls++;
+      return Promise.reject(new Error("db down"));
+    },
+  });
+  const handler = makeHandler(store, () => Promise.resolve({ status: 201, gone: false }));
+  const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
+  strictEqual(summary.sent, 2);
+  strictEqual(markSuccessCalls, 2);
+  // The push was already delivered: releasing the claim here would resend it on
+  // the next run, and markFailure must not run for a successful send either.
+  deepStrictEqual(calls.released, []);
+  strictEqual(calls.failedMarks.length, 0);
+});
+
 Deno.test("buildCandidates tolerates a null news title instead of failing the run", () => {
   const candidates = buildCandidates([{ ...EVENT, id: "ev-null", title: null }], []);
   strictEqual(candidates.length, 1);
