@@ -25,6 +25,7 @@ const FUNCTIONS = {
   "order-submit": ["auth", "okx-signing", "okx-trade", "order-intent", "position"],
   "position-manager": ["types", "okx", "auth", "okx-signing", "okx-trade", "order-intent", "atr", "position"],
   "position-subscriptions": ["auth", "position"],
+  "push-notify": ["auth", "webpush"],
 };
 
 function rewrite(name, source, allowedLocal) {

@@ -17,6 +17,7 @@ export const PANELS: readonly PanelRegistration[] = [
   { id: "quotes", title: "行情", icon: "chart", href: "/quotes", order: 20 },
   { id: "news", title: "新闻", icon: "news", href: "/news", order: 30 },
   { id: "alerts", title: "告警", icon: "bell", href: "/alerts", order: 40 },
+  { id: "settings", title: "设置", icon: "gear", href: "/settings", order: 50 },
 ];
 
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;

@@ -97,6 +97,17 @@ export async function authorize(request: Request): Promise<Response | null> {
   return null;
 }
 
+/**
+ * Session-cookie-only variant for browser-owned resources (push subscriptions): a
+ * bearer token must not be able to register or remove someone else's browser
+ * endpoint, so the token path is deliberately not accepted here.
+ */
+export async function authorizeSession(request: Request): Promise<Response | null> {
+  const session = readCookieValue(request.headers.get("cookie"), SESSION_COOKIE);
+  if (await verifySessionToken(session, process.env.HIVE_SESSION_SECRET)) return null;
+  return errorResponse(401, "unauthorized");
+}
+
 /** Wraps a route body so auth/param/config failures map to the right status without leaking internals. */
 export async function handle(run: () => Promise<Response>): Promise<Response> {
   try {

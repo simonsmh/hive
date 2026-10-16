@@ -38,3 +38,7 @@ verify_jwt = false
 
 [functions.position-subscriptions]
 verify_jwt = false
+
+# push-notify is invoked by pg_cron (EDGE_CRON_SECRET bearer), not by a Supabase JWT.
+[functions.push-notify]
+verify_jwt = false

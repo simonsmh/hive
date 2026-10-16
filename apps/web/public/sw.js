@@ -2,7 +2,7 @@
 // the manifest, and a data-free offline page. Navigations are network-first, and /api/* is
 // never intercepted, so personal dashboard data is never written to the cache.
 const CACHE_PREFIX = "hive-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v1`;
+const CACHE_NAME = `${CACHE_PREFIX}v2`;
 const OFFLINE_URL = "/offline";
 const PRECACHE_URLS = [
   OFFLINE_URL,
@@ -77,4 +77,44 @@ self.addEventListener("fetch", (event) => {
   if (isShellAsset(url)) {
     event.respondWith(cacheFirst(request));
   }
+});
+
+// Web Push: push-notify sends a JSON payload ({title, body, url, tag}); anything
+// unparseable still surfaces as a generic Hive notification instead of being dropped.
+self.addEventListener("push", (event) => {
+  let data = {};
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch {
+      data = { body: event.data.text() };
+    }
+  }
+  const title = typeof data.title === "string" ? data.title : "Hive";
+  const options = {
+    body: typeof data.body === "string" ? data.body : "",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    tag: typeof data.tag === "string" ? data.tag : undefined,
+    data: { url: typeof data.url === "string" ? data.url : "/" },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of windows) {
+        if ("focus" in client) {
+          await client.focus();
+          if ("navigate" in client) await client.navigate(target);
+          return;
+        }
+      }
+      await self.clients.openWindow(target);
+    })(),
+  );
 });
