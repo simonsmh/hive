@@ -1,5 +1,6 @@
 import "server-only";
 import { assertNoError, getDb } from "@/lib/supabase";
+import { digestNewest } from "../live/digest";
 import type { AlertRow } from "./mapper";
 
 export const ALERT_LIMIT = 50;
@@ -34,4 +35,16 @@ export async function listAlerts(filters: AlertFilters): Promise<AlertRow[]> {
 
 export async function loadRecentAlerts(): Promise<AlertRow[]> {
   return listAlerts({ kind: null, symbol: null, severity: null, unresolved: null, limit: ALERT_LIMIT });
+}
+
+/**
+ * Change key for the alerts feed, shared by the SSE stream and the alerts page's
+ * LiveRefresh baseline. Covers every rendered alert's id and resolution timestamp,
+ * so resolving any alert — not just the newest — triggers a refresh.
+ */
+export function digestAlertList(alerts: readonly { id: number | string; resolvedAt: string | null }[]): string {
+  return digestNewest(
+    alerts.map((alert) => `${alert.id}:${alert.resolvedAt ?? ""}`),
+    alerts.length,
+  );
 }

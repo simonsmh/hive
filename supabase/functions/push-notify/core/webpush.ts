@@ -190,7 +190,13 @@ export async function sendWebPush(
   subscription: PushSubscriptionKeys,
   payloadText: string,
   vapid: VapidKeys,
-  options: { ttlSeconds?: number; urgency?: "very-low" | "low" | "normal" | "high"; fetchImpl?: FetchLike } = {},
+  options: {
+    ttlSeconds?: number;
+    urgency?: "very-low" | "low" | "normal" | "high";
+    fetchImpl?: FetchLike;
+    /** Per-delivery abort deadline; a hung push endpoint must not stall the whole run. */
+    timeoutMs?: number;
+  } = {},
 ): Promise<WebPushResult> {
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const body = await encryptPushPayload(subscription, encoder.encode(payloadText));
@@ -204,6 +210,7 @@ export async function sendWebPush(
       urgency: options.urgency ?? "normal",
     },
     body: body as FetchBody,
+    signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
   });
   return { status: response.status, gone: response.status === 404 || response.status === 410 };
 }

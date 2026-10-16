@@ -14,8 +14,9 @@ const VALID_BODY = {
   filters: { news: true, alerts: false },
 };
 
-async function sessionHeaders(): Promise<{ cookie: string }> {
-  return { cookie: `${SESSION_COOKIE}=${await createSessionToken(SESSION_SECRET)}` };
+async function sessionHeaders(): Promise<{ cookie: string; origin: string }> {
+  // Same-origin proof: session-cookie writes require it (sibling-origin CSRF).
+  return { cookie: `${SESSION_COOKIE}=${await createSessionToken(SESSION_SECRET)}`, origin: base };
 }
 
 function post(body: unknown, headers: Record<string, string> = {}): Request {

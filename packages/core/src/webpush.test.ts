@@ -175,4 +175,32 @@ describe("sendWebPush", () => {
     const gone = await sendWebPush(subscription, "hello", vapid, { fetchImpl: async () => ({ status: 410 }) });
     expect(gone).toEqual({ status: 410, gone: true });
   });
+
+  it("aborts a hung push endpoint after the per-delivery timeout", async () => {
+    const server = await generateP256();
+    const ua = await generateP256();
+    const vapid = {
+      publicKey: base64UrlEncode(server.publicRaw),
+      privateKey: base64UrlEncode(server.privateScalar),
+      subject: "mailto:ops@example.com",
+    };
+    const subscription: PushSubscriptionKeys = {
+      endpoint: "https://push.example.net/send/hung",
+      p256dh: base64UrlEncode(ua.publicRaw),
+      auth: base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))),
+    };
+    let observedSignal: AbortSignal | null = null;
+    const hanging: (input: string, init: RequestInit) => Promise<{ status: number }> = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        observedSignal = init.signal as AbortSignal | null;
+        observedSignal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+    await expect(
+      sendWebPush(subscription, "hello", vapid, { fetchImpl: hanging, timeoutMs: 50 }),
+    ).rejects.toThrow();
+    expect(observedSignal).not.toBeNull();
+    expect(observedSignal!.aborted).toBe(true);
+  });
 });

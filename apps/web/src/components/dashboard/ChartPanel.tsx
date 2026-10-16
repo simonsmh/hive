@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatPrice, formatSignedPercent, formatUtcDate } from "@/src/modules/format";
 import { useTopic } from "@/src/modules/live/stream-client";
-import { applyLivePrice, barChangePct, smaSeries } from "@/src/modules/quotes/chart-math";
+import { applyLivePrice, barChangePct, needsCandleReconcile, smaSeries } from "@/src/modules/quotes/chart-math";
 import {
   summarizeLatest,
   toCandleBars,
@@ -56,6 +56,42 @@ export function ChartPanel({
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef(0);
   const barsIntervalRef = useRef<ChartInterval>(initialInterval);
+  const barsRef = useRef<readonly CandleBar[]>(initialBars);
+  useEffect(() => {
+    barsRef.current = bars;
+  }, [bars]);
+
+  const loadBars = useCallback(
+    (target: ChartInterval, requestId: number) => {
+      setLoading(true);
+      setError(null);
+      setHoverIndex(null);
+      const params = new URLSearchParams({
+        symbol,
+        source: "okx",
+        interval: target,
+        limit: String(INTERVAL_LIMIT[target]),
+      });
+      fetch(`/api/candles?${params.toString()}`)
+        .then(async (response) => {
+          const body = (await response.json()) as CandlesResponse;
+          if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+          return toCandleBars(Array.isArray(body.candles) ? (body.candles as CandleRow[]) : []);
+        })
+        .then((next) => {
+          if (requestRef.current !== requestId) return;
+          barsIntervalRef.current = target;
+          setBars(next);
+          setLoading(false);
+        })
+        .catch((cause: unknown) => {
+          if (requestRef.current !== requestId) return;
+          setError(cause instanceof Error ? cause.message : "加载失败");
+          setLoading(false);
+        });
+    },
+    [symbol],
+  );
 
   useEffect(() => {
     // Always bump the request id so a still-in-flight fetch for another interval
@@ -66,33 +102,8 @@ export function ChartPanel({
       setLoading(false);
       return;
     }
-    setLoading(true);
-    setError(null);
-    setHoverIndex(null);
-    const params = new URLSearchParams({
-      symbol,
-      source: "okx",
-      interval,
-      limit: String(INTERVAL_LIMIT[interval]),
-    });
-    fetch(`/api/candles?${params.toString()}`)
-      .then(async (response) => {
-        const body = (await response.json()) as CandlesResponse;
-        if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
-        return toCandleBars(Array.isArray(body.candles) ? (body.candles as CandleRow[]) : []);
-      })
-      .then((next) => {
-        if (requestRef.current !== requestId) return;
-        barsIntervalRef.current = interval;
-        setBars(next);
-        setLoading(false);
-      })
-      .catch((cause: unknown) => {
-        if (requestRef.current !== requestId) return;
-        setError(cause instanceof Error ? cause.message : "加载失败");
-        setLoading(false);
-      });
-  }, [interval, initialInterval, symbol]);
+    loadBars(interval, requestId);
+  }, [interval, initialInterval, loadBars]);
 
   useTopic("quotes", (data) => {
     const quotes = (data as { quotes?: QuoteView[] } | null)?.quotes;
@@ -100,7 +111,15 @@ export function ChartPanel({
     if (!quote || quote.price === null || !quote.ts) return;
     const tsMs = Date.parse(quote.ts);
     if (!Number.isFinite(tsMs)) return;
-    setBars((previous) => applyLivePrice(previous, quote.price!, tsMs, INTERVAL_MS[interval]));
+    const intervalMs = INTERVAL_MS[interval];
+    // When the chart stays open across an interval boundary, the tail holds a
+    // synthetic bar (sampled high/low, zero volume); reconcile it against the
+    // authoritative series instead of letting the approximation linger.
+    if (!loading && needsCandleReconcile(barsRef.current, tsMs, intervalMs)) {
+      loadBars(interval, ++requestRef.current);
+      return;
+    }
+    setBars((previous) => applyLivePrice(previous, quote.price!, tsMs, intervalMs));
   });
 
   const activeMa = useMemo(() => MA_PERIODS.filter((period) => enabledMa.includes(period)), [enabledMa]);

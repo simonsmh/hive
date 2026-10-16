@@ -117,11 +117,15 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
   const now = deps.now ?? Date.now;
   const lookbackMinutes = deps.lookbackMinutes ?? 30;
   const maxSends = deps.maxSendsPerRun ?? 200;
-  // 400/401/403 from a push service are persistent (bad VAPID auth, malformed
-  // request): after this many consecutive failures the endpoint is dead and the
-  // subscription is retired instead of burning the per-run send budget forever.
+  // 400 from a push service is endpoint-specific (malformed request): after this
+  // many consecutive failures the endpoint is dead and the subscription is
+  // retired instead of burning the per-run send budget forever. 401/403 are
+  // deliberately NOT in this set: they can be credential-level (bad VAPID keys,
+  // a push-service auth incident), in which case retiring every affected
+  // subscription would wipe them all and force manual re-subscription.
   const PERMANENT_FAILURE_LIMIT = 5;
-  const isPermanentRejection = (status: number) => status === 400 || status === 401 || status === 403;
+  const isPermanentRejection = (status: number) => status === 400;
+  const isAuthRejection = (status: number) => status === 401 || status === 403;
   const sendPush = deps.sendPush ?? sendWebPush;
   const log = deps.log ?? (() => undefined);
 
@@ -156,6 +160,7 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
     let retired = 0;
     let failed = 0;
     let attempts = 0;
+    let authFailures = 0;
 
     for (const subscription of subscriptions) {
       const filters = parsePushFilters(subscription.filters);
@@ -198,12 +203,18 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
           } else {
             failed++;
             if (isPermanentRejection(result.status) && (subscription.failure_count ?? 0) + 1 >= PERMANENT_FAILURE_LIMIT) {
-              // Dead endpoint (persistent 400/401/403): retrying it for every
+              // Dead endpoint (persistent 400): retrying it for every
               // candidate every minute would starve the per-run send budget, so
               // retire the subscription. Its claims cascade-delete with it.
               retired++;
               await deps.store.deleteSubscription(subscription.id);
               break;
+            }
+            if (isAuthRejection(result.status)) {
+              // Auth-level rejection: possibly the VAPID credentials or the
+              // push service itself. Never retire on these; a run-level check
+              // below flags a likely credential incident instead.
+              authFailures++;
             }
             await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
             try {
@@ -231,6 +242,14 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
       }
     }
 
+    // A majority of 401/403 across this run's deliveries points at the VAPID
+    // credentials or the push service rather than any single endpoint; surface
+    // it instead of (previously) retiring every affected subscription.
+    const authIncident = attempts > 0 && authFailures * 2 >= attempts;
+    if (authIncident) {
+      log(`push auth incident: ${authFailures}/${attempts} deliveries rejected with 401/403; check VAPID keys`);
+    }
+
     return Response.json({
       ok: true,
       subscriptions: subscriptions.length,
@@ -240,6 +259,8 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
       gone,
       retired,
       failed,
+      authFailures,
+      authIncident,
     });
   };
 }

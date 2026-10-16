@@ -63,6 +63,18 @@ export function barChangePct(bar: CandleBar): number | null {
 }
 
 /**
+ * Whether the newest bar is a synthetic live bar whose interval has already closed.
+ * A long-lived chart accumulates these approximations (sampled high/low, zero volume)
+ * unless the series is re-fetched against the authoritative candles once the bucket
+ * rolls over.
+ */
+export function needsCandleReconcile(bars: readonly CandleBar[], nowMs: number, intervalMs: number): boolean {
+  if (bars.length === 0 || !Number.isFinite(nowMs) || intervalMs <= 0) return false;
+  const last = bars[bars.length - 1]!;
+  return last.confirmed === false && nowMs >= last.time + intervalMs;
+}
+
+/**
  * Folds a live trade price into the tail of the series: updates the forming bar in place,
  * or appends a fresh bar once the price belongs to the next interval bucket. Returns the
  * original array (same reference) when the price is stale or invalid, so callers can use

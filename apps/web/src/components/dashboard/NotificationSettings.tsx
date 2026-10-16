@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   currentSubscription,
   NoServiceWorkerError,
@@ -43,6 +43,10 @@ export function NotificationSettings({ publicKey }: { publicKey: string | null }
   const [phase, setPhase] = useState<Phase>("loading");
   const [filters, setFilters] = useState<PushFilters>({ news: true, alerts: true });
   const [error, setError] = useState<string | null>(null);
+  // Full-object filter writes must not race: two quick toggles would otherwise
+  // finish out of order and let the older response overwrite the newer
+  // preference on the server while the UI shows the latest state.
+  const filterSyncRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     setSupport(pushSupport(publicKey));
@@ -118,7 +122,14 @@ export function NotificationSettings({ publicKey }: { publicKey: string | null }
       // Storage may be unavailable; the server copy is what matters.
     }
     if (phase === "subscribed") {
-      updatePushFilters(next).catch(() => setError("筛选已保存在本机，但同步到服务器失败。"));
+      // Serialize the writes so the last toggle always wins on the server too.
+      filterSyncRef.current = filterSyncRef.current
+        .catch(() => undefined)
+        .then(() => updatePushFilters(next))
+        .then(
+          () => undefined,
+          () => setError("筛选已保存在本机，但同步到服务器失败。"),
+        );
     }
   };
 
