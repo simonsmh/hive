@@ -232,8 +232,31 @@ Deno.test("401/403 rejections never retire a subscription and flag an auth incid
   deepStrictEqual(calls.deleted, []);
   strictEqual(summary.authIncident, true);
   strictEqual(summary.authFailures, 4);
+  // Auth rejections must not feed the permanent-failure counter: four 401s
+  // followed by a single 400 must never retire the subscription.
+  strictEqual(calls.failedMarks.length, 0);
   // Claims are released so delivery is retried on the next run.
   ok(calls.released.length > 0);
+});
+
+Deno.test("auth rejections followed by a 400 do not retire a subscription", async () => {
+  const sub = { ...SUB, failure_count: 0 };
+  const { store, calls } = fakeStore({
+    listSubscriptions: () => Promise.resolve([sub]),
+  });
+  // First run: pure 401s. The counter must stay untouched.
+  const authOnly = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const first = (await (await authOnly(authedRequest())).json()) as Record<string, number | boolean>;
+  strictEqual(first.retired, 0);
+  strictEqual(calls.failedMarks.length, 0);
+  // Second run: 400s. They see the same counter as if the 401s never
+  // happened, so a lone 400 cannot push it over the retirement threshold.
+  const permanent = makeHandler(store, () => Promise.resolve({ status: 400, gone: false }));
+  const second = (await (await permanent(authedRequest())).json()) as Record<string, number>;
+  strictEqual(second.retired, 0);
+  strictEqual(calls.deleted.length, 0);
+  // The 400s themselves still count as failures (two candidates per run).
+  strictEqual(calls.failedMarks.length, 2);
 });
 
 Deno.test("a markSuccess failure after a 2xx send does not release the claim", async () => {

@@ -122,7 +122,9 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
   // retired instead of burning the per-run send budget forever. 401/403 are
   // deliberately NOT in this set: they can be credential-level (bad VAPID keys,
   // a push-service auth incident), in which case retiring every affected
-  // subscription would wipe them all and force manual re-subscription.
+  // subscription would wipe them all and force manual re-subscription. They
+  // also never feed the failure counter below, so auth rejections alone can
+  // never push a subscription over the retirement threshold.
   const PERMANENT_FAILURE_LIMIT = 5;
   const isPermanentRejection = (status: number) => status === 400;
   const isAuthRejection = (status: number) => status === 401 || status === 403;
@@ -202,7 +204,18 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
             }
           } else {
             failed++;
-            if (isPermanentRejection(result.status) && (subscription.failure_count ?? 0) + 1 >= PERMANENT_FAILURE_LIMIT) {
+            const authRejected = isAuthRejection(result.status);
+            if (authRejected) {
+              // Auth-level rejection: possibly the VAPID credentials or the
+              // push service itself. Never retire on these and never let them
+              // feed the permanent-failure counter (a mix of 401/403s and a
+              // later 400 must not retire either); a run-level check below
+              // flags a likely credential incident instead.
+              authFailures++;
+            } else if (
+              isPermanentRejection(result.status) &&
+              (subscription.failure_count ?? 0) + 1 >= PERMANENT_FAILURE_LIMIT
+            ) {
               // Dead endpoint (persistent 400): retrying it for every
               // candidate every minute would starve the per-run send budget, so
               // retire the subscription. Its claims cascade-delete with it.
@@ -210,17 +223,13 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
               await deps.store.deleteSubscription(subscription.id);
               break;
             }
-            if (isAuthRejection(result.status)) {
-              // Auth-level rejection: possibly the VAPID credentials or the
-              // push service itself. Never retire on these; a run-level check
-              // below flags a likely credential incident instead.
-              authFailures++;
-            }
             await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
-            try {
-              await deps.store.markFailure(subscription);
-            } catch (error) {
-              log(`push markFailure failed for ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
+            if (!authRejected) {
+              try {
+                await deps.store.markFailure(subscription);
+              } catch (error) {
+                log(`push markFailure failed for ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
+              }
             }
           }
         } catch (error) {
