@@ -31,15 +31,26 @@ export function urlBase64ToUint8Array(base64Url: string): Uint8Array {
   return bytes;
 }
 
+/** Upper bound for waiting on a service worker registration before giving up. */
+const REGISTRATION_WAIT_MS = 5000;
+/** Interval between registration checks; catches an in-flight register(). */
+const REGISTRATION_POLL_MS = 100;
+
 async function registration(): Promise<ServiceWorkerRegistration> {
-  // navigator.serviceWorker.ready never settles when no worker is registered
-  // (e.g. `next dev`, where the app deliberately skips registration), which used
-  // to leave the settings UI stuck in a loading state forever.
-  const existing = await Promise.race([
-    navigator.serviceWorker.getRegistration(),
-    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 5000)),
-  ]);
-  if (existing) return existing;
+  // On a clean production profile, ServiceWorkerRegister starts register() in a
+  // separate effect, so a single getRegistration() can resolve undefined while
+  // registration is still in flight. Poll until it settles instead of reading
+  // once: a real registration shows up within a few hundred milliseconds, while
+  // in dev (register() is deliberately skipped) nothing ever appears and we still
+  // give up after REGISTRATION_WAIT_MS rather than leaving the UI stuck loading
+  // (`navigator.serviceWorker.ready` never settles in that case).
+  const deadline = Date.now() + REGISTRATION_WAIT_MS;
+  for (;;) {
+    const existing = await navigator.serviceWorker.getRegistration();
+    if (existing) return existing;
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, REGISTRATION_POLL_MS));
+  }
   throw new NoServiceWorkerError("no service worker is registered");
 }
 
