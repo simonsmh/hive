@@ -177,6 +177,44 @@ Deno.test("releases the claim and records the failure when sending throws", asyn
   strictEqual(calls.failedMarks.length, 2);
 });
 
+Deno.test("cleanup errors after a send failure do not abort the run", async () => {
+  const { store, calls } = fakeStore({
+    releaseDelivery: () => Promise.reject(new Error("rest down")),
+    markFailure: () => Promise.reject(new Error("rest down")),
+  });
+  const handler = makeHandler(store, () => Promise.reject(new Error("network down")));
+  const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
+  // Both candidates still counted as failed; the run completed instead of 500ing.
+  strictEqual(summary.failed, 2);
+  strictEqual(calls.deleted.length, 0);
+});
+
+Deno.test("retires a subscription after repeated permanent 4xx rejections", async () => {
+  const dying = { ...SUB, failure_count: 4 };
+  const { store, calls } = fakeStore({
+    listSubscriptions: () => Promise.resolve([dying]),
+  });
+  const handler = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
+  strictEqual(summary.retired, 1);
+  deepStrictEqual(calls.deleted, [dying.id]);
+  // No claim release and no failure-mark bookkeeping for a retired subscription.
+  deepStrictEqual(calls.released, []);
+  strictEqual(calls.failedMarks.length, 0);
+});
+
+Deno.test("does not retire a subscription before the permanent-failure limit", async () => {
+  const flaky = { ...SUB, failure_count: 1 };
+  const { store, calls } = fakeStore({
+    listSubscriptions: () => Promise.resolve([flaky]),
+  });
+  const handler = makeHandler(store, () => Promise.resolve({ status: 401, gone: false }));
+  const summary = (await (await handler(authedRequest())).json()) as Record<string, number>;
+  strictEqual(summary.retired, 0);
+  strictEqual(calls.deleted.length, 0);
+  strictEqual(calls.failedMarks.length, 2);
+});
+
 Deno.test("a markSuccess failure after a 2xx send does not release the claim", async () => {
   let markSuccessCalls = 0;
   const { store, calls } = fakeStore({

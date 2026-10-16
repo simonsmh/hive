@@ -117,6 +117,11 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
   const now = deps.now ?? Date.now;
   const lookbackMinutes = deps.lookbackMinutes ?? 30;
   const maxSends = deps.maxSendsPerRun ?? 200;
+  // 400/401/403 from a push service are persistent (bad VAPID auth, malformed
+  // request): after this many consecutive failures the endpoint is dead and the
+  // subscription is retired instead of burning the per-run send budget forever.
+  const PERMANENT_FAILURE_LIMIT = 5;
+  const isPermanentRejection = (status: number) => status === 400 || status === 401 || status === 403;
   const sendPush = deps.sendPush ?? sendWebPush;
   const log = deps.log ?? (() => undefined);
 
@@ -148,6 +153,7 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
     let sent = 0;
     let skipped = 0;
     let gone = 0;
+    let retired = 0;
     let failed = 0;
     let attempts = 0;
 
@@ -191,6 +197,14 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
             }
           } else {
             failed++;
+            if (isPermanentRejection(result.status) && (subscription.failure_count ?? 0) + 1 >= PERMANENT_FAILURE_LIMIT) {
+              // Dead endpoint (persistent 400/401/403): retrying it for every
+              // candidate every minute would starve the per-run send budget, so
+              // retire the subscription. Its claims cascade-delete with it.
+              retired++;
+              await deps.store.deleteSubscription(subscription.id);
+              break;
+            }
             await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
             try {
               await deps.store.markFailure(subscription);
@@ -201,8 +215,18 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
         } catch (error) {
           failed++;
           log(`push send failed for ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
-          await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
-          await deps.store.markFailure(subscription);
+          // Defensive cleanup: a transient REST/database error here must not
+          // escape and abort the whole cron run for the remaining candidates.
+          try {
+            await deps.store.releaseDelivery(subscription.id, candidate.eventKey);
+          } catch (cleanupError) {
+            log(`push releaseDelivery failed for ${subscription.id}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+          }
+          try {
+            await deps.store.markFailure(subscription);
+          } catch (cleanupError) {
+            log(`push markFailure failed for ${subscription.id}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+          }
         }
       }
     }
@@ -214,6 +238,7 @@ export function createPushNotifyHandler(deps: PushNotifyDeps) {
       sent,
       skipped,
       gone,
+      retired,
       failed,
     });
   };
