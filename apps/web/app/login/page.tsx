@@ -16,7 +16,7 @@ export default async function LoginPage({
     <main className="login">
       <section className="login-card">
         <h1>Hive</h1>
-        <p className="muted">市场数据看板，请输入访问密码。</p>
+        <p className="muted">市场数据与交易网关看板。使用访问密码或 API Token 登录。</p>
         <LoginForm next={target} />
       </section>
     </main>

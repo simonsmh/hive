@@ -84,6 +84,28 @@ export async function checkDashboardPassword(presented: string, expected: string
   return constantTimeEquals(presentedDigest, expectedDigest);
 }
 
+/** The API token is a credential of the same shape, so it shares the constant-time comparison. */
+export async function checkApiToken(presented: string, expected: string | undefined): Promise<boolean> {
+  return checkDashboardPassword(presented, expected);
+}
+
+/** Extracts one cookie value from a Cookie header; returns undefined when the cookie is absent. */
+export function readCookieValue(header: string | null, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    const raw = part.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return undefined;
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);

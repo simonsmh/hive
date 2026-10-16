@@ -1,10 +1,15 @@
 import type { Metadata } from "next";
+import { LiveRefresh } from "@/src/components/dashboard/LiveRefresh";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { formatAge, formatBeijingTime } from "@/src/modules/format";
+import { digestHealth } from "@/src/modules/live/digest";
+import { WebhookDeliverySection } from "@/src/components/dashboard/WebhookDeliverySection";
 import { buildHealthReport, type SourceHealthRow, type SourceHealthView } from "@/src/modules/health/mapper";
 import { loadSourceHealth } from "@/src/modules/health/query";
 import { loadPanelData } from "@/src/modules/panel-data";
 import { requirePanel } from "@/src/modules/registry";
+import { sourceLabel } from "@/src/modules/sources";
+import { loadDeliverySummary } from "@/src/modules/webhooks/query";
 
 const panel = requirePanel("health");
 
@@ -12,17 +17,24 @@ export const metadata: Metadata = { title: panel.title };
 export const dynamic = "force-dynamic";
 
 export default async function HealthPage() {
-  const result = await loadPanelData("source_health", loadSourceHealth);
+  const [health, deliveries] = await Promise.all([
+    loadPanelData("source_health", loadSourceHealth),
+    loadPanelData("webhook_deliveries", loadDeliverySummary),
+  ]);
   return (
     <PanelFrame title={panel.title} subtitle="各数据源最近一次成功采集。已启用且过期的数据源会使 /api/health 返回 503。">
-      {result.ok ? <HealthBody rows={result.data} /> : <ErrorState message={result.message} />}
+      {health.ok ? (
+        <LiveRefresh topic="health" field="digest" baseline={digestHealth(health.data, Date.now())} label="" auto />
+      ) : null}
+      {health.ok ? <HealthBody rows={health.data} /> : <ErrorState message={health.message} />}
+      {deliveries.ok ? <WebhookDeliverySection summary={deliveries.data} /> : <ErrorState message={deliveries.message} />}
     </PanelFrame>
   );
 }
 
 function HealthBody({ rows }: { rows: SourceHealthRow[] }) {
   if (rows.length === 0) {
-    return <EmptyState title="暂无数据源记录" hint="Worker 启动并完成首次采集后，这里会显示各数据源状态。" />;
+    return <EmptyState title="暂无数据源记录" hint="采集函数首次运行并写入数据后，这里会显示各数据源状态。" />;
   }
 
   const { report } = buildHealthReport(rows, Date.now());
@@ -52,7 +64,7 @@ function HealthBody({ rows }: { rows: SourceHealthRow[] }) {
           <span>未启用</span>
         </div>
       </div>
-      <ul className="list">
+      <ul className="list list-grid">
         {report.sources.map((source) => (
           <SourceItem key={source.source} source={source} />
         ))}
@@ -73,7 +85,7 @@ function SourceItem({ source }: { source: SourceHealthView }) {
   return (
     <li className="list-item">
       <div className="list-item-head">
-        <strong>{source.source.toUpperCase()}</strong>
+        <strong>{sourceLabel(source.source)}</strong>
         {badge}
       </div>
       <div className="meta">

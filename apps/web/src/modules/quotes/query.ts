@@ -1,4 +1,5 @@
 import "server-only";
+import type { Interval } from "@hive/core";
 import { assertNoError, getDb } from "@/lib/supabase";
 import type { CandleRow, QuoteRow } from "./mapper";
 
@@ -23,16 +24,21 @@ export async function loadLatestQuotes(symbols: readonly string[]): Promise<Quot
   return (data ?? []) as QuoteRow[];
 }
 
-/** Daily bars are stored with interval `1D` (UTC day boundaries). Returned oldest first. */
-export async function loadDailyCandles(symbol: string): Promise<CandleRow[]> {
+/** Bars for any collected interval (`1m`–`1D`), oldest first, with volume for the chart. */
+export async function loadCandles(symbol: string, interval: Interval, limit: number): Promise<CandleRow[]> {
   const { data, error } = await getDb()
     .from("candles")
-    .select("ts, open, high, low, close, confirmed")
+    .select("ts, open, high, low, close, volume, confirmed")
     .eq("symbol", symbol)
     .eq("source", DASHBOARD_SOURCE)
-    .eq("interval", "1D")
+    .eq("interval", interval)
     .order("ts", { ascending: false })
-    .limit(CANDLE_HISTORY);
+    .limit(limit);
   assertNoError(error);
   return ((data ?? []) as CandleRow[]).reverse();
+}
+
+/** Daily bars are stored with interval `1D` (UTC day boundaries). Returned oldest first. */
+export async function loadDailyCandles(symbol: string): Promise<CandleRow[]> {
+  return loadCandles(symbol, "1D", CANDLE_HISTORY);
 }

@@ -1,9 +1,24 @@
-import { OkxRateLimitError, type Interval, type OkxTicker, type ParsedCandles } from "@hive/core";
-import type { Store } from "./store.js";
+import { OkxRateLimitError, type OkxInstrument, type OkxTicker, type ParsedCandles } from "./okx.js";
+import { pickSwapInstId } from "./symbols.js";
+import type { Candle, Interval, Source } from "./types.js";
 
 export interface MarketDataSource {
   getTicker(instId: string): Promise<OkxTicker>;
   getCandles(instId: string, bar: string, limit: number): Promise<ParsedCandles>;
+}
+
+export interface QuoteRow {
+  symbol: string;
+  price: number;
+  ts: number;
+}
+
+/** Persistence used by the collector. The worker (pg) and the Edge Function (PostgREST) each implement it. */
+export interface CollectorStore {
+  upsertQuote(symbol: string, source: Source, quote: QuoteRow): Promise<void>;
+  upsertCandles(symbol: string, source: Source, interval: Interval, candles: readonly Candle[]): Promise<number>;
+  recordSourceSuccess(source: Source): Promise<void>;
+  recordSourceFailure(source: Source, error: string): Promise<void>;
 }
 
 export interface PollTarget {
@@ -32,9 +47,14 @@ export const DEFAULT_CANDLE_REQUESTS: readonly CandleRequest[] = [
 
 export interface CycleOptions {
   client: MarketDataSource;
-  store: Store;
+  store: CollectorStore;
   targets: readonly PollTarget[];
   candleRequests?: readonly CandleRequest[];
+  /** Number of targets polled in parallel. Defaults to 1, which polls in order. */
+  concurrency?: number;
+  /** Epoch milliseconds after which no further target is started. */
+  deadlineMs?: number;
+  now?: () => number;
   log: (message: string) => void;
 }
 
@@ -45,7 +65,23 @@ export interface CycleResult {
   failures: number;
   /** Database writes that failed. The cycle continues past each one. */
   writeErrors: number;
+  /** Database writes that persisted at least one row. */
+  persisted: number;
   rateLimited: boolean;
+  /** Targets not started because the deadline had passed. */
+  skippedTargets: number;
+}
+
+export async function runConcurrently<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(Math.floor(limit), items.length)) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor] as T;
+      cursor += 1;
+      await task(item);
+    }
+  });
+  await Promise.all(lanes);
 }
 
 /**
@@ -57,10 +93,12 @@ export interface CycleResult {
 export async function runPollCycle(options: CycleOptions): Promise<CycleResult> {
   const { client, store, targets, log } = options;
   const candleRequests = options.candleRequests ?? DEFAULT_CANDLE_REQUESTS;
+  const now = options.now ?? Date.now;
   let successes = 0;
   let failures = 0;
   let writeErrors = 0;
   let persisted = 0;
+  let skippedTargets = 0;
   let rateLimited = false;
   let lastError = "";
 
@@ -89,7 +127,12 @@ export async function runPollCycle(options: CycleOptions): Promise<CycleResult> 
     }
   };
 
-  for (const target of targets) {
+  const pollTarget = async (target: PollTarget): Promise<void> => {
+    if (options.deadlineMs !== undefined && now() >= options.deadlineMs) {
+      skippedTargets += 1;
+      return;
+    }
+
     const ticker = await fetchFromOkx(`ticker ${target.instId}`, () => client.getTicker(target.instId));
     if (ticker) {
       await persist(`quote ${target.symbol}`, () =>
@@ -110,7 +153,9 @@ export async function runPollCycle(options: CycleOptions): Promise<CycleResult> 
         store.upsertCandles(target.symbol, "okx", request.interval, parsed.candles),
       );
     }
-  }
+  };
+
+  await runConcurrently(targets, options.concurrency ?? 1, pollTarget);
 
   if (persisted > 0) {
     await store.recordSourceSuccess("okx");
@@ -118,5 +163,43 @@ export async function runPollCycle(options: CycleOptions): Promise<CycleResult> 
     await store.recordSourceFailure("okx", lastError);
   }
 
-  return { successes, failures, writeErrors, rateLimited };
+  return { successes, failures, writeErrors, persisted, rateLimited, skippedTargets };
+}
+
+export interface SymbolRecord {
+  symbol: string;
+  okxInstId: string | null;
+}
+
+export interface ResolveTargetsOptions {
+  getInstruments: () => Promise<readonly OkxInstrument[]>;
+  saveInstId: (symbol: string, instId: string) => Promise<void>;
+  log: (message: string) => void;
+}
+
+/**
+ * Symbols with a stored OKX instrument are polled as-is. Symbols without one are resolved
+ * against the live SWAP list and saved; the instrument list is fetched at most once per call.
+ */
+export async function resolvePollTargets(
+  records: readonly SymbolRecord[],
+  options: ResolveTargetsOptions,
+): Promise<PollTarget[]> {
+  const targets: PollTarget[] = [];
+  let instruments: readonly OkxInstrument[] | null = null;
+  for (const record of records) {
+    if (record.okxInstId) {
+      targets.push({ symbol: record.symbol, instId: record.okxInstId });
+      continue;
+    }
+    instruments ??= await options.getInstruments();
+    const instId = pickSwapInstId(record.symbol, instruments);
+    if (!instId) {
+      options.log(`no live OKX perpetual found for ${record.symbol}; skipping`);
+      continue;
+    }
+    await options.saveInstId(record.symbol, instId);
+    targets.push({ symbol: record.symbol, instId });
+  }
+  return targets;
 }

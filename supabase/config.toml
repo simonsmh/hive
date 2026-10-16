@@ -1,0 +1,44 @@
+# Minimal Supabase CLI config. Only what the Edge Functions need is declared here; everything else
+# uses CLI defaults. Each function authenticates pg_cron/pg_net calls with its own shared secret
+# (COLLECTOR_SECRET for okx-collector, EDGE_CRON_SECRET for the others), so the platform JWT check is
+# disabled for them.
+project_id = "hive"
+
+[functions.okx-collector]
+verify_jwt = false
+
+[functions.jin10-poller]
+verify_jwt = false
+
+[functions.okx-news-poller]
+verify_jwt = false
+
+[functions.alert-evaluator]
+verify_jwt = false
+
+[functions.webhook-dispatcher]
+verify_jwt = false
+
+[functions.yahoo-collector]
+verify_jwt = false
+
+[functions.ths-collector]
+verify_jwt = false
+
+[functions.google-finance-collector]
+verify_jwt = false
+
+# Callers send HIVE_ORDER_TOKEN as a bearer token, not a Supabase JWT, so the gateway JWT check must be off.
+[functions.order-submit]
+verify_jwt = false
+
+# position-manager is invoked by pg_cron (EDGE_CRON_SECRET). position-subscriptions is called by Grok with HIVE_ORDER_TOKEN.
+[functions.position-manager]
+verify_jwt = false
+
+[functions.position-subscriptions]
+verify_jwt = false
+
+# push-notify is invoked by pg_cron (EDGE_CRON_SECRET bearer), not by a Supabase JWT.
+[functions.push-notify]
+verify_jwt = false

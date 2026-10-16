@@ -11,6 +11,7 @@
     "build": "pnpm -r --workspace-concurrency=1 build",
     "lint": "eslint .",
     "typecheck": "pnpm -r --workspace-concurrency=1 typecheck",
+    "sync:edge-core": "node scripts/sync-edge-core.mjs",
     "test": "pnpm -r --workspace-concurrency=1 test",
     "db:migrate": "bash scripts/apply-migrations.sh",
     "db:verify": "psql \"$DATABASE_URL\" -X -v ON_ERROR_STOP=1 -f supabase/tests/verify.sql"

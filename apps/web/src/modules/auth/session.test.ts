@@ -3,8 +3,10 @@ import {
   MIN_SECRET_LENGTH,
   SESSION_COOKIE,
   SESSION_TTL_SECONDS,
+  checkApiToken,
   checkDashboardPassword,
   createSessionToken,
+  readCookieValue,
   isGatedPath,
   isUsableSecret,
   safeNextPath,
@@ -146,5 +148,38 @@ describe("sessionCookieAttributes", () => {
       path: "/",
       maxAge: SESSION_TTL_SECONDS,
     });
+  });
+});
+
+describe("checkApiToken", () => {
+  const token = "test-api-token-0123456789abcdef";
+
+  it("accepts only the exact token", async () => {
+    expect(await checkApiToken(token, token)).toBe(true);
+    expect(await checkApiToken("hive-token-0123456789abcdefg", token)).toBe(false);
+    expect(await checkApiToken(token.toUpperCase(), token)).toBe(false);
+  });
+
+  it("fails closed when nothing is configured or presented", async () => {
+    expect(await checkApiToken("anything", undefined)).toBe(false);
+    expect(await checkApiToken("", token)).toBe(false);
+  });
+});
+
+describe("readCookieValue", () => {
+  it("extracts the named cookie from a header with several cookies", () => {
+    expect(readCookieValue("theme=dark; hive_session=v1.123.abc; other=1", "hive_session")).toBe("v1.123.abc");
+    expect(readCookieValue("hive_session=v1.123.abc", "hive_session")).toBe("v1.123.abc");
+  });
+
+  it("returns undefined when the cookie or header is absent", () => {
+    expect(readCookieValue("theme=dark", "hive_session")).toBeUndefined();
+    expect(readCookieValue(null, "hive_session")).toBeUndefined();
+    expect(readCookieValue("", "hive_session")).toBeUndefined();
+  });
+
+  it("does not match look-alike cookie names and decodes escapes", () => {
+    expect(readCookieValue("hive_session_extra=x", "hive_session")).toBeUndefined();
+    expect(readCookieValue("hive_session=a%20b", "hive_session")).toBe("a b");
   });
 });
