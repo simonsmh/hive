@@ -57,12 +57,17 @@ export function ChartPanel({
   const requestRef = useRef(0);
   const barsIntervalRef = useRef<ChartInterval>(initialInterval);
   const barsRef = useRef<readonly CandleBar[]>(initialBars);
+  // Newest live quote seen for this symbol. A reconcile fetch can take
+  // hundreds of milliseconds; quotes arriving in flight must not be lost,
+  // and the snapshot must never be folded back with an older quote than
+  // the data it already carries.
+  const latestQuoteRef = useRef<{ price: number; tsMs: number } | null>(null);
   useEffect(() => {
     barsRef.current = bars;
   }, [bars]);
 
   const loadBars = useCallback(
-    (target: ChartInterval, requestId: number, replay?: { price: number; tsMs: number }) => {
+    (target: ChartInterval, requestId: number) => {
       setLoading(true);
       setError(null);
       setHoverIndex(null);
@@ -81,12 +86,15 @@ export function ChartPanel({
         .then((next) => {
           if (requestRef.current !== requestId) return;
           barsIntervalRef.current = target;
-          // Fold the boundary-crossing quote back in: the server snapshot can
-          // still predate it (the collector persists the ticker before the
-          // candles), and dropping it would leave the chart one interval
-          // behind until the next tick. applyLivePrice is a no-op when the
-          // snapshot already covers the quote.
-          setBars(replay ? applyLivePrice(next, replay.price, replay.tsMs, INTERVAL_MS[target]) : next);
+          // Fold the newest live quote back in: the server snapshot can still
+          // predate it (the collector persists the ticker before the candles),
+          // and dropping it would leave the chart behind until the next tick.
+          // Always use the latest quote seen, never the older boundary quote
+          // that may have triggered a reconcile: replaying a stale quote would
+          // overwrite newer candles already present in the snapshot.
+          // applyLivePrice is a no-op when the snapshot already covers it.
+          const latest = latestQuoteRef.current;
+          setBars(latest ? applyLivePrice(next, latest.price, latest.tsMs, INTERVAL_MS[target]) : next);
           setLoading(false);
         })
         .catch((cause: unknown) => {
@@ -116,12 +124,15 @@ export function ChartPanel({
     if (!quote || quote.price === null || !quote.ts) return;
     const tsMs = Date.parse(quote.ts);
     if (!Number.isFinite(tsMs)) return;
+    latestQuoteRef.current = { price: quote.price!, tsMs };
     const intervalMs = INTERVAL_MS[interval];
     // When the chart stays open across an interval boundary, the tail holds a
     // synthetic bar (sampled high/low, zero volume); reconcile it against the
-    // authoritative series instead of letting the approximation linger.
+    // authoritative series instead of letting the approximation linger. The
+    // newest quote is replayed onto the fetched snapshot via latestQuoteRef,
+    // so quotes arriving while the fetch is in flight are not lost.
     if (!loading && needsCandleReconcile(barsRef.current, tsMs, intervalMs)) {
-      loadBars(interval, ++requestRef.current, { price: quote.price!, tsMs });
+      loadBars(interval, ++requestRef.current);
       return;
     }
     setBars((previous) => applyLivePrice(previous, quote.price!, tsMs, intervalMs));
