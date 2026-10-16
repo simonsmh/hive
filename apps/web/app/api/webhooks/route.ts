@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     return jsonResponse({ subscriptions: await listSubscriptionViews() });
@@ -17,7 +17,7 @@ export async function GET(request: Request): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     const input = parseSubscriptionInput(await readJsonBody(request), { requireAll: true });

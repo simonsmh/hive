@@ -611,7 +611,9 @@ Edge Function 已取代 Worker，**默认不需要部署**。仅在需要回退�
 
 ## 仪表盘与访问密码（apps/web）
 
-`apps/web` 同时提供移动端优先的中文 PWA 仪表盘。根路径 `/` 会跳转到第一个面板。所有页面都需要登录，`/login`、`/offline` 与静态资源除外。
+`apps/web` 同时提供响应式的中文 PWA 仪表盘：手机与平板使用顶部栏加底部 tab 导航，桌面（≥1024px）切换为左侧边栏与宽屏多列布局，并跟随系统提供深色配色。根路径 `/` 会跳转到第一个面板。所有页面都需要登录，`/login`、`/offline` 与静态资源除外。
+
+登录有两种凭据，权限相同：访问密码（`HIVE_DASHBOARD_PASSWORD`），或 API Token（`HIVE_API_TOKEN`）——持有网关 Token 的人无需密码即可使用界面。`/api/*` 接口同样接受两种身份：`Authorization: Bearer <HIVE_API_TOKEN>`，或仪表盘登录后的会话 Cookie（供浏览器界面调用）。
 
 | 路径 | 面板 | 数据来源 |
 | --- | --- | --- |

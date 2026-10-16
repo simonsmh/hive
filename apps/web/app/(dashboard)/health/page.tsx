@@ -59,7 +59,7 @@ function HealthBody({ rows }: { rows: SourceHealthRow[] }) {
           <span>未启用</span>
         </div>
       </div>
-      <ul className="list">
+      <ul className="list list-grid">
         {report.sources.map((source) => (
           <SourceItem key={source.source} source={source} />
         ))}

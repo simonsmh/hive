@@ -13,7 +13,7 @@ interface RouteContext {
 
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     const id = parseUuid((await context.params).id, "id");
@@ -39,7 +39,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
 
 export async function DELETE(request: Request, context: RouteContext): Promise<Response> {
   return handle(async () => {
-    const denied = authorize(request);
+    const denied = await authorize(request);
     if (denied) return denied;
 
     const id = parseUuid((await context.params).id, "id");

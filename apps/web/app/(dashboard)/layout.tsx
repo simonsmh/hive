@@ -14,6 +14,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
     redirect("/login");
   }
 
+  const items = getNavItems();
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -24,8 +25,17 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           </button>
         </form>
       </header>
+      <aside className="sidebar">
+        <span className="brand">Hive</span>
+        <DashboardNav items={items} variant="sidebar" />
+        <form action={logoutAction} className="sidebar-foot">
+          <button type="submit" className="btn-ghost">
+            退出登录
+          </button>
+        </form>
+      </aside>
       <div className="content">{children}</div>
-      <DashboardNav items={getNavItems()} />
+      <DashboardNav items={items} variant="tabbar" />
       <InstallPrompt />
     </div>
   );
