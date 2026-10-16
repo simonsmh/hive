@@ -55,10 +55,17 @@ export function ChartPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef(0);
+  const barsIntervalRef = useRef<ChartInterval>(initialInterval);
 
   useEffect(() => {
-    if (interval === initialInterval) return;
+    // Always bump the request id so a still-in-flight fetch for another interval
+    // can never overwrite the newly selected one; skip the network round trip
+    // only when the displayed bars already belong to this interval.
     const requestId = ++requestRef.current;
+    if (barsIntervalRef.current === interval) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     setHoverIndex(null);
@@ -76,6 +83,7 @@ export function ChartPanel({
       })
       .then((next) => {
         if (requestRef.current !== requestId) return;
+        barsIntervalRef.current = interval;
         setBars(next);
         setLoading(false);
       })

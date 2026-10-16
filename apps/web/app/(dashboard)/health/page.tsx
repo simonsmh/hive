@@ -24,7 +24,7 @@ export default async function HealthPage() {
   return (
     <PanelFrame title={panel.title} subtitle="各数据源最近一次成功采集。已启用且过期的数据源会使 /api/health 返回 503。">
       {health.ok ? (
-        <LiveRefresh topic="health" field="digest" baseline={digestHealth(health.data)} label="" auto />
+        <LiveRefresh topic="health" field="digest" baseline={digestHealth(health.data, Date.now())} label="" auto />
       ) : null}
       {health.ok ? <HealthBody rows={health.data} /> : <ErrorState message={health.message} />}
       {deliveries.ok ? <WebhookDeliverySection summary={deliveries.data} /> : <ErrorState message={deliveries.message} />}

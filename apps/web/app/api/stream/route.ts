@@ -108,7 +108,7 @@ export async function GET(request: Request): Promise<Response> {
           }
           try {
             const rows = await loadSourceHealth();
-            const digest = digestHealth(rows);
+            const digest = digestHealth(rows, Date.now());
             if (digest !== lastHealth) {
               lastHealth = digest;
               send("health", { at: new Date().toISOString(), digest });
