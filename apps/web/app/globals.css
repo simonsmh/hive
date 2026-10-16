@@ -1,4 +1,5 @@
 :root {
+  --banner-bg: #1c1a15;
   --bg: #fafaf7;
   --surface: #ffffff;
   --border: #ebe5d8;
@@ -20,6 +21,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
+    --banner-bg: #24211a;
   :root {
     --bg: #16130d;
     --surface: #211c13;
@@ -454,7 +456,7 @@ p {
   z-index: 30;
   max-width: 560px;
   margin: 0 auto;
-  background: var(--text);
+  background: var(--banner-bg);
   color: #fff;
   border-radius: 14px;
   padding: 12px 14px;

@@ -48,6 +48,38 @@ export function errorResponse(status: number, message: string, extraHeaders: Rec
  * the cookie is HttpOnly and SameSite=Lax, so cross-site requests cannot ride it).
  * The bearer check runs first so API clients never depend on cookie state.
  */
+/**
+ * Whether a browser request genuinely came from the dashboard itself. Cookie auth is
+ * ambient: SameSite=Lax only blocks cross-*site* requests, so an attacker-controlled
+ * sibling origin (same site, e.g. another deployment under the same registrable
+ * domain) could otherwise ride the session cookie with a CORS-safelisted
+ * `text/plain` POST and hit a state-changing route. Bearer tokens are never ambient,
+ * so they are exempt; cookie-authenticated unsafe methods must prove same-origin.
+ */
+export function isSameOriginRequest(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (origin) {
+    try {
+      return new URL(origin).origin === new URL(request.url).origin;
+    } catch {
+      return false;
+    }
+  }
+  // Forbidden headers cannot be spoofed by a hostile page, so Sec-Fetch-Site is a
+  // reliable fallback when the client omits Origin.
+  const site = request.headers.get("sec-fetch-site");
+  if (site) return site === "same-origin";
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === new URL(request.url).origin;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export async function authorize(request: Request): Promise<Response | null> {
   const expected = process.env.HIVE_API_TOKEN;
   if (!expected) {
@@ -55,8 +87,14 @@ export async function authorize(request: Request): Promise<Response | null> {
   }
   if (isAuthorized(request.headers.get("authorization"), expected)) return null;
   const session = readCookieValue(request.headers.get("cookie"), SESSION_COOKIE);
-  if (await verifySessionToken(session, process.env.HIVE_SESSION_SECRET)) return null;
-  return errorResponse(401, "unauthorized", { "www-authenticate": 'Bearer realm="hive"' });
+  if (!(await verifySessionToken(session, process.env.HIVE_SESSION_SECRET))) {
+    return errorResponse(401, "unauthorized", { "www-authenticate": 'Bearer realm="hive"' });
+  }
+  const method = request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && !isSameOriginRequest(request)) {
+    return errorResponse(403, "cross-origin request forbidden");
+  }
+  return null;
 }
 
 /** Wraps a route body so auth/param/config failures map to the right status without leaking internals. */

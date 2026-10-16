@@ -70,6 +70,56 @@ describe("authorize", () => {
     });
     expect((await authorize(request))?.status).toBe(401);
   });
+
+  describe("CSRF protection for cookie-authenticated writes", () => {
+    const cookieRequest = async (session: string, init: RequestInit = {}) =>
+      new Request("http://localhost/api/webhooks", {
+        method: "POST",
+        body: "{}",
+        ...init,
+        headers: { cookie: `${SESSION_COOKIE}=${session}`, ...(init.headers as Record<string, string> | undefined) },
+      });
+
+    it("lets a same-origin cookie POST through", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+      const session = await createSessionToken(SESSION_SECRET);
+      const request = await cookieRequest(session, { headers: { origin: "http://localhost" } });
+      expect(await authorize(request)).toBeNull();
+    });
+
+    it("rejects a cross-origin cookie POST with 403 (sibling-origin CSRF)", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+      const session = await createSessionToken(SESSION_SECRET);
+      // SameSite=Lax is site-scoped: a sibling origin under the same registrable
+      // domain could ride the session cookie with a CORS-safelisted POST.
+      const request = await cookieRequest(session, { headers: { origin: "http://evil.localhost" } });
+      expect((await authorize(request))?.status).toBe(403);
+    });
+
+    it("rejects a cookie POST with no origin proof at all", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+      const session = await createSessionToken(SESSION_SECRET);
+      expect((await authorize(await cookieRequest(session)))?.status).toBe(403);
+    });
+
+    it("still lets bearer-authenticated POSTs through without origin headers", async () => {
+      const request = new Request("http://localhost/api/webhooks", {
+        method: "POST",
+        body: "{}",
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(await authorize(request)).toBeNull();
+    });
+
+    it("still lets cookie-authenticated GETs through without origin headers", async () => {
+      process.env.HIVE_SESSION_SECRET = SESSION_SECRET;
+      const session = await createSessionToken(SESSION_SECRET);
+      const request = new Request("http://localhost/api/webhooks", {
+        headers: { cookie: `${SESSION_COOKIE}=${session}` },
+      });
+      expect(await authorize(request)).toBeNull();
+    });
+  });
 });
 
 describe("handle", () => {
