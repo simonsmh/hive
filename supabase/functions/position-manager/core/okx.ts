@@ -40,6 +40,17 @@ export interface OkxTicker {
   ts: number;
 }
 
+/** One row of the bulk tickers feed, with the 24h volume fields the universe ranking needs. */
+export interface OkxSwapTicker {
+  instId: string;
+  last: number;
+  /** 24h volume in the base currency (for BTC-USDT-SWAP this is BTC, not USDT). */
+  volCcy24h: number;
+  /** 24h change ratio derived from open24h, null when OKX reports no open price. */
+  change24h: number | null;
+  ts: number;
+}
+
 function toFiniteNumber(value: unknown, field: string): number {
   const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
   if (!Number.isFinite(n)) {
@@ -111,6 +122,29 @@ export function parseOkxTicker(data: unknown): OkxTicker {
   };
 }
 
+export function parseOkxSwapTickers(data: unknown): OkxSwapTicker[] {
+  if (!Array.isArray(data)) {
+    throw new OkxParseError("tickers data must be an array");
+  }
+  const tickers: OkxSwapTicker[] = [];
+  for (const raw of data) {
+    const item = raw as Record<string, unknown>;
+    if (typeof item.instId !== "string" || !item.instId.endsWith("-SWAP")) continue;
+    const last = typeof item.last === "string" && item.last.trim() !== "" ? Number(item.last) : NaN;
+    const volCcy24h = typeof item.volCcy24h === "string" && item.volCcy24h.trim() !== "" ? Number(item.volCcy24h) : NaN;
+    if (!Number.isFinite(last) || last <= 0 || !Number.isFinite(volCcy24h) || volCcy24h < 0) continue;
+    const open24h = typeof item.open24h === "string" && item.open24h.trim() !== "" ? Number(item.open24h) : NaN;
+    tickers.push({
+      instId: item.instId,
+      last,
+      volCcy24h,
+      change24h: Number.isFinite(open24h) && open24h > 0 ? last / open24h - 1 : null,
+      ts: typeof item.ts === "string" && item.ts.trim() !== "" ? Number(item.ts) : 0,
+    });
+  }
+  return tickers;
+}
+
 export function parseOkxInstruments(data: unknown): OkxInstrument[] {
   if (!Array.isArray(data)) {
     throw new OkxParseError("instruments data must be an array");
@@ -177,6 +211,11 @@ export class OkxClient {
 
   async getInstruments(instType = "SWAP"): Promise<OkxInstrument[]> {
     return parseOkxInstruments(await this.request("/api/v5/public/instruments", { instType }));
+  }
+
+  /** Every live SWAP ticker in one call; the feed behind the universe ranking. */
+  async getSwapTickers(): Promise<OkxSwapTicker[]> {
+    return parseOkxSwapTickers(await this.request("/api/v5/market/tickers", { instType: "SWAP" }));
   }
 
   async getTicker(instId: string): Promise<OkxTicker> {

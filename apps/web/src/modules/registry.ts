@@ -1,7 +1,7 @@
 // Single source of truth for dashboard panels. The nav, PWA shortcuts and tests read from here.
 // To add a panel: append an entry, then create app/(dashboard)/<id>/page.tsx (see README).
 
-export const PANEL_ICONS = ["pulse", "chart", "news", "bell", "gear"] as const;
+export const PANEL_ICONS = ["pulse", "chart", "news", "bell", "gear", "list"] as const;
 export type PanelIcon = (typeof PANEL_ICONS)[number];
 
 export interface PanelRegistration {
@@ -17,6 +17,7 @@ export const PANELS: readonly PanelRegistration[] = [
   { id: "quotes", title: "行情", icon: "chart", href: "/quotes", order: 20 },
   { id: "news", title: "新闻", icon: "news", href: "/news", order: 30 },
   { id: "alerts", title: "告警", icon: "bell", href: "/alerts", order: 40 },
+  { id: "symbols", title: "标的管理", icon: "list", href: "/symbols", order: 45 },
   { id: "settings", title: "设置", icon: "gear", href: "/settings", order: 50 },
 ];
 

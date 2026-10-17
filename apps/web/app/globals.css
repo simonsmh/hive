@@ -929,3 +929,107 @@ button.chip {
   font-size: 1rem;
   margin: 0 0 0.75rem;
 }
+
+/* Symbol manager (symbols panel) */
+.sym-manager h2 {
+  margin-top: 1.75rem;
+}
+
+.sym-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sym-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sym-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.sym-main .meta {
+  margin: 2px 0 0;
+  word-break: break-all;
+}
+
+.sym-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sym-check input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.sym-rank {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: right;
+}
+
+.sym-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sym-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.sym-toolbar input[type="search"] {
+  flex: 1;
+  min-width: 180px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.sym-danger {
+  color: var(--bad-text);
+  border-color: var(--bad-soft);
+}
+
+.sym-up {
+  color: var(--up);
+}
+
+.sym-down {
+  color: var(--down);
+}
+
+.sym-manual {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.sym-manual input[type="text"] {
+  flex: 1;
+  min-width: 160px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
