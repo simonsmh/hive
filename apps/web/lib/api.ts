@@ -1,4 +1,4 @@
-import { isAuthorized, SubscriptionInputError } from "@hive/core";
+import { isAuthorized, SubscriptionInputError, SymbolInputError } from "@hive/core";
 import { readCookieValue, SESSION_COOKIE, verifySessionToken } from "../src/modules/auth/session";
 
 export class ConfigError extends Error {
@@ -121,6 +121,7 @@ export async function handle(run: () => Promise<Response>): Promise<Response> {
   } catch (error) {
     if (error instanceof ParamError) return errorResponse(400, error.message);
     if (error instanceof SubscriptionInputError) return jsonResponse({ error: "invalid subscription", problems: error.problems }, 400);
+    if (error instanceof SymbolInputError) return jsonResponse({ error: "invalid symbols", problems: error.problems }, 400);
     if (error instanceof NotFoundError) return errorResponse(404, error.message);
     if (error instanceof ConflictError) return errorResponse(409, error.message);
     if (error instanceof ConfigError) {

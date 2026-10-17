@@ -17,7 +17,7 @@ describe("PANELS registry", () => {
   });
 
   it("uses the Chinese panel titles from the spec", () => {
-    expect(PANELS.map((p) => p.title)).toEqual(["数据源健康", "行情", "新闻", "告警", "设置"]);
+    expect(PANELS.map((p) => p.title)).toEqual(["数据源健康", "行情", "新闻", "告警", "标的管理", "设置"]);
   });
 });
 

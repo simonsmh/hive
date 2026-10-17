@@ -7,6 +7,7 @@ import {
   parseOkxCandleRow,
   parseOkxCandles,
   parseOkxInstruments,
+  parseOkxSwapTickers,
   parseOkxTicker,
 } from "./okx.js";
 
@@ -153,5 +154,26 @@ describe("OkxClient", () => {
     expect(url.searchParams.get("instId")).toBe("NVDA-USDT-SWAP");
     expect(url.searchParams.get("bar")).toBe("1m");
     expect(url.searchParams.get("limit")).toBe("2");
+  });
+});
+
+describe("parseOkxSwapTickers", () => {
+  it("keeps swap rows with usable numbers and derives the 24h change", () => {
+    const parsed = parseOkxSwapTickers([
+      { instId: "BTC-USDT-SWAP", last: "110000", open24h: "100000", volCcy24h: "21000.5", ts: "1791900856968" },
+      { instId: "BTC-USDT-SPOT", last: "110000", open24h: "100000", volCcy24h: "10", ts: "1" },
+      { instId: "BAD-USDT-SWAP", last: "", open24h: "1", volCcy24h: "10", ts: "1" },
+      { instId: "ZERO-USDT-SWAP", last: "0", open24h: "1", volCcy24h: "10", ts: "1" },
+    ]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.instId).toBe("BTC-USDT-SWAP");
+    expect(parsed[0]?.last).toBe(110000);
+    expect(parsed[0]?.volCcy24h).toBe(21000.5);
+    expect(parsed[0]?.change24h).toBeCloseTo(0.1);
+    expect(parsed[0]?.ts).toBe(1791900856968);
+  });
+
+  it("rejects a non-array payload", () => {
+    expect(() => parseOkxSwapTickers({ data: [] })).toThrow(/must be an array/);
   });
 });
