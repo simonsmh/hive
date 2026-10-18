@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NewsFormatError, parseJin10FlashList, parseJin10Time, stripMarkup, toIngestRows } from "./news.js";
+import { NewsFormatError, parseBlockBeatsFlashList, parseJin10FlashList, parseJin10Time, stripMarkup, toIngestRows } from "./news.js";
 
 const NOW = Date.parse("2026-10-13T12:00:00.000Z");
 
@@ -131,5 +131,46 @@ describe("toIngestRows", () => {
         score: 1,
       },
     ]);
+  });
+});
+
+describe("parseBlockBeatsFlashList", () => {
+  const payload = {
+    page: 1,
+    limit: 20,
+    list: [
+      { id: 221820, title: "标题 <i>一</i>", content: "<p>正文一</p>", add_time: 1792315945, url: "", is_hot: 1, is_top: 0, lang: "cn" },
+      { id: 221819, title: "", content: "正文二", add_time: 1792314263, url: "https://example.com/a", is_hot: 0, is_top: 1, lang: "cn" },
+      { id: 221818, title: "无正文", content: "  ", add_time: 1792314263, url: "", is_hot: 0, is_top: 0, lang: "cn" },
+    ],
+  };
+
+  it("maps items, strips markup, falls back to the flash URL and scores hot/top items", () => {
+    const items = parseBlockBeatsFlashList(payload, NOW);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toEqual({
+      source: "blockbeats",
+      externalId: "221820",
+      title: "标题 一",
+      body: "正文一",
+      url: "https://www.theblockbeats.info/flash/221820",
+      author: null,
+      publishedAt: new Date(1792315945 * 1000).toISOString(),
+      important: true,
+    });
+    expect(items[1]?.title).toBeNull();
+    expect(items[1]?.url).toBe("https://example.com/a");
+    expect(items[1]?.important).toBe(true);
+  });
+
+  it("accepts a data-wrapped envelope and rejects an unknown one", () => {
+    expect(parseBlockBeatsFlashList({ data: payload }, NOW)).toHaveLength(2);
+    expect(() => parseBlockBeatsFlashList({ nope: true }, NOW)).toThrow(NewsFormatError);
+    expect(() => parseBlockBeatsFlashList({ code: 40101, msg: "Invalid App Key" }, NOW)).toThrow(NewsFormatError);
+  });
+
+  it("falls back to now when add_time is unusable", () => {
+    const items = parseBlockBeatsFlashList({ list: [{ id: 1, content: "正文", add_time: 0 }] }, NOW);
+    expect(items[0]?.publishedAt).toBe(new Date(NOW).toISOString());
   });
 });
