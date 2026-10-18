@@ -47,7 +47,8 @@ export interface ConditionalOrderRow {
   themeStopCapU: number;
   tpPct: number | null;
   params: unknown;
-  status: "armed" | "primed";
+  /** Full lifecycle union: listActiveOrders only returns armed/primed, but getOrder can return any state. */
+  status: "armed" | "primed" | "fired" | "failed" | "expired" | "cancelled";
   setupLow: number | null;
   setupLowTs: number | null;
   drawdownPct: number | null;
@@ -88,6 +89,8 @@ export interface StrategyStore {
   confirmedCandles(symbol: string, interval: "1D" | "15m", limit: number, sinceTs?: number): Promise<Candle[]>;
   recordEval(id: string, patch: OrderPatch): Promise<void>;
   claim(id: string, leaseSeconds: number): Promise<boolean>;
+  /** Fresh read of one order, used to re-verify liveness after the fire claim (cancel race guard). */
+  getOrder(id: string): Promise<ConditionalOrderRow | null>;
   insertAlert(alert: AlertInsert): Promise<void>;
 }
 
@@ -195,6 +198,14 @@ async function fire(
 
   const claimed = await deps.store.claim(order.id, FIRE_LEASE_SEC);
   if (!claimed) return { action: "none", note: "fire_claimed_elsewhere", patch: {} };
+
+  // Cancel-race guard: the claim blocks cancellation only while the lease is fresh. If the lease
+  // lapsed mid-flight (long stall) a cancel could have landed after the claim — re-read and abort
+  // rather than submit an order the user believes is cancelled.
+  const live = await deps.store.getOrder(order.id);
+  if (!live || (live.status !== "armed" && live.status !== "primed")) {
+    return { action: "none", note: "fire_aborted:order_no_longer_live", patch: {} };
+  }
 
   const outcome = await deps.submitter.submit(
     openIntent({

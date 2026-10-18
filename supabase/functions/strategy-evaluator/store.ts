@@ -171,10 +171,18 @@ export function createRestStrategyStore(options: RestStoreOptions): StrategyStor
     },
 
     async recordEval(id: string, patch: OrderPatch): Promise<void> {
-      const query = new URLSearchParams({ id: `eq.${id}` });
+      // Only live rows may be rewritten by an evaluation: a terminal row (fired/failed/expired/
+      // cancelled) must never be resurrected by a stale in-flight evaluation.
+      const query = new URLSearchParams({ id: `eq.${id}`, status: "in.(armed,primed)" });
       await request("PATCH", `/rest/v1/conditional_orders?${query.toString()}`, patchColumns(patch), {
         prefer: "return=minimal",
       });
+    },
+
+    async getOrder(id: string): Promise<ConditionalOrderRow | null> {
+      const query = new URLSearchParams({ select: "*", id: `eq.${id}` });
+      const rows = (await request("GET", `/rest/v1/conditional_orders?${query.toString()}`)) as ConditionalOrderDbRow[];
+      return rows[0] ? toOrder(rows[0]) : null;
     },
 
     async claim(id: string, leaseSeconds: number): Promise<boolean> {
