@@ -91,6 +91,7 @@ Deno.test("recordEval patches only the columns the patch carries", async () => {
     setupLow: null,
   });
   strictEqual(calls[0]!.method, "PATCH");
+  ok(decodeURIComponent(calls[0]!.path).includes("status=in.(armed,primed)"));
   deepStrictEqual(calls[0]!.body, {
     last_eval_at: "2026-10-18T12:00:00.000Z",
     last_note: "fired",
@@ -99,6 +100,39 @@ Deno.test("recordEval patches only the columns the patch carries", async () => {
     ord_id: "ord-okx-1",
     setup_low: null,
   });
+});
+
+Deno.test("getOrder maps the row and returns null when absent", async () => {
+  const row = {
+    id: "ord-1",
+    mode: "live",
+    inst_id: "NVDA-USDT-SWAP",
+    symbol: "NVDA",
+    template: "reversal_long",
+    pos_side: "long",
+    td_mode: "isolated",
+    lever: 3,
+    sz: "0.01",
+    theme: "reversal-oct-nvda",
+    theme_stop_cap_u: 0.1,
+    tp_pct: null,
+    params: {},
+    status: "cancelled",
+    setup_low: null,
+    setup_low_ts: null,
+    drawdown_pct: null,
+    invalidations: 0,
+    expires_at: "2026-11-01T00:00:00.000Z",
+  };
+  const { calls, fetchImpl } = fakeFetch(() => [row]);
+  const store = createRestStrategyStore({ supabaseUrl: BASE, serviceKey: "k", fetchImpl });
+  const order = await store.getOrder("ord-1");
+  strictEqual(order?.status, "cancelled");
+  strictEqual(order?.instId, "NVDA-USDT-SWAP");
+  ok(calls[0]!.path.includes("id=eq.ord-1"));
+
+  const empty = createRestStrategyStore({ supabaseUrl: BASE, serviceKey: "k", fetchImpl: fakeFetch(() => []).fetchImpl });
+  strictEqual(await empty.getOrder("ord-1"), null);
 });
 
 Deno.test("claim goes through the RPC and insertAlert ignores duplicates", async () => {

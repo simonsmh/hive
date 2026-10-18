@@ -47,12 +47,18 @@ export async function createOrder(input: ConditionalOrderInput): Promise<Conditi
 }
 
 /** Cancels an order that has not fired yet. Returns the updated view, or null when it was no longer cancellable. */
+/**
+ * Cancels a live order. Refused while the evaluator holds a fresh fire claim (FIRE_LEASE_SEC = 300s
+ * in strategy-evaluator): a successful cancel must guarantee no submission is in flight.
+ */
 export async function cancelOrder(id: string): Promise<ConditionalOrderView | null> {
+  const claimCutoff = new Date(Date.now() - 300_000).toISOString();
   const { data, error } = await getDb()
     .from("conditional_orders")
     .update({ status: "cancelled", updated_at: new Date().toISOString() })
     .eq("id", id)
     .in("status", ["armed", "primed"])
+    .or(`claimed_at.is.null,claimed_at.lt.${claimCutoff}`)
     .select(ORDER_COLUMNS);
   assertNoError(error);
   const rows = (data ?? []) as ConditionalOrderRow[];

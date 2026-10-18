@@ -70,7 +70,13 @@ interface FakeState {
   intents: Record<string, unknown>[];
 }
 
-function fakeStore(orders: ConditionalOrderRow[], daily: Candle[], state: FakeState, kill = false): StrategyStore {
+function fakeStore(
+  orders: ConditionalOrderRow[],
+  daily: Candle[],
+  state: FakeState,
+  kill = false,
+  getOrderImpl?: (id: string) => ConditionalOrderRow | null,
+): StrategyStore {
   return {
     killSwitchEngaged: () => Promise.resolve(kill),
     listActiveOrders: () => Promise.resolve(orders),
@@ -83,6 +89,7 @@ function fakeStore(orders: ConditionalOrderRow[], daily: Candle[], state: FakeSt
       state.claims.push(id);
       return Promise.resolve(true);
     },
+    getOrder: (id) => Promise.resolve(getOrderImpl ? getOrderImpl(id) : (orders.find((o) => o.id === id) ?? null)),
     insertAlert: (alert) => {
       state.alerts.push(alert);
       return Promise.resolve();
@@ -165,6 +172,27 @@ Deno.test("fires a primed order on the breakout bar and records the fill", async
   strictEqual(state.alerts.length, 1);
   strictEqual(state.alerts[0]!.kind, "conditional_order_fired");
   strictEqual(state.alerts[0]!.severity, "critical");
+});
+
+Deno.test("aborts the fire when the order was cancelled after the claim", async () => {
+  const state: FakeState = { patches: [], alerts: [], claims: [], intents: [] };
+  const primed: ConditionalOrderRow = {
+    ...BASE_ORDER,
+    status: "primed",
+    setupLow: 96,
+    setupLowTs: LOW_TS,
+    drawdownPct: 13.2,
+  };
+  const cancelled: ConditionalOrderRow = { ...primed, status: "cancelled" };
+  const store = fakeStore([primed], series(true), state, false, () => cancelled);
+  const handler = makeHandler(store, state, ACKED);
+  const response = await handler(request());
+  const body = await response.json();
+  strictEqual(body.reports[0].action, "none");
+  ok(body.reports[0].notes.join(" ").includes("fire_aborted"));
+  deepStrictEqual(state.claims, ["ord-1"]);
+  strictEqual(state.intents.length, 0);
+  strictEqual(state.alerts.length, 0);
 });
 
 Deno.test("fails the order when order-submit rejects before placing anything", async () => {
