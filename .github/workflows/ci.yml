@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        function: [okx-collector, jin10-poller, okx-news-poller, webhook-dispatcher, alert-evaluator, yahoo-collector, ths-collector, google-finance-collector, order-submit, position-manager, position-subscriptions, push-notify]
+        function: [okx-collector, jin10-poller, okx-news-poller, webhook-dispatcher, alert-evaluator, yahoo-collector, ths-collector, google-finance-collector, order-submit, position-manager, position-subscriptions, push-notify, strategy-evaluator]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

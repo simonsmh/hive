@@ -1033,3 +1033,74 @@ button.chip {
   color: var(--text);
   font: inherit;
 }
+
+.ord-manager h2 {
+  margin-top: 1.75rem;
+}
+
+.ord-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ord-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.ord-form input,
+.ord-form select {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.ord-form .ord-triggers {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.ord-form .ord-triggers label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.ord-form .ord-triggers input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
+.ord-form .ord-submit {
+  align-self: end;
+}
+
+.ord-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.ord-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ord-main .meta {
+  margin: 2px 0 0;
+  word-break: break-all;
+}

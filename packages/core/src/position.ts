@@ -255,6 +255,59 @@ export function reduceIntent(input: ReduceIntentInput): Record<string, unknown> 
   };
 }
 
+export interface OpenIntentInput {
+  intentId: string;
+  idempotencyKey: string;
+  createdAt: string;
+  source: string;
+  instId: string;
+  direction: Direction;
+  posSide: PosSideName;
+  tdMode: "isolated" | "cross";
+  lever: number;
+  sz: string;
+  slTriggerPx: string;
+  tpTriggerPx: string | null;
+  theme: string;
+  themeStopCapU: number;
+  reason: string;
+  ttlSec: number;
+}
+
+/**
+ * okx.intent.v1 open: market entry with the protective stop (and optional take-profit) attached, so the
+ * position is never unprotected. Used by the strategy evaluator when a conditional order fires.
+ */
+export function openIntent(input: OpenIntentInput): Record<string, unknown> {
+  const intent: Record<string, unknown> = {
+    schema: "okx.intent.v1",
+    intentId: input.intentId,
+    idempotencyKey: input.idempotencyKey,
+    action: "open",
+    instId: input.instId,
+    side: input.direction === "long" ? "buy" : "sell",
+    posSide: input.posSide,
+    tdMode: input.tdMode,
+    lever: input.lever,
+    sz: input.sz,
+    ordType: "market",
+    reduceOnly: false,
+    slTriggerPx: input.slTriggerPx,
+    slOrdPx: "-1",
+    theme: input.theme,
+    themeStopCapU: input.themeStopCapU,
+    reason: input.reason,
+    source: input.source,
+    createdAt: input.createdAt,
+    ttlSec: input.ttlSec,
+  };
+  if (input.tpTriggerPx !== null) {
+    intent.tpTriggerPx = input.tpTriggerPx;
+    intent.tpOrdPx = "-1";
+  }
+  return intent;
+}
+
 export interface SubscriptionInput {
   mode: PositionMode;
   instId: string;

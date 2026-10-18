@@ -11,6 +11,7 @@ import {
   halfWayLevel,
   managementKey,
   matchPosition,
+  openIntent,
   parseSubscriptionUpsert,
   reduceIntent,
   roundToStep,
@@ -220,6 +221,60 @@ describe("intent builders", () => {
       ordType: "market",
     });
     expect(reduceIntent({ ...base, direction: "long", sz: "3" })).toMatchObject({ side: "sell" });
+  });
+
+  it("builds an open intent with the stop attached and an optional TP", () => {
+    const open = openIntent({
+      intentId: "co-1",
+      idempotencyKey: "co-key",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      source: "hive:strategy-evaluator",
+      instId: "NVDA-USDT-SWAP",
+      direction: "long",
+      posSide: "net",
+      tdMode: "isolated",
+      lever: 3,
+      sz: "0.01",
+      slTriggerPx: "206.12",
+      tpTriggerPx: "241.33",
+      theme: "reversal-oct",
+      themeStopCapU: 0.1,
+      reason: "reversal_long fired",
+      ttlSec: 120,
+    });
+    expect(open).toMatchObject({
+      schema: "okx.intent.v1",
+      action: "open",
+      side: "buy",
+      reduceOnly: false,
+      ordType: "market",
+      lever: 3,
+      slTriggerPx: "206.12",
+      slOrdPx: "-1",
+      tpTriggerPx: "241.33",
+      tpOrdPx: "-1",
+      theme: "reversal-oct",
+      themeStopCapU: 0.1,
+    });
+    const noTp = openIntent({
+      intentId: "co-2",
+      idempotencyKey: "co-key-2",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      source: "hive:strategy-evaluator",
+      instId: "NVDA-USDT-SWAP",
+      direction: "long",
+      posSide: "net",
+      tdMode: "isolated",
+      lever: 3,
+      sz: "0.01",
+      slTriggerPx: "206.12",
+      tpTriggerPx: null,
+      theme: "reversal-oct",
+      themeStopCapU: 0.1,
+      reason: "reversal_long fired",
+      ttlSec: 120,
+    });
+    expect(noTp).not.toHaveProperty("tpTriggerPx");
   });
 });
 
