@@ -45,6 +45,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **新闻采集（supabase/functions/jin10-poller）**：pg_cron 每 30 秒调用一次。函数请求 Jin10 快讯接口，经 `hive_news_ingest` 按 `source + external_id` 去重写入 `news_items` 与 `news_events`，并更新 `source_health.jin10`。本轮询若插入了新快讯，`hive_news_ingest` 会在事务提交后通过 pg_net 唤醒一次分发函数（见下文「延迟」）。该接口是非官方接口，格式变化或被拦截时记录错误，数据源会因超过 5 分钟未成功而进入过期告警。
 - **webhook 推送（supabase/functions/webhook-dispatcher）**：`news_items` 与 `alerts` 插入时，触发器按每个订阅的 `filters` 预先过滤，只为命中的订阅写入 `webhook_deliveries`，未命中的订阅不会被唤醒。分发函数由 pg_cron 每 30 秒调用一次作为兜底，并在新快讯入库后被唤醒。每次运行按 `next_attempt_at` 取出到期投递，只要剩余预算足够就持续领取整批，使用 HMAC-SHA256 签名后 POST 给订阅方。失败按 30 秒起的指数退避重试（上限 1 小时），最多 6 次，之后标记为 `dead`。
 - **OKX 快讯（supabase/functions/okx-news-poller）**：pg_cron 每分钟调用一次。函数请求 OKX Orbit 快讯搜索接口 `GET /api/v5/orbit/news-search?importance=high`，需要只读 OKX API Key 签名（见下文「范围说明」），经 `hive_news_ingest` 按 `source + external_id`（`okx-news:<id>`）去重写入 `news_items`，`source` 为 `okx-news`，并更新 `source_health.okx-news`。与 Jin10 相同，本轮询若插入了新快讯，同样会唤醒分发函数（见「延迟」）。查询窗口的起点是已入库的最新 `published_at` 向前回溯 10 分钟，窗口最早不早于 2 小时前；每页 50 条，最多 10 页，按 `end = 最早 cTime - 1` 向前翻页。任一页失败时本轮整体不写入，下一轮从同一位置重试。数据源超过 5 分钟未成功即产生 `source_stale` 告警。
+- **BlockBeats 快讯（supabase/functions/blockbeats-poller）**：pg_cron 每 5 分钟调用一次（`hive-blockbeats-poller`，每天 288 次）。函数请求 BlockBeats 网站内非官方接口 `api.blockbeats.cn/v2/newsflash/list`，请求需 HMAC-SHA256 签名、响应为 AES-128-CBC 加密（密钥材料由 MD5 派生，函数内解密），经 `hive_news_ingest` 按 `source + external_id`（`blockbeats:<id>`）去重写入 `news_items`，`source` 为 `blockbeats`，并更新 `source_health.blockbeats`。该源每小时仅数条，故轮询间隔与过期阈值都放宽：超过 120 分钟未成功才产生 `source_stale` 告警。插入新快讯时同样唤醒分发函数。demo 应用凭据来自其公开前端，写在代码默认值中，可用 Edge secret `BLOCKBEATS_APP_KEY`、`BLOCKBEATS_APP_SECRET` 覆盖。
 - **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
 - **Yahoo 行情（supabase/functions/yahoo-collector）**：pg_cron 每 2 分钟调用一次（`hive-yahoo-collector`，每天 720 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `yahoo_symbol` 非空的符号，请求 Yahoo 公开图表接口 `/v8/finance/chart/{yahoo_symbol}`，无需密钥。每个符号每次运行发起一次 `interval=1m&range=1d&includePrePost=true` 请求，同时得到最新报价（最新 1m 收盘价）与最近 60 根 1m K 线；日线（`interval=1d&range=3mo`）每个符号每小时至多请求一次。数据经 `hive_collector_*` 写入，`source = 'yahoo'`。租约使用 `collector_state` 中的 `yahoo` 行，与 OKX 互不影响。遇到 429 或 403 时本次运行不再发起新请求，并退避 10 分钟。`source_health.yahoo` 默认禁用，见「部署 > Yahoo 行情」。
 - **同花顺行情（supabase/functions/ths-collector，可选）**：pg_cron 每 2 分钟调用一次，只在北京时间工作日 09:15–15:15 请求上游。指数与个股报价写入 `quotes_latest`（`source = 'ths'`），涨跌停池、热门股、龙虎榜、竞价、涨跌家数等写入 `daily_snapshot`。默认关闭，部署步骤与调用预算见下文「部署 > ths 行情」。
@@ -69,7 +70,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **积压**：每次运行循环领取整批（每批 20 条，4 并发）。只有剩余预算（90 秒）能覆盖最坏一批（约 40 秒）时才继续领取，因此不会留下未处理且被租约锁住的投递。
 - **重试**：失败后按 30 秒起的指数退避，兜底 cron 的 30 秒粒度不会额外拉长重试。
 - **不调整的部分**：轮询仍为 30 秒，避免把非官方 Jin10 接口的请求频率翻倍。
-- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天 12,240 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、Yahoo 行情 720），约 36.7 万次/月。分发唤醒最多每天再加 2,880 次（约 8.6 万次/月），上限约 45.4 万次/月，仍低于 50 万次。新增 Edge Function 或提高调度频率前请重新计算。
+- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天约 15,060 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、推送通知 1,440、Yahoo 行情 720、持仓管理 480、策略评估 480、BlockBeats 轮询 288、同花顺约 130），约 45.2 万次/月。分发唤醒只在有新快讯入库的轮询后发生（三个新闻源合计），按快讯实际频率估算远低于「每次轮询都唤醒」的理论上限，合计仍在 50 万次内，但余量已薄：BlockBeats 因此只每 5 分钟轮询（每分钟将再加约 3.5 万次/月）。新增 Edge Function、新增调度或提高调度频率前请重新计算，并以实际用量为准。
 
 生产环境观测最近一天的快讯送达延迟（`published_at` 为 Jin10 快讯时间，`delivered_at` 为首次成功投递时间）：
 
@@ -116,6 +117,7 @@ supabase/
   functions/okx-collector/     Edge Function（Deno）：OKX 行情采集
   functions/jin10-poller/      Edge Function（Deno）：Jin10 快讯轮询与入库
   functions/okx-news-poller/   Edge Function（Deno）：OKX Orbit 重要快讯轮询与入库
+  functions/blockbeats-poller/ Edge Function（Deno）：BlockBeats 快讯轮询与入库（签名 + 加密响应）
   functions/webhook-dispatcher/ Edge Function（Deno）：webhook 签名、投递与退避
   functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
@@ -146,7 +148,7 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
@@ -265,7 +267,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector; do
+for f in okx-collector jin10-poller okx-news-poller blockbeats-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector order-submit position-manager position-subscriptions push-notify strategy-evaluator; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -292,6 +294,9 @@ done
    - `…000023_ths_collector.sql`：`symbol_map` 增加 `ths_code`、`ths_kind`、`ths_auction`（默认关闭）；`source_health.session_only`（ths 的过期告警只在交易时段判断）；`hive_run_health_check` 按该标记跳过窗口外的检查；`hive_collector_upsert_daily_snapshot` 与 `hive_prune_ths_snapshots`；`hive-ths-collector`（每 2 分钟）与 `hive-ths-prune`。全部幂等，`ths` 数据源保持关闭，直到按下文「ths 行情」启用。若 Yahoo 的 `…000022_yahoo_collector.sql` 尚未应用，先按顺序执行它。
    - `…000026_google_finance_source_enum.sql`：为 `market_source` 增加 `google-finance-earnings`（须单独迁移）
    - `…000027_google_finance_earnings.sql`：`earnings_watch`（TSM:NYSE 为主行，2330:TPE 为别名，均默认关闭）、`earnings_guidance_snapshots`、`earnings_transcript_segments`；`hive_earnings_record` 写入函数；`hive_google_finance_earnings_tick()`（不调度）；`hive_prune_earnings`（每天 03:43 UTC，保留 90 天）；`earnings_guidance` 告警为 `critical`。全部幂等。
+   - `…000032_blockbeats_source_enum.sql`：为 `market_source` 增加 `blockbeats`（须单独迁移）
+   - `…000033_blockbeats_news.sql`：`source_health.blockbeats` 种子（120 分钟过期）、允许 `blockbeats` 的 `hive_news_ingest`，以及 `hive-blockbeats-poller`（初始每分钟）
+   - `…000034_blockbeats_five_minute_poll.sql`：`hive-blockbeats-poller` 改为每 5 分钟（额度，理由见下文「免费额度」）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -299,11 +304,17 @@ done
    supabase functions deploy okx-collector --no-verify-jwt
    supabase functions deploy jin10-poller --no-verify-jwt
    supabase functions deploy okx-news-poller --no-verify-jwt
+   supabase functions deploy blockbeats-poller --no-verify-jwt
    supabase functions deploy webhook-dispatcher --no-verify-jwt
    supabase functions deploy alert-evaluator --no-verify-jwt
    supabase functions deploy yahoo-collector --no-verify-jwt
    supabase functions deploy ths-collector --no-verify-jwt
    supabase functions deploy google-finance-collector --no-verify-jwt
+   supabase functions deploy order-submit --no-verify-jwt
+   supabase functions deploy position-manager --no-verify-jwt
+   supabase functions deploy position-subscriptions --no-verify-jwt
+   supabase functions deploy push-notify --no-verify-jwt
+   supabase functions deploy strategy-evaluator --no-verify-jwt
 
    ```
 
@@ -317,7 +328,7 @@ done
    supabase secrets set COLLECTOR_SECRET="$COLLECTOR_SECRET" EDGE_CRON_SECRET="$EDGE_CRON_SECRET"
    ```
 
-   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller、webhook-dispatcher、alert-evaluator 与 yahoo-collector 使用。可以设为相同值，但建议分开。okx-news-poller 还需要只读 OKX Key：`supabase secrets set OKX_API_KEY=… OKX_API_SECRET=… OKX_API_PASSPHRASE=…`（三者需同时设置）。
+   `COLLECTOR_SECRET` 供 okx-collector 使用，`EDGE_CRON_SECRET` 供 jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator 与 yahoo-collector 使用。可以设为相同值，但建议分开。okx-news-poller 还需要只读 OKX Key：`supabase secrets set OKX_API_KEY=… OKX_API_SECRET=… OKX_API_PASSPHRASE=…`（三者需同时设置）。
 
 5. 写入 Vault（只需执行一次，SQL Editor 或 `psql`）。阶段 1 的两个密钥照旧；阶段 2 新增两个：
 
@@ -340,7 +351,7 @@ done
    select status_code, error_msg, created from net._http_response order by id desc limit 5;
    ```
 
-   `source_health` 中 `okx`、`jin10` 与 `okx-news` 的 `last_success_at` 应持续更新。`last_outcome` 为 `ok` 表示正常；`degraded` 表示部分请求或写入失败；`rate_limited` 表示 OKX 限流中。若未配置 Vault，`jin10` 与 `okx-news` 会在 5 分钟后各产生一条 `source_stale` 告警，这是预期行为。
+   `source_health` 中 `okx`、`jin10`、`okx-news` 与 `blockbeats` 的 `last_success_at` 应持续更新（blockbeats 每 5 分钟轮询、120 分钟未成功才告警）。`last_outcome` 为 `ok` 表示正常；`degraded` 表示部分请求或写入失败；`rate_limited` 表示 OKX 限流中。若未配置 Vault，`jin10` 与 `okx-news` 会在 5 分钟后各产生一条 `source_stale` 告警，这是预期行为。
 
 7. webhook 订阅通过管理 API 创建（见下文「Webhook 管理 API」），不要直接写表。
 
@@ -708,7 +719,7 @@ values ('BZ 10m move >=1%', 'BZ', 'pct_move', '{"interval":"1m","lookback":10,"m
 | `GET /api/atr` | `symbol`（必填）、`source`（默认 `okx`）、`period`（默认 14，1–100） | 基于已确认日线的 Wilder ATR。XAU 只使用工作日。数据不足返回 `422` |
 | `GET /api/health` | 无 | 各数据源状态。存在已启用且过期的数据源时返回 `503`，`status` 为 `degraded` |
 | `GET /api/alerts` | `kind`（`[a-z_]{1,64}`，如 `pct_move`、`source_stale`）、`symbol`、`severity`（`info`/`warning`/`critical`）、`unresolved`（`true` 仅未恢复，`false` 仅已恢复，省略则都返回）、`limit`（默认 50，1–200） | 告警列表，按触发时间倒序，返回 `{ alerts }`。每条含 `kind`、`symbol`、`severity`、`triggeredAt`、`resolved`、`resolvedAt`、`summary` 与 `details`（payload 的可读摘要，单值最长 120 字符） |
-| `GET /api/news` | `source`（`jin10`/`okx-news`）、`q`（标题或正文子串，大小写不敏感，最长 100 字符，不能含 `, ( ) " \ *`）、`since`（毫秒或 ISO-8601）、`limit`（默认 50，1–200） | 新闻条目，按发布时间倒序，返回 `{ items }`。每条含 `eventId`（同一事件的条目共享）、`source`、`title`、`url`、`publishedAt`、`credibility` 与 `body`（最长 1000 字符）。`q` 无索引，大范围搜索请配合 `since` |
+| `GET /api/news` | `source`（`jin10`/`okx-news`/`blockbeats`）、`q`（标题或正文子串，大小写不敏感，最长 100 字符，不能含 `, ( ) " \ *`）、`since`（毫秒或 ISO-8601）、`limit`（默认 50，1–200） | 新闻条目，按发布时间倒序，返回 `{ items }`。每条含 `eventId`（同一事件的条目共享）、`source`、`title`、`url`、`publishedAt`、`credibility` 与 `body`（最长 1000 字符）。`q` 无索引，大范围搜索请配合 `since` |
 | `GET /api/webhooks` | 无 | 列出 webhook 订阅。不返回密钥，只返回 `secret_configured` |
 | `POST /api/webhooks` | JSON，见下文 | 创建订阅，返回 `201`。未提供 `secret` 时自动生成 `signing_secret`，**只返回这一次** |
 | `PATCH /api/webhooks/{id}` | JSON，部分更新；`rotate_secret: true` 轮换密钥 | 返回 `200`。轮换时返回新的 `signing_secret`，旧密钥立即失效 |
