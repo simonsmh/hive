@@ -71,16 +71,16 @@ begin
   select decrypted_secret into v_secret from vault.decrypted_secrets where id = v_secret_id;
   if v_secret <> 'hunter2-test-secret' then raise exception 'vault round-trip failed'; end if;
 
-  -- Health check: okx, jin10 and okx-news have never succeeded, so each gets one open stale alert.
+  -- Health check: okx, jin10, okx-news and blockbeats have never succeeded, so each gets one open stale alert.
   v_first := public.hive_run_health_check();
-  if v_first <> 3 then raise exception 'expected 3 stale-source alerts (okx, jin10, okx-news), got %', v_first; end if;
+  if v_first <> 4 then raise exception 'expected 4 stale-source alerts (okx, jin10, okx-news, blockbeats), got %', v_first; end if;
 
   -- An open alert is not duplicated while the source stays stale.
   v_second := public.hive_run_health_check();
   if v_second <> 0 then raise exception 'health check duplicated an open alert (% new alerts)', v_second; end if;
   select count(*) into v_queued from public.alerts
-   where kind = 'source_stale' and resolved_at is null and payload->>'source' in ('okx', 'jin10', 'okx-news');
-  if v_queued <> 3 then raise exception 'expected 3 open stale alerts, got %', v_queued; end if;
+   where kind = 'source_stale' and resolved_at is null and payload->>'source' in ('okx', 'jin10', 'okx-news', 'blockbeats');
+  if v_queued <> 4 then raise exception 'expected 4 open stale alerts, got %', v_queued; end if;
 
   -- Worker health writes (same statements as recordSourceSuccess / recordSourceFailure in apps/worker/src/store.ts).
   insert into public.source_health (source, last_success_at, consecutive_failures, last_error, updated_at)

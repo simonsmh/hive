@@ -10,6 +10,9 @@ verify_jwt = false
 [functions.jin10-poller]
 verify_jwt = false
 
+[functions.blockbeats-poller]
+verify_jwt = false
+
 [functions.okx-news-poller]
 verify_jwt = false
 

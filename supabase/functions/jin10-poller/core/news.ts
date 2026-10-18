@@ -1,7 +1,7 @@
 // Generated from packages/core/src by scripts/sync-edge-core.mjs. Do not edit by hand.
 /** Jin10 flash newsfeed, normalised into rows for the hive_news_ingest RPC. Pure: no I/O. */
 
-export const NEWS_SOURCES = ["jin10", "okx-news"] as const;
+export const NEWS_SOURCES = ["jin10", "okx-news", "blockbeats"] as const;
 export type NewsSource = (typeof NEWS_SOURCES)[number];
 
 /** Jin10 publishes flash timestamps in Beijing time (UTC+8) without a zone designator. */
@@ -128,6 +128,67 @@ export function parseJin10FlashList(payload: unknown, nowMs: number = Date.now()
 
   if (list.length > 0 && items.length === 0) {
     throw new NewsFormatError("jin10 response contained no usable flash items");
+  }
+  return items;
+}
+
+const BLOCKBEATS_FLASH_BASE = "https://www.theblockbeats.info/flash/";
+
+/**
+ * Parses a decrypted BlockBeats `/v2/newsflash/list` payload ({ page, limit, list }). The transport is
+ * unofficial, so every field is treated as optional except the item id and the content. Items without
+ * content are skipped. If the envelope is not recognised or every item is unusable, this throws
+ * NewsFormatError so the caller can mark the source degraded.
+ */
+export function parseBlockBeatsFlashList(payload: unknown, nowMs: number = Date.now()): NewsItemInput[] {
+  const root = asRecord(payload);
+  const envelopeCode = root?.code;
+  if (typeof envelopeCode === "number" && envelopeCode !== 0) {
+    throw new NewsFormatError(`blockbeats returned code ${envelopeCode}`);
+  }
+
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(root?.list)
+      ? (root.list as unknown[])
+      : Array.isArray(root?.data)
+        ? (root.data as unknown[])
+        : Array.isArray(asRecord(root?.data)?.list)
+          ? (asRecord(root?.data)!.list as unknown[])
+          : null;
+  if (list === null) throw new NewsFormatError("blockbeats response has no list array");
+
+  const items: NewsItemInput[] = [];
+  for (const raw of list) {
+    const item = asRecord(raw);
+    if (!item) continue;
+    const id = typeof item.id === "string" || typeof item.id === "number" ? String(item.id).trim() : "";
+    const contentRaw = asText(item.content);
+    const content = contentRaw === null ? "" : stripMarkup(contentRaw);
+    if (id === "" || id.length > MAX_EXTERNAL_ID_LENGTH || content === "") continue;
+
+    const titleRaw = asText(item.title);
+    const title = titleRaw === null ? "" : stripMarkup(titleRaw);
+    const linkRaw = asText(item.url) ?? "";
+    const url = isHttpUrl(linkRaw) ? linkRaw : `${BLOCKBEATS_FLASH_BASE}${encodeURIComponent(id)}`;
+    const addTimeSec = typeof item.add_time === "number" ? item.add_time : Number(item.add_time);
+    const publishedAt =
+      Number.isFinite(addTimeSec) && addTimeSec > 0 ? new Date(addTimeSec * 1000).toISOString() : new Date(nowMs).toISOString();
+
+    items.push({
+      source: "blockbeats",
+      externalId: id,
+      title: title === "" ? null : title.slice(0, MAX_TITLE_LENGTH),
+      body: content.slice(0, MAX_BODY_LENGTH),
+      url,
+      author: null,
+      publishedAt,
+      important: item.is_hot === 1 || item.is_hot === true || item.is_top === 1 || item.is_top === true,
+    });
+  }
+
+  if (list.length > 0 && items.length === 0) {
+    throw new NewsFormatError("blockbeats response contained no usable flash items");
   }
   return items;
 }
