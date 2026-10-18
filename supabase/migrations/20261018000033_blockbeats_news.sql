@@ -80,14 +80,6 @@ grant execute on function public.hive_news_ingest(text, jsonb) to service_role;
 
 do $$
 begin
-  if exists (select 1 from cron.job where jobname = 'hive-okx-news-poller') then
-    perform cron.unschedule('hive-okx-news-poller');
-  end if;
-end
-$$;
-
-do $$
-begin
   if exists (select 1 from cron.job where jobname = 'hive-blockbeats-poller') then
     perform cron.unschedule('hive-blockbeats-poller');
   end if;
