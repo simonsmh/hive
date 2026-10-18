@@ -47,7 +47,8 @@ export interface ConditionalOrderRow {
   themeStopCapU: number;
   tpPct: number | null;
   params: unknown;
-  status: "armed" | "primed";
+  /** Full lifecycle union: listActiveOrders only returns armed/primed, but getOrder can return any state. */
+  status: "armed" | "primed" | "fired" | "failed" | "expired" | "cancelled";
   setupLow: number | null;
   setupLowTs: number | null;
   drawdownPct: number | null;
