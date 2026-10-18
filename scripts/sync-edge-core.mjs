@@ -26,6 +26,7 @@ const FUNCTIONS = {
   "position-manager": ["types", "okx", "auth", "okx-signing", "okx-trade", "order-intent", "atr", "position"],
   "position-subscriptions": ["auth", "position"],
   "push-notify": ["auth", "webpush"],
+  "strategy-evaluator": ["types", "auth", "okx-signing", "okx-trade", "order-intent", "position", "strategy"],
 };
 
 function rewrite(name, source, allowedLocal) {
