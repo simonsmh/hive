@@ -1,11 +1,9 @@
--- BlockBeats flash news. The blockbeats-poller Edge Function reads the (unofficial) web-client API at
--- api.blockbeats.cn/v2/newsflash/list and writes through hive_news_ingest, the same dedup and heartbeat
--- path as jin10 and okx-news. The source string is 'blockbeats'; webhook subscriptions filter on it in
--- `sources`. Staleness is 120 minutes: the feed posts only a few items per hour, so the 5-minute jin10
--- threshold would flap. The ingest function below is migration 20261013000020's definition with only
--- the source allowlist extended.
-
-alter type public.market_source add value if not exists 'blockbeats';
+-- BlockBeats flash news (2 of 2). The blockbeats-poller Edge Function reads the (unofficial)
+-- web-client API at api.blockbeats.cn/v2/newsflash/list and writes through hive_news_ingest, the
+-- same dedup and heartbeat path as jin10 and okx-news. The source string is 'blockbeats'; webhook
+-- subscriptions filter on it in `sources`. Staleness is 120 minutes: the feed posts only a few items
+-- per hour, so the 5-minute jin10 threshold would flap. The ingest function below is migration
+-- 20261013000020's definition with only the source allowlist extended.
 
 insert into public.source_health (source, enabled, max_staleness_minutes) values
   ('blockbeats', true, 120)
