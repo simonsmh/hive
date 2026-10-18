@@ -553,6 +553,8 @@ begin
   if not found then raise exception 'pg_cron job hive-webhook-dispatch (30 seconds) missing'; end if;
   perform 1 from cron.job where jobname = 'hive-okx-news-poller' and schedule = '* * * * *';
   if not found then raise exception 'pg_cron job hive-okx-news-poller (every minute) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-blockbeats-poller' and schedule = '*/5 * * * *';
+  if not found then raise exception 'pg_cron job hive-blockbeats-poller (every 5 minutes) missing'; end if;
 
   v_result := public.hive_prune_news_and_webhooks();
   if not (v_result ? 'webhook_deliveries' and v_result ? 'news_items') then
