@@ -266,6 +266,22 @@ describe("OkxTradeClient reads", () => {
     expect(await client(open.fetchImpl).position("XAU-USDT-SWAP")).toEqual({ avgPx: 4100.5 });
   });
 
+  it("maps margin mode and leverage on open positions and drops flat rows", async () => {
+    const { fetchImpl } = fakeFetch(() =>
+      json({
+        code: "0",
+        msg: "",
+        data: [
+          { posSide: "net", pos: "0.031", avgPx: "1400.1", markPx: "1403.1", mgnMode: "isolated", lever: "10" },
+          { posSide: "net", pos: "0", avgPx: "", markPx: "1403.1", mgnMode: "isolated", lever: "10" },
+        ],
+      }),
+    );
+    expect(await client(fetchImpl).positions("SNDK-USDT-SWAP")).toEqual([
+      { posSide: "net", pos: 0.031, avgPx: 1400.1, markPx: 1403.1, mgnMode: "isolated", lever: 10 },
+    ]);
+  });
+
   it("reads the last price from the public ticker without credentials", async () => {
     const { calls, fetchImpl } = fakeFetch(() => json({ code: "0", msg: "", data: [{ last: "4107" }] }));
     expect(await client(fetchImpl).lastPrice("XAU-USDT-SWAP")).toBe(4107);

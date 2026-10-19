@@ -183,11 +183,15 @@ export class OkxTradeClient implements OrderTrade {
     return rows
       .map((raw) => {
         const row = asRecord(raw);
+        const mgnMode = text(row, "mgnMode");
+        const lever = text(row, "lever");
         return {
           posSide: text(row, "posSide"),
           pos: text(row, "pos") === "" ? 0 : Number(text(row, "pos")),
           avgPx: Number(text(row, "avgPx")),
           markPx: Number(text(row, "markPx")),
+          mgnMode: mgnMode === "" ? undefined : mgnMode,
+          lever: lever === "" ? undefined : Number(lever),
         };
       })
       .filter((row) => row.pos !== 0);
