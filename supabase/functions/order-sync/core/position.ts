@@ -55,6 +55,10 @@ export interface PositionRow {
   pos: number;
   avgPx: number;
   markPx: number;
+  /** Margin mode reported by OKX ("isolated" | "cross"); absent on hand-built rows. */
+  mgnMode?: string;
+  /** Leverage reported by OKX for the position; absent on hand-built rows. */
+  lever?: number;
 }
 
 export interface InstrumentSpec {
