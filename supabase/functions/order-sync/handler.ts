@@ -28,10 +28,13 @@ export interface OrderSyncStore {
 
 export interface OrderSyncExchange {
   orderDetail(instId: string, ordId: string): Promise<OrderDetail | null>;
-  algoDetail(algoId: string): Promise<AlgoDetail | null>;
+  algoDetail(instId: string, algoId: string): Promise<AlgoDetail | null>;
   positions(instId: string): Promise<PositionRow[]>;
   pendingAlgos(instId: string): Promise<PendingAlgo[]>;
 }
+
+/** Regular-order states after which the order never changes again. */
+const FINAL_ORDER_STATES = new Set(["filled", "canceled", "mmp_canceled"]);
 
 export interface OrderSyncDeps {
   /** EDGE_CRON_SECRET. Guards both the cron sweep (POST) and the read endpoint (GET). */
@@ -118,20 +121,28 @@ export function createOrderSyncHandler(deps: OrderSyncDeps): (request: Request) 
           updated += 1;
         } else {
           if (!row.algoId) throw new Error(`orders row ${row.id} has no algo_id`);
-          const detail = await deps.exchange.algoDetail(row.algoId);
+          const detail = await deps.exchange.algoDetail(row.instId, row.algoId);
           if (detail === null) {
             missing += 1;
             await deps.store.applySync(row.id, { lastSyncAt });
             continue;
           }
           const patch: OrderSyncPatch = { lastSyncAt };
-          if (detail.state !== "" && detail.state !== row.state) patch.state = detail.state;
-          // A triggered algo's execution is only visible on the algo itself (actualPx/actualSz);
-          // without this the row would reach its final state with fill columns null forever.
-          if (detail.actualSz > 0) {
-            patch.fillSz = detail.actualSz;
-            if (detail.actualPx !== null) patch.fillPx = detail.actualPx;
+          // A triggered algo spawns a regular order; the algo's actualPx/actualSz are that order's
+          // price and quantity, not its fills. Follow the child order, and only advance the algo
+          // row to its final state once the child is final too — otherwise a still-working limit
+          // child would freeze a partial (or empty) fill into a row the sweep stops visiting.
+          let advanceState = true;
+          if (detail.ordId !== null) {
+            const child = await deps.exchange.orderDetail(row.instId, detail.ordId);
+            if (child === null || !FINAL_ORDER_STATES.has(child.state)) {
+              advanceState = false;
+            } else if (child.accFillSz > 0) {
+              patch.fillSz = child.accFillSz;
+              if (child.avgPx !== null) patch.fillPx = child.avgPx;
+            }
           }
+          if (advanceState && detail.state !== "" && detail.state !== row.state) patch.state = detail.state;
           await deps.store.applySync(row.id, patch);
           updated += 1;
         }

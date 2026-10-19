@@ -58,10 +58,12 @@ export interface OrderDetail {
 export interface AlgoDetail {
   algoId: string;
   state: string;
-  /** Price the triggered order actually executed at; null until the algo triggers. */
-  actualPx: number | null;
-  /** Size the triggered order actually executed; 0 until the algo triggers. */
-  actualSz: number;
+  /**
+   * The regular order the algo spawned when it triggered; null until then. The algo's own
+   * actualPx/actualSz describe that order's price and quantity, not its fills, so fill
+   * reconciliation must follow this id through orderDetail instead.
+   */
+  ordId: string | null;
 }
 
 export interface OrderTrade {
@@ -252,9 +254,15 @@ export class OkxTradeClient implements OrderTrade {
 
   /** Full state of one regular order by exchange id; null when OKX has no such order. */
   async orderDetail(instId: string, ordId: string): Promise<OrderDetail | null> {
-    const payload = await this.call("GET", "/api/v5/trade/order", { query: { instId, ordId }, signed: true });
-    if (payload.code === NOT_FOUND_CODE) return null;
-    this.assertEnvelope(payload, "/api/v5/trade/order");
+    let path = "/api/v5/trade/order";
+    let payload = await this.call("GET", path, { query: { instId, ordId }, signed: true });
+    if (payload.code === NOT_FOUND_CODE) {
+      // An order canceled before any fill disappears from the live endpoint; history keeps it.
+      path = "/api/v5/trade/orders-history";
+      payload = await this.call("GET", path, { query: { instType: "SWAP", instId, ordId }, signed: true });
+      if (payload.code === NOT_FOUND_CODE) return null;
+    }
+    this.assertEnvelope(payload, path);
     const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
     const id = text(row, "ordId");
     if (id === "") return null;
@@ -269,21 +277,24 @@ export class OkxTradeClient implements OrderTrade {
   }
 
   /** State of one algo order by exchange id; null when OKX has no such algo order. */
-  async algoDetail(algoId: string): Promise<AlgoDetail | null> {
-    const payload = await this.call("GET", "/api/v5/trade/order-algo", { query: { algoId }, signed: true });
-    if (payload.code === NOT_FOUND_CODE) return null;
-    this.assertEnvelope(payload, "/api/v5/trade/order-algo");
+  async algoDetail(instId: string, algoId: string): Promise<AlgoDetail | null> {
+    let path = "/api/v5/trade/order-algo";
+    let payload = await this.call("GET", path, { query: { algoId }, signed: true });
+    if (payload.code === NOT_FOUND_CODE) {
+      // Same live/history split as regular orders: a canceled algo only survives in history.
+      path = "/api/v5/trade/orders-algo-history";
+      payload = await this.call("GET", path, {
+        query: { ordType: "conditional,oco", instType: "SWAP", instId, algoId },
+        signed: true,
+      });
+      if (payload.code === NOT_FOUND_CODE) return null;
+    }
+    this.assertEnvelope(payload, path);
     const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
     const id = text(row, "algoId");
     if (id === "") return null;
-    const actualSz = Number(text(row, "actualSz"));
-    const actualPx = Number(text(row, "actualPx"));
-    return {
-      algoId: id,
-      state: text(row, "state"),
-      actualPx: Number.isFinite(actualSz) && actualSz > 0 && Number.isFinite(actualPx) && actualPx > 0 ? actualPx : null,
-      actualSz: Number.isFinite(actualSz) && actualSz > 0 ? actualSz : 0,
-    };
+    const ordId = text(row, "ordId");
+    return { algoId: id, state: text(row, "state"), ordId: ordId === "" ? null : ordId };
   }
 
   private assertRowAccepted(row: Record<string, unknown>, what: string): void {
