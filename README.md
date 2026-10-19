@@ -300,6 +300,7 @@ done
    - `…000034_blockbeats_five_minute_poll.sql`：`hive-blockbeats-poller` 改为每 5 分钟（额度，理由见下文「免费额度」）
    - `…000035_set_leverage_action.sql`：`order_intents.action` 的 CHECK 增加 `set_leverage`（order-submit 调杠杆动作）
    - `…000036_order_sync_cron.sql`：`hive-order-sync`（每分钟）调度 order-sync 对账
+   - `…000037_orders_state_okx_values.sql`：`orders.state` 的 CHECK 扩至 OKX 全部状态值（algo 的 effective/partially_effective/order_failed 与 mmp_canceled）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
