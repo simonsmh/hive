@@ -261,6 +261,33 @@ async function entryContext(
   return { entryPx: position.avgPx, ctVal: await trade.contractValue(intent.instId) };
 }
 
+/**
+ * Leverage change on an existing position. No order is placed and nothing is written to the orders
+ * table: the intent row and its stored outcome are the audit trail. OKX applies the new leverage to
+ * the position in the intent's tdMode; attached algo orders are unaffected.
+ */
+async function placeSetLeverage(
+  intent: OkxIntent,
+  ids: ClientOrderIds,
+  deps: OrderSubmitDeps,
+): Promise<IntentOutcome> {
+  if (intent.lever === null) throw new Error("set_leverage reached placement without a lever");
+  try {
+    await deps.trade.setLeverage(intent.instId, intent.lever, intent.tdMode);
+  } catch (error) {
+    return failedPlacement(error, ids.clOrdId);
+  }
+  return {
+    status: "acked",
+    reason: null,
+    ordId: null,
+    algoId: null,
+    clOrdId: ids.clOrdId,
+    state: "accepted",
+    detail: `lever_set=${intent.lever}`,
+  };
+}
+
 async function placeOpenOrClose(
   intent: OkxIntent,
   ids: ClientOrderIds,
@@ -436,7 +463,9 @@ async function execute(intent: OkxIntent, ids: ClientOrderIds, deps: OrderSubmit
     if (priceReject !== null) return terminal("rejected_risk", priceReject, ids.clOrdId);
   }
 
-  return intent.action === "amend_tpsl" ? placeAmend(intent, ids, deps) : placeOpenOrClose(intent, ids, deps);
+  if (intent.action === "amend_tpsl") return placeAmend(intent, ids, deps);
+  if (intent.action === "set_leverage") return placeSetLeverage(intent, ids, deps);
+  return placeOpenOrClose(intent, ids, deps);
 }
 
 function fieldsFor(

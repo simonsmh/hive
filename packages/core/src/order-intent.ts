@@ -6,7 +6,7 @@ export const MAX_TTL_SEC = 3600;
 /** Tolerated clock skew for createdAt values that are slightly ahead of Hive's clock. */
 export const CLOCK_SKEW_MS = 60_000;
 
-const ACTIONS = ["open", "close", "amend_tpsl", "reduce"] as const;
+const ACTIONS = ["open", "close", "amend_tpsl", "reduce", "set_leverage"] as const;
 const SIDES = ["buy", "sell"] as const;
 const POS_SIDES = ["net", "long", "short"] as const;
 const TD_MODES = ["isolated", "cross"] as const;
@@ -211,6 +211,15 @@ function buildIntent(input: unknown, nowMs: number): OkxIntent {
 
   const lever = o.lever === undefined || o.lever === null ? null : optionalPositiveNumber(o, "lever");
 
+  if (action === "set_leverage") {
+    // A leverage change names the position (side/posSide/sz, as on every intent) but places no order:
+    // anything that only an order could consume would be silently dropped, so it is rejected instead.
+    if (lever === null) fail("lever is required for set_leverage");
+    if (reduceOnly) fail("set_leverage cannot be reduceOnly");
+    if (px !== null) fail("set_leverage does not accept px");
+    if (slTriggerPx !== null || tpTriggerPx !== null) fail("set_leverage does not accept sl/tp fields");
+  }
+
   return {
     schema: INTENT_SCHEMA,
     intentId,
@@ -277,6 +286,11 @@ export function preflightRisk(
   if (context.killEngaged) return "kill_switch_engaged";
   if (!limits) return "no_risk_limits";
   if (context.submissionsLastMinute >= limits.maxOrdersPerMin) return "rate_limited";
+  if (intent.action === "set_leverage") {
+    if (intent.lever === null) return "missing_lever";
+    if (intent.lever > limits.maxLeverage) return "leverage_exceeds_limit";
+    return null;
+  }
   if (intent.action !== "open") return null;
 
   if (intent.lever === null) return "missing_lever";

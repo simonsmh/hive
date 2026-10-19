@@ -148,6 +148,31 @@ describe("parseIntent", () => {
     const intent = parsed({ slTriggerPx: null, slOrdPx: null });
     expect(preflightRisk(intent, LIMITS, CLEAR)).toBe("missing_stop_loss");
   });
+
+  it("parses a set_leverage that names the position and carries only a lever", () => {
+    const intent = parsed({
+      action: "set_leverage",
+      lever: 20,
+      slTriggerPx: null,
+      slOrdPx: null,
+      tpTriggerPx: null,
+      tpOrdPx: null,
+      theme: null,
+      themeStopCapU: null,
+      maxLossU: null,
+    });
+    expect(intent.action).toBe("set_leverage");
+    expect(intent.lever).toBe(20);
+    expect(needsPriceGate(intent)).toBe(false);
+  });
+
+  it("rejects a set_leverage without a lever or with order-only fields", () => {
+    const base = { action: "set_leverage", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(invalid({ ...base, lever: null })).toMatch(/lever is required for set_leverage/);
+    expect(invalid({ ...base, lever: 20, slTriggerPx: "4125", slOrdPx: "-1" })).toMatch(/does not accept sl\/tp/);
+    expect(invalid({ ...base, lever: 20, px: "4100" })).toMatch(/does not accept px/);
+    expect(invalid({ ...base, lever: 20, reduceOnly: true })).toMatch(/cannot be reduceOnly/);
+  });
 });
 
 describe("isExpired", () => {
@@ -207,6 +232,25 @@ describe("preflightRisk", () => {
   it("rejects leverage above the cap", () => {
     expect(preflightRisk(parsed({ lever: 25 }), LIMITS, CLEAR)).toBe("leverage_exceeds_limit");
     expect(preflightRisk(parsed({ lever: 20 }), LIMITS, CLEAR)).toBeNull();
+  });
+
+  it("gates set_leverage on the lever alone: no theme, stop loss or cap is required", () => {
+    const base = {
+      action: "set_leverage",
+      slTriggerPx: null,
+      slOrdPx: null,
+      tpTriggerPx: null,
+      tpOrdPx: null,
+      theme: null,
+      themeStopCapU: null,
+      maxLossU: null,
+    };
+    expect(preflightRisk(parsed({ ...base, lever: 20 }), LIMITS, CLEAR)).toBeNull();
+    expect(preflightRisk(parsed({ ...base, lever: 21 }), LIMITS, CLEAR)).toBe("leverage_exceeds_limit");
+    expect(preflightRisk({ ...parsed({ ...base, lever: 20 }), lever: null }, LIMITS, CLEAR)).toBe("missing_lever");
+    expect(preflightRisk(parsed({ ...base, lever: 20 }), LIMITS, { killEngaged: true, submissionsLastMinute: 0 })).toBe(
+      "kill_switch_engaged",
+    );
   });
 });
 
