@@ -137,6 +137,116 @@ describe("OkxTradeClient reads", () => {
     expect(await client(fetchImpl).findOrderByClOrdId("XAU-USDT-SWAP", "abc")).toEqual({ ordId: "777", state: "filled" });
   });
 
+  it("returns the fill state from orderDetail and null when the order does not exist", async () => {
+    const filled = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ ordId: "888", state: "filled", avgPx: "219.48", accFillSz: "0.01" }] }),
+    );
+    expect(await client(filled.fetchImpl).orderDetail("NVDA-USDT-SWAP", "888")).toEqual({
+      ordId: "888",
+      state: "filled",
+      avgPx: 219.48,
+      accFillSz: 0.01,
+    });
+    expect(filled.calls[0]?.url.pathname).toBe("/api/v5/trade/order");
+    expect(filled.calls[0]?.url.searchParams.get("ordId")).toBe("888");
+
+    const live = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ ordId: "889", state: "live", avgPx: "", accFillSz: "0" }] }),
+    );
+    expect(await client(live.fetchImpl).orderDetail("NVDA-USDT-SWAP", "889")).toEqual({
+      ordId: "889",
+      state: "live",
+      avgPx: null,
+      accFillSz: 0,
+    });
+
+    const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
+    expect(await client(missing.fetchImpl).orderDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
+  });
+
+  it("falls back to order history and selects the row whose ordId matches", async () => {
+    const { calls, fetchImpl } = fakeFetch((call) =>
+      call.url.pathname === "/api/v5/trade/orders-history"
+        ? json({
+            code: "0",
+            msg: "",
+            data: [
+              { ordId: "891", state: "filled", avgPx: "100", accFillSz: "1" },
+              { ordId: "890", state: "canceled", avgPx: "", accFillSz: "0" },
+            ],
+          })
+        : json({ code: "51603", msg: "Order does not exist", data: [] }),
+    );
+    expect(await client(fetchImpl).orderDetail("NVDA-USDT-SWAP", "890")).toEqual({
+      ordId: "890",
+      state: "canceled",
+      avgPx: null,
+      accFillSz: 0,
+    });
+    expect(calls.map((call) => call.url.pathname)).toEqual(["/api/v5/trade/order", "/api/v5/trade/orders-history"]);
+    expect(calls[1]?.url.searchParams.get("ordId")).toBeNull();
+
+    const absent = fakeFetch((call) =>
+      call.url.pathname === "/api/v5/trade/orders-history"
+        ? json({ code: "0", msg: "", data: [{ ordId: "891", state: "filled", avgPx: "100", accFillSz: "1" }] })
+        : json({ code: "51603", msg: "Order does not exist", data: [] }),
+    );
+    expect(await client(absent.fetchImpl).orderDetail("NVDA-USDT-SWAP", "890")).toBeNull();
+
+    const gone = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
+    expect(await client(gone.fetchImpl).orderDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
+  });
+
+  it("queries pending algos once per ordType and combines the results", async () => {
+    const { calls, fetchImpl } = fakeFetch((call) => {
+      const ordType = call.url.searchParams.get("ordType");
+      return json({
+        code: "0",
+        msg: "",
+        data:
+          ordType === "conditional"
+            ? [{ algoId: "a1", algoClOrdId: "c1", side: "sell", posSide: "net", sz: "0.01", reduceOnly: "true", slTriggerPx: "209.15", slOrdPx: "-1", tpTriggerPx: "", tpOrdPx: "" }]
+            : [{ algoId: "a2", algoClOrdId: "c2", side: "sell", posSide: "net", sz: "0.01", reduceOnly: "true", slTriggerPx: "", slOrdPx: "", tpTriggerPx: "250", tpOrdPx: "-1" }],
+      });
+    });
+    const algos = await client(fetchImpl).pendingAlgos("NVDA-USDT-SWAP");
+    expect(algos.map((algo) => algo.algoId)).toEqual(["a1", "a2"]);
+    expect(calls.map((call) => call.url.searchParams.get("ordType"))).toEqual(["conditional", "oco"]);
+    expect(algos[0]?.slTriggerPx).toBe("209.15");
+    expect(algos[1]?.tpTriggerPx).toBe("250");
+  });
+
+  it("returns the state and spawned order id from algoDetail, with an algo history fallback", async () => {
+    const live = fakeFetch(() => json({ code: "0", msg: "", data: [{ algoId: "555", state: "live", ordId: "" }] }));
+    expect(await client(live.fetchImpl).algoDetail("NVDA-USDT-SWAP", "555", "conditional")).toEqual({ algoId: "555", state: "live", ordId: null });
+    expect(live.calls[0]?.url.pathname).toBe("/api/v5/trade/order-algo");
+
+    const triggered = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ algoId: "556", state: "effective", ordId: "999", actualPx: "209.15", actualSz: "0.01" }] }),
+    );
+    expect(await client(triggered.fetchImpl).algoDetail("NVDA-USDT-SWAP", "556", "oco")).toEqual({
+      algoId: "556",
+      state: "effective",
+      ordId: "999",
+    });
+
+    const history = fakeFetch((call) =>
+      call.url.pathname === "/api/v5/trade/orders-algo-history"
+        ? json({ code: "0", msg: "", data: [{ algoId: "557", state: "canceled", ordId: "" }] })
+        : json({ code: "51603", msg: "Order does not exist", data: [] }),
+    );
+    expect(await client(history.fetchImpl).algoDetail("NVDA-USDT-SWAP", "557", "conditional")).toEqual({
+      algoId: "557",
+      state: "canceled",
+      ordId: null,
+    });
+    const historyCall = history.calls.find((call) => call.url.pathname === "/api/v5/trade/orders-algo-history");
+    expect(historyCall?.url.searchParams.get("ordType")).toBe("conditional");
+
+    const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
+    expect(await client(missing.fetchImpl).algoDetail("NVDA-USDT-SWAP", "nope", "conditional")).toBeNull();
+  });
+
   it("caches contract values per instrument", async () => {
     const { calls, fetchImpl } = fakeFetch(() =>
       json({ code: "0", msg: "", data: [{ instId: "XAU-USDT-SWAP", ctVal: "0.001" }] }),

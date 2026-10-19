@@ -43,6 +43,28 @@ export interface PlacedAlgo {
   algoClOrdId: string;
 }
 
+/** Exchange-side state of one regular order, as reported by GET /api/v5/trade/order. */
+export interface OrderDetail {
+  ordId: string;
+  state: string;
+  /** Volume-weighted average fill price; null until the order has any fill. */
+  avgPx: number | null;
+  /** Accumulated filled size in contracts; 0 until the first fill. */
+  accFillSz: number;
+}
+
+/** Exchange-side state of one algo order, as reported by GET /api/v5/trade/order-algo. */
+export interface AlgoDetail {
+  algoId: string;
+  state: string;
+  /**
+   * The regular order the algo spawned when it triggered; null until then. The algo's own
+   * actualPx/actualSz describe that order's price and quantity, not its fills, so fill
+   * reconciliation must follow this id through orderDetail instead.
+   */
+  ordId: string | null;
+}
+
 export interface OrderTrade {
   lastPrice(instId: string): Promise<number>;
   contractValue(instId: string): Promise<number>;
@@ -87,6 +109,27 @@ function positiveNumber(value: unknown, field: string): number {
   const n = typeof value === "string" && value.trim() !== "" ? Number(value) : typeof value === "number" ? value : NaN;
   if (!Number.isFinite(n) || n <= 0) throw new OkxTradeError(`OKX ${field} is not a positive number`, "api");
   return n;
+}
+
+function parseAlgoDetail(data: unknown): AlgoDetail | null {
+  const row = asRecord(Array.isArray(data) ? data[0] : undefined);
+  const id = text(row, "algoId");
+  if (id === "") return null;
+  const ordId = text(row, "ordId");
+  return { algoId: id, state: text(row, "state"), ordId: ordId === "" ? null : ordId };
+}
+
+function parseOrderDetail(row: Record<string, unknown>): OrderDetail | null {
+  const id = text(row, "ordId");
+  if (id === "") return null;
+  const accFillSz = Number(text(row, "accFillSz"));
+  const avgPx = Number(text(row, "avgPx"));
+  return {
+    ordId: id,
+    state: text(row, "state"),
+    avgPx: Number.isFinite(accFillSz) && accFillSz > 0 && Number.isFinite(avgPx) && avgPx > 0 ? avgPx : null,
+    accFillSz: Number.isFinite(accFillSz) && accFillSz > 0 ? accFillSz : 0,
+  };
 }
 
 export class OkxTradeClient implements OrderTrade {
@@ -152,10 +195,16 @@ export class OkxTradeClient implements OrderTrade {
 
   /** Pending conditional and OCO algo orders on the instrument, which carry the position's stop and take-profit. */
   async pendingAlgos(instId: string): Promise<PendingAlgo[]> {
-    const rows = await this.data("GET", "/api/v5/trade/orders-algo-pending", {
-      query: { instType: "SWAP", instId, ordType: "conditional,oco" },
-      signed: true,
-    });
+    // The endpoint takes a single ordType enum, so the two types are queried separately.
+    const rows: unknown[] = [];
+    for (const ordType of ["conditional", "oco"]) {
+      rows.push(
+        ...(await this.data("GET", "/api/v5/trade/orders-algo-pending", {
+          query: { instType: "SWAP", instId, ordType },
+          signed: true,
+        })),
+      );
+    }
     return rows
       .map((raw): PendingAlgo => {
         const row = asRecord(raw);
@@ -227,6 +276,64 @@ export class OkxTradeClient implements OrderTrade {
     const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
     const ordId = text(row, "ordId");
     return ordId === "" ? null : { ordId, state: text(row, "state") };
+  }
+
+  /** Full state of one regular order by exchange id; null when OKX has no such order. */
+  async orderDetail(instId: string, ordId: string): Promise<OrderDetail | null> {
+    const payload = await this.call("GET", "/api/v5/trade/order", { query: { instId, ordId }, signed: true });
+    if (payload.code !== NOT_FOUND_CODE) {
+      this.assertEnvelope(payload, "/api/v5/trade/order");
+      return parseOrderDetail(asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined));
+    }
+    // An order canceled before any fill disappears from the live endpoint; history keeps it.
+    // The history endpoint has no ordId filter, so page through the instrument's recent history
+    // and pick the row whose ordId actually matches — never trust data[0].
+    let after: string | undefined;
+    for (let page = 0; page < 3; page += 1) {
+      const query: Record<string, string> = { instType: "SWAP", instId, limit: "100" };
+      if (after !== undefined) query.after = after;
+      const history = await this.call("GET", "/api/v5/trade/orders-history", { query, signed: true });
+      if (history.code === NOT_FOUND_CODE) return null;
+      this.assertEnvelope(history, "/api/v5/trade/orders-history");
+      const rows = Array.isArray(history.data) ? history.data : [];
+      for (const raw of rows) {
+        const row = asRecord(raw);
+        if (text(row, "ordId") === ordId) return parseOrderDetail(row);
+      }
+      if (rows.length < 100) return null;
+      after = text(asRecord(rows[rows.length - 1]), "ordId");
+      if (after === "") return null;
+    }
+    return null;
+  }
+
+  /** State of one algo order by exchange id; null when OKX has no such algo order. */
+  async algoDetail(instId: string, algoId: string, ordType?: string | null): Promise<AlgoDetail | null> {
+    const payload = await this.call("GET", "/api/v5/trade/order-algo", { query: { algoId }, signed: true });
+    if (payload.code !== NOT_FOUND_CODE) {
+      this.assertEnvelope(payload, "/api/v5/trade/order-algo");
+      return parseAlgoDetail(payload.data);
+    }
+    // Same live/history split as regular orders: a canceled algo only survives in history. The
+    // history endpoint takes a single algo ordType (no comma lists), so probe the stored type
+    // when known and both valid values otherwise.
+    const candidates = ordType === "conditional" || ordType === "oco" ? [ordType] : ["conditional", "oco"];
+    let lastError: Envelope | null = null;
+    for (const candidate of candidates) {
+      const history = await this.call("GET", "/api/v5/trade/orders-algo-history", {
+        query: { ordType: candidate, instType: "SWAP", instId, algoId },
+        signed: true,
+      });
+      if (history.code === "0") {
+        const detail = parseAlgoDetail(history.data);
+        // Never copy another order's state into this row if the filter was not honored.
+        return detail !== null && detail.algoId === algoId ? detail : null;
+      }
+      if (history.code !== NOT_FOUND_CODE) lastError = history;
+    }
+    if (lastError === null) return null;
+    this.assertEnvelope(lastError, "/api/v5/trade/orders-algo-history");
+    return null;
   }
 
   private assertRowAccepted(row: Record<string, unknown>, what: string): void {

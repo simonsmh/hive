@@ -1,0 +1,1 @@
+{"lint":{"rules":{"exclude":["require-await"]}},"tasks":{"sync":"node ../../../scripts/sync-edge-core.mjs","test":"deno test"}}
