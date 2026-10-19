@@ -111,6 +111,14 @@ function positiveNumber(value: unknown, field: string): number {
   return n;
 }
 
+function parseAlgoDetail(data: unknown): AlgoDetail | null {
+  const row = asRecord(Array.isArray(data) ? data[0] : undefined);
+  const id = text(row, "algoId");
+  if (id === "") return null;
+  const ordId = text(row, "ordId");
+  return { algoId: id, state: text(row, "state"), ordId: ordId === "" ? null : ordId };
+}
+
 export class OkxTradeClient implements OrderTrade {
   private readonly baseUrl: string;
   private readonly credentials: OkxCredentials;
@@ -276,24 +284,28 @@ export class OkxTradeClient implements OrderTrade {
   }
 
   /** State of one algo order by exchange id; null when OKX has no such algo order. */
-  async algoDetail(instId: string, algoId: string): Promise<AlgoDetail | null> {
-    let path = "/api/v5/trade/order-algo";
-    let payload = await this.call("GET", path, { query: { algoId }, signed: true });
-    if (payload.code === NOT_FOUND_CODE) {
-      // Same live/history split as regular orders: a canceled algo only survives in history.
-      path = "/api/v5/trade/orders-algo-history";
-      payload = await this.call("GET", path, {
-        query: { ordType: "conditional,oco", instType: "SWAP", instId, algoId },
+  async algoDetail(instId: string, algoId: string, ordType?: string | null): Promise<AlgoDetail | null> {
+    const payload = await this.call("GET", "/api/v5/trade/order-algo", { query: { algoId }, signed: true });
+    if (payload.code !== NOT_FOUND_CODE) {
+      this.assertEnvelope(payload, "/api/v5/trade/order-algo");
+      return parseAlgoDetail(payload.data);
+    }
+    // Same live/history split as regular orders: a canceled algo only survives in history. The
+    // history endpoint takes a single algo ordType (no comma lists), so probe the stored type
+    // when known and both valid values otherwise.
+    const candidates = ordType === "conditional" || ordType === "oco" ? [ordType] : ["conditional", "oco"];
+    let lastError: Envelope | null = null;
+    for (const candidate of candidates) {
+      const history = await this.call("GET", "/api/v5/trade/orders-algo-history", {
+        query: { ordType: candidate, instType: "SWAP", instId, algoId },
         signed: true,
       });
-      if (payload.code === NOT_FOUND_CODE) return null;
+      if (history.code === "0") return parseAlgoDetail(history.data);
+      if (history.code !== NOT_FOUND_CODE) lastError = history;
     }
-    this.assertEnvelope(payload, path);
-    const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
-    const id = text(row, "algoId");
-    if (id === "") return null;
-    const ordId = text(row, "ordId");
-    return { algoId: id, state: text(row, "state"), ordId: ordId === "" ? null : ordId };
+    if (lastError === null) return null;
+    this.assertEnvelope(lastError, "/api/v5/trade/orders-algo-history");
+    return null;
   }
 
   private assertRowAccepted(row: Record<string, unknown>, what: string): void {

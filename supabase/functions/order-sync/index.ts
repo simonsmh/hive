@@ -26,7 +26,7 @@ function exchangeFrom(credentials: OkxCredentials): OrderSyncExchange {
   const trade = new OkxTradeClient({ baseUrl: okxBaseUrl, credentials, demo, fetchImpl: fetchWithTimeout });
   return {
     orderDetail: (instId, ordId) => trade.orderDetail(instId, ordId),
-    algoDetail: (instId, algoId) => trade.algoDetail(instId, algoId),
+    algoDetail: (instId, algoId, ordType) => trade.algoDetail(instId, algoId, ordType),
     positions: (instId) => trade.positions(instId),
     pendingAlgos: (instId) => trade.pendingAlgos(instId),
   };

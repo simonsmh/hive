@@ -9,6 +9,8 @@ export interface OrderRow {
   instId: string;
   ordId: string | null;
   algoId: string | null;
+  /** Stored placement type; for algo rows this is the OKX algo ordType ("conditional" | "oco"). */
+  ordType: string | null;
   state: string | null;
   fillPx: number | null;
   fillSz: number | null;
@@ -28,7 +30,7 @@ export interface OrderSyncStore {
 
 export interface OrderSyncExchange {
   orderDetail(instId: string, ordId: string): Promise<OrderDetail | null>;
-  algoDetail(instId: string, algoId: string): Promise<AlgoDetail | null>;
+  algoDetail(instId: string, algoId: string, ordType?: string | null): Promise<AlgoDetail | null>;
   positions(instId: string): Promise<PositionRow[]>;
   pendingAlgos(instId: string): Promise<PendingAlgo[]>;
 }
@@ -121,7 +123,7 @@ export function createOrderSyncHandler(deps: OrderSyncDeps): (request: Request) 
           updated += 1;
         } else {
           if (!row.algoId) throw new Error(`orders row ${row.id} has no algo_id`);
-          const detail = await deps.exchange.algoDetail(row.instId, row.algoId);
+          const detail = await deps.exchange.algoDetail(row.instId, row.algoId, row.ordType);
           if (detail === null) {
             missing += 1;
             await deps.store.applySync(row.id, { lastSyncAt });

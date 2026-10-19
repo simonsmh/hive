@@ -184,13 +184,13 @@ describe("OkxTradeClient reads", () => {
 
   it("returns the state and spawned order id from algoDetail, with an algo history fallback", async () => {
     const live = fakeFetch(() => json({ code: "0", msg: "", data: [{ algoId: "555", state: "live", ordId: "" }] }));
-    expect(await client(live.fetchImpl).algoDetail("NVDA-USDT-SWAP", "555")).toEqual({ algoId: "555", state: "live", ordId: null });
+    expect(await client(live.fetchImpl).algoDetail("NVDA-USDT-SWAP", "555", "conditional")).toEqual({ algoId: "555", state: "live", ordId: null });
     expect(live.calls[0]?.url.pathname).toBe("/api/v5/trade/order-algo");
 
     const triggered = fakeFetch(() =>
       json({ code: "0", msg: "", data: [{ algoId: "556", state: "effective", ordId: "999", actualPx: "209.15", actualSz: "0.01" }] }),
     );
-    expect(await client(triggered.fetchImpl).algoDetail("NVDA-USDT-SWAP", "556")).toEqual({
+    expect(await client(triggered.fetchImpl).algoDetail("NVDA-USDT-SWAP", "556", "oco")).toEqual({
       algoId: "556",
       state: "effective",
       ordId: "999",
@@ -201,14 +201,16 @@ describe("OkxTradeClient reads", () => {
         ? json({ code: "0", msg: "", data: [{ algoId: "557", state: "canceled", ordId: "" }] })
         : json({ code: "51603", msg: "Order does not exist", data: [] }),
     );
-    expect(await client(history.fetchImpl).algoDetail("NVDA-USDT-SWAP", "557")).toEqual({
+    expect(await client(history.fetchImpl).algoDetail("NVDA-USDT-SWAP", "557", "conditional")).toEqual({
       algoId: "557",
       state: "canceled",
       ordId: null,
     });
+    const historyCall = history.calls.find((call) => call.url.pathname === "/api/v5/trade/orders-algo-history");
+    expect(historyCall?.url.searchParams.get("ordType")).toBe("conditional");
 
     const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
-    expect(await client(missing.fetchImpl).algoDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
+    expect(await client(missing.fetchImpl).algoDetail("NVDA-USDT-SWAP", "nope", "conditional")).toBeNull();
   });
 
   it("caches contract values per instrument", async () => {

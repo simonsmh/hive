@@ -20,6 +20,7 @@ function orderRow(overrides: Partial<OrderRow> = {}): OrderRow {
     instId: "NVDA-USDT-SWAP",
     ordId: "ord-1",
     algoId: null,
+    ordType: "market",
     state: "accepted",
     fillPx: null,
     fillSz: null,

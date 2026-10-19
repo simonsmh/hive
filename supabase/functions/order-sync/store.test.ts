@@ -27,8 +27,8 @@ function fakeFetch(respond: (call: Recorded) => unknown) {
 
 Deno.test("listPending queries non-final orders of the mode, oldest sync first", async () => {
   const { calls, fetchImpl } = fakeFetch(() => [
-    { id: 7, kind: "order", inst_id: "NVDA-USDT-SWAP", ord_id: "ord-7", algo_id: null, state: "accepted", fill_px: null, fill_sz: null },
-    { id: 8, kind: "algo", inst_id: "NVDA-USDT-SWAP", ord_id: null, algo_id: "algo-8", state: "live", fill_px: "219.48", fill_sz: "0.01" },
+    { id: 7, kind: "order", inst_id: "NVDA-USDT-SWAP", ord_id: "ord-7", algo_id: null, ord_type: "market", state: "accepted", fill_px: null, fill_sz: null },
+    { id: 8, kind: "algo", inst_id: "NVDA-USDT-SWAP", ord_id: null, algo_id: "algo-8", ord_type: "conditional", state: "live", fill_px: "219.48", fill_sz: "0.01" },
   ]);
   const store = createRestOrderSyncStore({ supabaseUrl: BASE, serviceKey: "service-key", fetchImpl });
   const rows = await store.listPending("live", 100);
@@ -44,6 +44,7 @@ Deno.test("listPending queries non-final orders of the mode, oldest sync first",
     instId: "NVDA-USDT-SWAP",
     ordId: "ord-7",
     algoId: null,
+    ordType: "market",
     state: "accepted",
     fillPx: null,
     fillSz: null,

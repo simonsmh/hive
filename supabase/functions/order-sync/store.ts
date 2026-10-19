@@ -24,6 +24,7 @@ interface OrderDbRow {
   inst_id: string;
   ord_id: string | null;
   algo_id: string | null;
+  ord_type: string | null;
   state: string | null;
   fill_px: number | string | null;
   fill_sz: number | string | null;
@@ -42,6 +43,7 @@ function toOrderRow(row: OrderDbRow): OrderRow {
     instId: row.inst_id,
     ordId: row.ord_id,
     algoId: row.algo_id,
+    ordType: row.ord_type,
     state: row.state,
     fillPx: numberOrNull(row.fill_px),
     fillSz: numberOrNull(row.fill_sz),
@@ -86,7 +88,7 @@ export function createRestOrderSyncStore(options: RestStoreOptions): OrderSyncSt
   return {
     async listPending(mode: PositionMode, limit: number): Promise<OrderRow[]> {
       const query = new URLSearchParams({
-        select: "id,kind,inst_id,ord_id,algo_id,state,fill_px,fill_sz",
+        select: "id,kind,inst_id,ord_id,algo_id,ord_type,state,fill_px,fill_sz",
         mode: `eq.${mode}`,
         state: PENDING_STATES,
         order: "last_sync_at.asc.nullsfirst,created_at.asc",
