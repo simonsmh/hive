@@ -281,6 +281,63 @@ Deno.test("places a demo open: sets leverage, sends SL/TP attached to the order,
   strictEqual(finished[0]?.outcome.status, "acked");
 });
 
+const SET_LEVERAGE = {
+  ...GROK_SHORT,
+  intentId: "int-20261014-0002",
+  idempotencyKey: "manual-nvda-lever-0002",
+  action: "set_leverage",
+  instId: "NVDA-USDT-SWAP",
+  side: "buy",
+  lever: 20,
+  sz: "0.01",
+  slTriggerPx: null,
+  slOrdPx: null,
+  tpTriggerPx: null,
+  tpOrdPx: null,
+  theme: null,
+  themeStopCapU: null,
+  maxLossU: null,
+  reason: "raise the leverage on the existing position",
+  source: "manual",
+};
+
+Deno.test("set_leverage: calls OKX set-leverage only — no order placed, no order row recorded", async () => {
+  const { handler, calls, placed, orders, finished } = setup();
+  const response = await handler(post(SET_LEVERAGE));
+  strictEqual(response.status, 200);
+  const body = await json(response);
+  strictEqual(body.status, "acked");
+  strictEqual(body.ordId, null);
+  strictEqual(body.algoId, null);
+  strictEqual(body.detail, "lever_set=20");
+
+  const leverage = calls.find((c) => c.method === "setLeverage");
+  deepStrictEqual(leverage?.args, { instId: "NVDA-USDT-SWAP", lever: 20, tdMode: "isolated" });
+  strictEqual(placed().length, 0);
+  strictEqual(orders.length, 0);
+  strictEqual(finished[0]?.outcome.status, "acked");
+});
+
+Deno.test("set_leverage: rejects leverage above the risk cap before any OKX call", async () => {
+  const { handler, calls } = setup();
+  const response = await handler(post({ ...SET_LEVERAGE, lever: 21 }));
+  strictEqual(response.status, 422);
+  const body = await json(response);
+  strictEqual(body.status, "rejected_risk");
+  strictEqual(body.reason, "leverage_exceeds_limit");
+  strictEqual(calls.length, 0);
+});
+
+Deno.test("set_leverage: an OKX rejection surfaces as exchange_error", async () => {
+  const { handler, finished } = setup({
+    trade: { setLeverage: () => Promise.reject(new OkxTradeError("OKX rejected the leverage change", "api", "51000")) },
+  });
+  const response = await handler(post(SET_LEVERAGE));
+  strictEqual(response.status, 502);
+  strictEqual((await json(response)).status, "exchange_error");
+  strictEqual(finished[0]?.outcome.status, "exchange_error");
+});
+
 Deno.test("rejects an open without a stop loss before any OKX call", async () => {
   const { handler, calls, finished } = setup();
   const response = await handler(post({ ...GROK_SHORT, slTriggerPx: null, slOrdPx: null }));

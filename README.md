@@ -297,6 +297,7 @@ done
    - `…000032_blockbeats_source_enum.sql`：为 `market_source` 增加 `blockbeats`（须单独迁移）
    - `…000033_blockbeats_news.sql`：`source_health.blockbeats` 种子（120 分钟过期）、允许 `blockbeats` 的 `hive_news_ingest`，以及 `hive-blockbeats-poller`（初始每分钟）
    - `…000034_blockbeats_five_minute_poll.sql`：`hive-blockbeats-poller` 改为每 5 分钟（额度，理由见下文「免费额度」）
+   - `…000035_set_leverage_action.sql`：`order_intents.action` 的 CHECK 增加 `set_leverage`（order-submit 调杠杆动作）
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -814,6 +815,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
 - `open`：必须带 `lever`、`theme`、`themeStopCapU`、`slTriggerPx`、`slOrdPx`，并且 `reduceOnly` 为 `false`。
 - `close` / `reduce`：`reduceOnly` 必须为 `true`，`sz` 为平仓张数。
 - `amend_tpsl`：至少一组 `slTriggerPx` / `tpTriggerPx`，并带对应的 `*OrdPx`（市价用 `"-1"`）。`side` 为**平仓方向**（平多为 `sell`，平空为 `buy`）。
+- `set_leverage`：调整已有持仓的杠杆，不下单。必须带 `lever`（不超过 `risk_limits.max_leverage`）；`side` / `posSide` / `sz` 照常填写以标明目标持仓，`px`、SL/TP、`reduceOnly` 不接受。kill switch 与限频照常生效；结果只记入 `order_intents`，不产生 `orders` 行，开仓时挂载的 SL/TP 不受影响。
 - `ordType` 默认 `market`；`limit` 必须带 `px`。`ttlSec` 默认 120，超过 `createdAt + ttlSec` 返回 `expired`。`createdAt` 比 Hive 当前时间晚超过 60 秒视为无效（`rejected_invalid`），用于拦截时钟错误。
 
 **风控门（按顺序执行，任一失败都不会下单）**
@@ -879,7 +881,7 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 
 **没有标的白名单**。持仓管理不包含任何写死的标的列表（不是只允许 XAU/BTC/ETH/SOL）。只要 `position_subscriptions` 中存在该标的的启用订阅（`mode` 一致），它就能被管理，**QQQ-USDT-SWAP 与其他 USDT 永续同样适用**。`themeStopCapU` 必须在 `(0, 0.1]` 之间，由表约束与 upsert 校验共同保证。
 
-**order-submit 的改动**。order-submit 不再检查标的白名单：开仓（`open`）、平仓（`close`）、减仓（`reduce`）与改止盈（`amend_tpsl`）都不会因标的而被拒绝，不再返回 `symbol_not_allowed`，也不再为此查询 `position_subscriptions`。kill switch、限频、杠杆上限、名义金额上限、止损方向、`themeStopCapU` / `maxLossU` 等其他风控仍然生效。
+**order-submit 的改动**。order-submit 不再检查标的白名单：开仓（`open`）、平仓（`close`）、减仓（`reduce`）、改止盈（`amend_tpsl`）与调杠杆（`set_leverage`）都不会因标的而被拒绝，不再返回 `symbol_not_allowed`，也不再为此查询 `position_subscriptions`。kill switch、限频、杠杆上限、名义金额上限、止损方向、`themeStopCapU` / `maxLossU` 等其他风控仍然生效。
 
 **live 风控行（`live-default`）**。迁移 `20261014000025` 在没有启用的 live 限额行时写入一行，`symbol_allowlist` 为空、`max_notional_usdt=500`、`max_leverage=15`、`max_orders_per_min=10`。`symbol_allowlist` 已不再被 order-submit 读取，因此该列为空不会再拒绝任何 live 开仓；live 开仓仍受 kill switch、`OKX_TRADE_LIVE_ENABLED`、杠杆与名义金额上限、止损与 `themeStopCapU` 约束。停用：`update public.risk_limits set enabled = false where name = 'live-default';`（同时停用持仓动作，因为 order-submit 将缺少限额行视为 fail closed）。
 
