@@ -190,11 +190,14 @@ export function createRestOrderStore(options: RestStoreOptions): OrderStore {
     },
 
     async liveAlgos(instId: string, mode: TradeMode): Promise<{ algoId: string; clOrdId: string }[]> {
+      // Every non-final algo state order-sync can write back: a paused algo can resume and a
+      // partially_effective one is still working, so both must be canceled on replacement,
+      // exactly like accepted/live ones.
       const query = new URLSearchParams({
         select: "algo_id,cl_ord_id",
         exchange: "eq.okx",
         kind: "eq.algo",
-        state: "in.(accepted,live)",
+        state: "in.(accepted,live,partially_effective,pause)",
         inst_id: `eq.${instId}`,
         mode: `eq.${mode}`,
         algo_id: "not.is.null",
