@@ -125,6 +125,7 @@ supabase/
   functions/google-finance-collector/ Edge Function（Deno）：Google Finance 财报指引与电话会议文字稿（仅财报窗口内）
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
   functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（P0b，demo 默认，live 需显式开启）
+  functions/order-sync/        Edge Function（Deno）：订单状态对账（成交价/量/终局状态回填）与持仓只读查询
   functions/position-manager/  Edge Function（Deno）：持仓管理（P0c，pg_cron 每 3 分钟）：动态 ATR 止盈、半程减仓
   functions/position-subscriptions/ Edge Function（Deno）：持仓订阅的鉴权 upsert / 列表（P0c，供 Grok 登记持仓）
   seeds/       上线后执行的种子（P0c：BTC-USDT-SWAP short、QQQ-USDT-SWAP long）
@@ -148,7 +149,7 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector、position-manager、strategy-evaluator、order-sync、push-notify（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
@@ -267,7 +268,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller blockbeats-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector order-submit position-manager position-subscriptions push-notify strategy-evaluator; do
+for f in okx-collector jin10-poller okx-news-poller blockbeats-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector order-submit position-manager position-subscriptions push-notify strategy-evaluator order-sync; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -298,6 +299,7 @@ done
    - `…000033_blockbeats_news.sql`：`source_health.blockbeats` 种子（120 分钟过期）、允许 `blockbeats` 的 `hive_news_ingest`，以及 `hive-blockbeats-poller`（初始每分钟）
    - `…000034_blockbeats_five_minute_poll.sql`：`hive-blockbeats-poller` 改为每 5 分钟（额度，理由见下文「免费额度」）
    - `…000035_set_leverage_action.sql`：`order_intents.action` 的 CHECK 增加 `set_leverage`（order-submit 调杠杆动作）
+   - `…000036_order_sync_cron.sql`：`hive-order-sync`（每分钟）调度 order-sync 对账
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -316,6 +318,7 @@ done
    supabase functions deploy position-subscriptions --no-verify-jwt
    supabase functions deploy push-notify --no-verify-jwt
    supabase functions deploy strategy-evaluator --no-verify-jwt
+   supabase functions deploy order-sync --no-verify-jwt
 
    ```
 
@@ -863,7 +866,7 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 
 **已知限制（P0b）**
 
-- `order-sync` 尚未实现：`orders.state` 停在 `accepted`，成交与撤单需要后续同步。
+- 订单状态由 `order-sync` 对账：pg_cron 每分钟调用，轮询 `orders` 中未终局的行，向 OKX 查询后回填 `state`、`fill_px`、`fill_sz` 与 `last_sync_at`；函数另提供 `GET ?instId=`（EDGE_CRON_SECRET）返回实时持仓与挂单中的保护 algo，供运维只读查询。
 - 总敞口（所有未平仓单合计）未做限制，只做单笔与每分钟限额。
 - `open` 附带的 SL/TP 随订单成交由 OKX 挂载，Hive 不跟踪它的 `algoId`。`amend_tpsl` 只会撤销 Hive 自己下的条件单，不会撤销开仓时挂载的 SL。
 - `amend_tpsl` 的价格门使用持仓均价（`/account/positions` 的 `avgPx`），不是当前价。

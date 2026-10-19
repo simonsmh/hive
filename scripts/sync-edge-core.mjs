@@ -28,6 +28,7 @@ const FUNCTIONS = {
   "position-subscriptions": ["auth", "position"],
   "push-notify": ["auth", "webpush"],
   "strategy-evaluator": ["types", "auth", "okx-signing", "okx-trade", "order-intent", "position", "strategy"],
+  "order-sync": ["auth", "okx-signing", "okx-trade", "order-intent", "position"],
 };
 
 function rewrite(name, source, allowedLocal) {

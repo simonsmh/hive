@@ -43,6 +43,22 @@ export interface PlacedAlgo {
   algoClOrdId: string;
 }
 
+/** Exchange-side state of one regular order, as reported by GET /api/v5/trade/order. */
+export interface OrderDetail {
+  ordId: string;
+  state: string;
+  /** Volume-weighted average fill price; null until the order has any fill. */
+  avgPx: number | null;
+  /** Accumulated filled size in contracts; 0 until the first fill. */
+  accFillSz: number;
+}
+
+/** Exchange-side state of one algo order, as reported by GET /api/v5/trade/order-algo. */
+export interface AlgoDetail {
+  algoId: string;
+  state: string;
+}
+
 export interface OrderTrade {
   lastPrice(instId: string): Promise<number>;
   contractValue(instId: string): Promise<number>;
@@ -227,6 +243,34 @@ export class OkxTradeClient implements OrderTrade {
     const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
     const ordId = text(row, "ordId");
     return ordId === "" ? null : { ordId, state: text(row, "state") };
+  }
+
+  /** Full state of one regular order by exchange id; null when OKX has no such order. */
+  async orderDetail(instId: string, ordId: string): Promise<OrderDetail | null> {
+    const payload = await this.call("GET", "/api/v5/trade/order", { query: { instId, ordId }, signed: true });
+    if (payload.code === NOT_FOUND_CODE) return null;
+    this.assertEnvelope(payload, "/api/v5/trade/order");
+    const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
+    const id = text(row, "ordId");
+    if (id === "") return null;
+    const accFillSz = Number(text(row, "accFillSz"));
+    const avgPx = Number(text(row, "avgPx"));
+    return {
+      ordId: id,
+      state: text(row, "state"),
+      avgPx: Number.isFinite(accFillSz) && accFillSz > 0 && Number.isFinite(avgPx) && avgPx > 0 ? avgPx : null,
+      accFillSz: Number.isFinite(accFillSz) && accFillSz > 0 ? accFillSz : 0,
+    };
+  }
+
+  /** State of one algo order by exchange id; null when OKX has no such algo order. */
+  async algoDetail(algoId: string): Promise<AlgoDetail | null> {
+    const payload = await this.call("GET", "/api/v5/trade/order-algo", { query: { algoId }, signed: true });
+    if (payload.code === NOT_FOUND_CODE) return null;
+    this.assertEnvelope(payload, "/api/v5/trade/order-algo");
+    const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
+    const id = text(row, "algoId");
+    return id === "" ? null : { algoId: id, state: text(row, "state") };
   }
 
   private assertRowAccepted(row: Record<string, unknown>, what: string): void {

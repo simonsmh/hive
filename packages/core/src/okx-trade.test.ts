@@ -137,6 +137,42 @@ describe("OkxTradeClient reads", () => {
     expect(await client(fetchImpl).findOrderByClOrdId("XAU-USDT-SWAP", "abc")).toEqual({ ordId: "777", state: "filled" });
   });
 
+  it("returns the fill state from orderDetail and null when the order does not exist", async () => {
+    const filled = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ ordId: "888", state: "filled", avgPx: "219.48", accFillSz: "0.01" }] }),
+    );
+    expect(await client(filled.fetchImpl).orderDetail("NVDA-USDT-SWAP", "888")).toEqual({
+      ordId: "888",
+      state: "filled",
+      avgPx: 219.48,
+      accFillSz: 0.01,
+    });
+    expect(filled.calls[0]?.url.pathname).toBe("/api/v5/trade/order");
+    expect(filled.calls[0]?.url.searchParams.get("ordId")).toBe("888");
+
+    const live = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ ordId: "889", state: "live", avgPx: "", accFillSz: "0" }] }),
+    );
+    expect(await client(live.fetchImpl).orderDetail("NVDA-USDT-SWAP", "889")).toEqual({
+      ordId: "889",
+      state: "live",
+      avgPx: null,
+      accFillSz: 0,
+    });
+
+    const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
+    expect(await client(missing.fetchImpl).orderDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
+  });
+
+  it("returns the state from algoDetail and null when the algo order does not exist", async () => {
+    const live = fakeFetch(() => json({ code: "0", msg: "", data: [{ algoId: "555", state: "live" }] }));
+    expect(await client(live.fetchImpl).algoDetail("555")).toEqual({ algoId: "555", state: "live" });
+    expect(live.calls[0]?.url.pathname).toBe("/api/v5/trade/order-algo");
+
+    const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
+    expect(await client(missing.fetchImpl).algoDetail("nope")).toBeNull();
+  });
+
   it("caches contract values per instrument", async () => {
     const { calls, fetchImpl } = fakeFetch(() =>
       json({ code: "0", msg: "", data: [{ instId: "XAU-USDT-SWAP", ctVal: "0.001" }] }),
