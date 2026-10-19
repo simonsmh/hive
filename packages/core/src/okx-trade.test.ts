@@ -165,9 +165,19 @@ describe("OkxTradeClient reads", () => {
   });
 
   it("returns the state from algoDetail and null when the algo order does not exist", async () => {
-    const live = fakeFetch(() => json({ code: "0", msg: "", data: [{ algoId: "555", state: "live" }] }));
-    expect(await client(live.fetchImpl).algoDetail("555")).toEqual({ algoId: "555", state: "live" });
+    const live = fakeFetch(() => json({ code: "0", msg: "", data: [{ algoId: "555", state: "live", actualPx: "", actualSz: "" }] }));
+    expect(await client(live.fetchImpl).algoDetail("555")).toEqual({ algoId: "555", state: "live", actualPx: null, actualSz: 0 });
     expect(live.calls[0]?.url.pathname).toBe("/api/v5/trade/order-algo");
+
+    const triggered = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ algoId: "556", state: "effective", actualPx: "209.15", actualSz: "0.01" }] }),
+    );
+    expect(await client(triggered.fetchImpl).algoDetail("556")).toEqual({
+      algoId: "556",
+      state: "effective",
+      actualPx: 209.15,
+      actualSz: 0.01,
+    });
 
     const missing = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
     expect(await client(missing.fetchImpl).algoDetail("nope")).toBeNull();

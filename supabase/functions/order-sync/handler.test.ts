@@ -42,7 +42,7 @@ function fakeStore(rows: OrderRow[]) {
 function fakeExchange(overrides: Partial<OrderSyncExchange> = {}) {
   const exchange: OrderSyncExchange = {
     orderDetail: () => Promise.resolve<OrderDetail | null>({ ordId: "ord-1", state: "filled", avgPx: 219.48, accFillSz: 0.01 }),
-    algoDetail: () => Promise.resolve<AlgoDetail | null>({ algoId: "algo-1", state: "live" }),
+    algoDetail: () => Promise.resolve<AlgoDetail | null>({ algoId: "algo-1", state: "live", actualPx: null, actualSz: 0 }),
     positions: () => Promise.resolve<PositionRow[]>([]),
     pendingAlgos: () => Promise.resolve<PendingAlgo[]>([]),
     ...overrides,
@@ -114,11 +114,23 @@ Deno.test("syncs algo order state without touching fill columns", async () => {
     orderRow({ id: 2, kind: "algo", ordId: null, algoId: "algo-1", state: "accepted" }),
   ]);
   const exchange = fakeExchange({
-    algoDetail: () => Promise.resolve<AlgoDetail | null>({ algoId: "algo-1", state: "effective" }),
+    algoDetail: () => Promise.resolve<AlgoDetail | null>({ algoId: "algo-1", state: "effective", actualPx: null, actualSz: 0 }),
   });
   const response = await handler(store, exchange)(request("POST"));
   strictEqual(response.status, 200);
   deepStrictEqual(patches, [{ id: 2, patch: { lastSyncAt: NOW_ISO, state: "effective" } }]);
+});
+
+Deno.test("backfills the execution price and size when an algo triggers", async () => {
+  const { store, patches } = fakeStore([
+    orderRow({ id: 3, kind: "algo", ordId: null, algoId: "algo-9", state: "live" }),
+  ]);
+  const exchange = fakeExchange({
+    algoDetail: () => Promise.resolve<AlgoDetail | null>({ algoId: "algo-9", state: "effective", actualPx: 209.15, actualSz: 0.01 }),
+  });
+  const response = await handler(store, exchange)(request("POST"));
+  strictEqual(response.status, 200);
+  deepStrictEqual(patches, [{ id: 3, patch: { lastSyncAt: NOW_ISO, state: "effective", fillSz: 0.01, fillPx: 209.15 } }]);
 });
 
 Deno.test("one failing row does not stop the sweep", async () => {

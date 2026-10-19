@@ -58,6 +58,10 @@ export interface OrderDetail {
 export interface AlgoDetail {
   algoId: string;
   state: string;
+  /** Price the triggered order actually executed at; null until the algo triggers. */
+  actualPx: number | null;
+  /** Size the triggered order actually executed; 0 until the algo triggers. */
+  actualSz: number;
 }
 
 export interface OrderTrade {
@@ -271,7 +275,15 @@ export class OkxTradeClient implements OrderTrade {
     this.assertEnvelope(payload, "/api/v5/trade/order-algo");
     const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
     const id = text(row, "algoId");
-    return id === "" ? null : { algoId: id, state: text(row, "state") };
+    if (id === "") return null;
+    const actualSz = Number(text(row, "actualSz"));
+    const actualPx = Number(text(row, "actualPx"));
+    return {
+      algoId: id,
+      state: text(row, "state"),
+      actualPx: Number.isFinite(actualSz) && actualSz > 0 && Number.isFinite(actualPx) && actualPx > 0 ? actualPx : null,
+      actualSz: Number.isFinite(actualSz) && actualSz > 0 ? actualSz : 0,
+    };
   }
 
   private assertRowAccepted(row: Record<string, unknown>, what: string): void {

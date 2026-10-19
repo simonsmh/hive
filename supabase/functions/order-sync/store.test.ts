@@ -36,7 +36,7 @@ Deno.test("listPending queries non-final orders of the mode, oldest sync first",
   strictEqual(calls[0]?.method, "GET");
   const query = new URLSearchParams(calls[0]?.path.split("?")[1]);
   strictEqual(query.get("mode"), "eq.live");
-  strictEqual(query.get("state"), "in.(accepted,live,partially_filled,partially_effective)");
+  strictEqual(query.get("state"), "in.(accepted,live,partially_filled,partially_effective,pause)");
   strictEqual(query.get("limit"), "100");
   deepStrictEqual(rows[0], {
     id: 7,

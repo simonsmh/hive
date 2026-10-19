@@ -5,10 +5,11 @@ const MAX_BODY_IN_ERROR = 300;
 
 /**
  * States the sweep still has to reconcile. Regular orders: accepted (as written at placement), live,
- * partially_filled. Algo orders: accepted, live, partially_effective. Final states (filled, canceled,
- * mmp_canceled, effective, order_failed) never change again and drop out of the sweep on their own.
+ * partially_filled. Algo orders: accepted, live, pause (can resume), partially_effective. Final states
+ * (filled, canceled, mmp_canceled, effective, partially_failed, order_failed) never change again and
+ * drop out of the sweep on their own.
  */
-const PENDING_STATES = "in.(accepted,live,partially_filled,partially_effective)";
+const PENDING_STATES = "in.(accepted,live,partially_filled,partially_effective,pause)";
 
 export interface RestStoreOptions {
   supabaseUrl: string;

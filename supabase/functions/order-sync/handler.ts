@@ -126,6 +126,12 @@ export function createOrderSyncHandler(deps: OrderSyncDeps): (request: Request) 
           }
           const patch: OrderSyncPatch = { lastSyncAt };
           if (detail.state !== "" && detail.state !== row.state) patch.state = detail.state;
+          // A triggered algo's execution is only visible on the algo itself (actualPx/actualSz);
+          // without this the row would reach its final state with fill columns null forever.
+          if (detail.actualSz > 0) {
+            patch.fillSz = detail.actualSz;
+            if (detail.actualPx !== null) patch.fillPx = detail.actualPx;
+          }
           await deps.store.applySync(row.id, patch);
           updated += 1;
         }

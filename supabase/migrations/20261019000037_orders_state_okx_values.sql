@@ -6,7 +6,7 @@ alter table public.orders drop constraint orders_state_check;
 
 alter table public.orders add constraint orders_state_check check (
   state in (
-    'accepted', 'live', 'partially_filled', 'partially_effective',
-    'filled', 'canceled', 'mmp_canceled', 'effective', 'order_failed', 'failed'
+    'accepted', 'live', 'partially_filled', 'partially_effective', 'pause',
+    'filled', 'canceled', 'mmp_canceled', 'effective', 'partially_failed', 'order_failed', 'failed'
   )
 );
