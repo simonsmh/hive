@@ -135,7 +135,7 @@ Deno.test("backfills fills from the regular order an algo spawned when it trigge
   deepStrictEqual(patches, [{ id: 3, patch: { lastSyncAt: NOW_ISO, state: "effective", fillSz: 0.01, fillPx: 209.15 } }]);
 });
 
-Deno.test("does not finalize an algo while its spawned order is still working", async () => {
+Deno.test("persists partial fills but does not finalize an algo while its spawned order is still working", async () => {
   const { store, patches } = fakeStore([
     orderRow({ id: 4, kind: "algo", ordId: null, algoId: "algo-10", state: "live" }),
   ]);
@@ -145,7 +145,7 @@ Deno.test("does not finalize an algo while its spawned order is still working", 
   });
   const response = await handler(store, exchange)(request("POST"));
   strictEqual(response.status, 200);
-  deepStrictEqual(patches, [{ id: 4, patch: { lastSyncAt: NOW_ISO } }]);
+  deepStrictEqual(patches, [{ id: 4, patch: { lastSyncAt: NOW_ISO, fillSz: 0.004, fillPx: 209.2 } }]);
 });
 
 Deno.test("one failing row does not stop the sweep", async () => {

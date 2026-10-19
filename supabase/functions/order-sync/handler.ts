@@ -137,11 +137,16 @@ export function createOrderSyncHandler(deps: OrderSyncDeps): (request: Request) 
           let advanceState = true;
           if (detail.ordId !== null) {
             const child = await deps.exchange.orderDetail(row.instId, detail.ordId);
-            if (child === null || !FINAL_ORDER_STATES.has(child.state)) {
+            if (child === null) {
               advanceState = false;
-            } else if (child.accFillSz > 0) {
-              patch.fillSz = child.accFillSz;
-              if (child.avgPx !== null) patch.fillPx = child.avgPx;
+            } else {
+              // Partial executions are real fills: persist them as they accrue. Only the state
+              // transition waits for the child to reach a final state.
+              if (child.accFillSz > 0) {
+                patch.fillSz = child.accFillSz;
+                if (child.avgPx !== null) patch.fillPx = child.avgPx;
+              }
+              if (!FINAL_ORDER_STATES.has(child.state)) advanceState = false;
             }
           }
           if (advanceState && detail.state !== "" && detail.state !== row.state) patch.state = detail.state;

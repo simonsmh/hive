@@ -70,7 +70,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **积压**：每次运行循环领取整批（每批 20 条，4 并发）。只有剩余预算（90 秒）能覆盖最坏一批（约 40 秒）时才继续领取，因此不会留下未处理且被租约锁住的投递。
 - **重试**：失败后按 30 秒起的指数退避，兜底 cron 的 30 秒粒度不会额外拉长重试。
 - **不调整的部分**：轮询仍为 30 秒，避免把非官方 Jin10 接口的请求频率翻倍。
-- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天约 15,060 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、推送通知 1,440、Yahoo 行情 720、持仓管理 480、策略评估 480、BlockBeats 轮询 288、同花顺约 130），约 45.2 万次/月。分发唤醒只在有新快讯入库的轮询后发生（三个新闻源合计），按快讯实际频率估算远低于「每次轮询都唤醒」的理论上限，合计仍在 50 万次内，但余量已薄：BlockBeats 因此只每 5 分钟轮询（每分钟将再加约 3.5 万次/月）。新增 Edge Function、新增调度或提高调度频率前请重新计算，并以实际用量为准。
+- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天约 15,540 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、推送通知 1,440、Yahoo 行情 720、持仓管理 480、策略评估 480、订单对账 480、BlockBeats 轮询 288、同花顺约 130），约 46.6 万次/月。分发唤醒只在有新快讯入库的轮询后发生（三个新闻源合计），按快讯实际频率估算远低于「每次轮询都唤醒」的理论上限，合计仍在 50 万次内，但余量已薄：BlockBeats 因此只每 5 分钟轮询（每分钟将再加约 3.5 万次/月）。新增 Edge Function、新增调度或提高调度频率前请重新计算，并以实际用量为准。
 
 生产环境观测最近一天的快讯送达延迟（`published_at` 为 Jin10 快讯时间，`delivered_at` 为首次成功投递时间）：
 
@@ -299,7 +299,7 @@ done
    - `…000033_blockbeats_news.sql`：`source_health.blockbeats` 种子（120 分钟过期）、允许 `blockbeats` 的 `hive_news_ingest`，以及 `hive-blockbeats-poller`（初始每分钟）
    - `…000034_blockbeats_five_minute_poll.sql`：`hive-blockbeats-poller` 改为每 5 分钟（额度，理由见下文「免费额度」）
    - `…000035_set_leverage_action.sql`：`order_intents.action` 的 CHECK 增加 `set_leverage`（order-submit 调杠杆动作）
-   - `…000036_order_sync_cron.sql`：`hive-order-sync`（每分钟）调度 order-sync 对账
+   - `…000036_order_sync_cron.sql`：`hive-order-sync`（每 3 分钟）调度 order-sync 对账
    - `…000037_orders_state_okx_values.sql`：`orders.state` 的 CHECK 扩至 OKX 全部状态值（algo 的 effective/partially_effective/order_failed 与 mmp_canceled）
 3. 部署 Edge Functions。在仓库根目录执行：
 
@@ -867,7 +867,7 @@ supabase secrets set OKX_TRADE_API_KEY=… OKX_TRADE_API_SECRET=… OKX_TRADE_AP
 
 **已知限制（P0b）**
 
-- 订单状态由 `order-sync` 对账：pg_cron 每分钟调用，轮询 `orders` 中未终局的行，向 OKX 查询后回填 `state`、`fill_px`、`fill_sz` 与 `last_sync_at`；函数另提供 `GET ?instId=`（EDGE_CRON_SECRET）返回实时持仓与挂单中的保护 algo，供运维只读查询。
+- 订单状态由 `order-sync` 对账：pg_cron 每 3 分钟调用，轮询 `orders` 中未终局的行，向 OKX 查询后回填 `state`、`fill_px`、`fill_sz` 与 `last_sync_at`；函数另提供 `GET ?instId=`（EDGE_CRON_SECRET）返回实时持仓与挂单中的保护 algo，供运维只读查询。
 - 总敞口（所有未平仓单合计）未做限制，只做单笔与每分钟限额。
 - `open` 附带的 SL/TP 随订单成交由 OKX 挂载，Hive 不跟踪它的 `algoId`。`amend_tpsl` 只会撤销 Hive 自己下的条件单，不会撤销开仓时挂载的 SL。
 - `amend_tpsl` 的价格门使用持仓均价（`/account/positions` 的 `avgPx`），不是当前价。
