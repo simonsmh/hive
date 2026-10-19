@@ -119,6 +119,19 @@ function parseAlgoDetail(data: unknown): AlgoDetail | null {
   return { algoId: id, state: text(row, "state"), ordId: ordId === "" ? null : ordId };
 }
 
+function parseOrderDetail(row: Record<string, unknown>): OrderDetail | null {
+  const id = text(row, "ordId");
+  if (id === "") return null;
+  const accFillSz = Number(text(row, "accFillSz"));
+  const avgPx = Number(text(row, "avgPx"));
+  return {
+    ordId: id,
+    state: text(row, "state"),
+    avgPx: Number.isFinite(accFillSz) && accFillSz > 0 && Number.isFinite(avgPx) && avgPx > 0 ? avgPx : null,
+    accFillSz: Number.isFinite(accFillSz) && accFillSz > 0 ? accFillSz : 0,
+  };
+}
+
 export class OkxTradeClient implements OrderTrade {
   private readonly baseUrl: string;
   private readonly credentials: OkxCredentials;
@@ -182,10 +195,16 @@ export class OkxTradeClient implements OrderTrade {
 
   /** Pending conditional and OCO algo orders on the instrument, which carry the position's stop and take-profit. */
   async pendingAlgos(instId: string): Promise<PendingAlgo[]> {
-    const rows = await this.data("GET", "/api/v5/trade/orders-algo-pending", {
-      query: { instType: "SWAP", instId, ordType: "conditional,oco" },
-      signed: true,
-    });
+    // The endpoint takes a single ordType enum, so the two types are queried separately.
+    const rows: unknown[] = [];
+    for (const ordType of ["conditional", "oco"]) {
+      rows.push(
+        ...(await this.data("GET", "/api/v5/trade/orders-algo-pending", {
+          query: { instType: "SWAP", instId, ordType },
+          signed: true,
+        })),
+      );
+    }
     return rows
       .map((raw): PendingAlgo => {
         const row = asRecord(raw);
@@ -261,26 +280,31 @@ export class OkxTradeClient implements OrderTrade {
 
   /** Full state of one regular order by exchange id; null when OKX has no such order. */
   async orderDetail(instId: string, ordId: string): Promise<OrderDetail | null> {
-    let path = "/api/v5/trade/order";
-    let payload = await this.call("GET", path, { query: { instId, ordId }, signed: true });
-    if (payload.code === NOT_FOUND_CODE) {
-      // An order canceled before any fill disappears from the live endpoint; history keeps it.
-      path = "/api/v5/trade/orders-history";
-      payload = await this.call("GET", path, { query: { instType: "SWAP", instId, ordId }, signed: true });
-      if (payload.code === NOT_FOUND_CODE) return null;
+    const payload = await this.call("GET", "/api/v5/trade/order", { query: { instId, ordId }, signed: true });
+    if (payload.code !== NOT_FOUND_CODE) {
+      this.assertEnvelope(payload, "/api/v5/trade/order");
+      return parseOrderDetail(asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined));
     }
-    this.assertEnvelope(payload, path);
-    const row = asRecord(Array.isArray(payload.data) ? payload.data[0] : undefined);
-    const id = text(row, "ordId");
-    if (id === "") return null;
-    const accFillSz = Number(text(row, "accFillSz"));
-    const avgPx = Number(text(row, "avgPx"));
-    return {
-      ordId: id,
-      state: text(row, "state"),
-      avgPx: Number.isFinite(accFillSz) && accFillSz > 0 && Number.isFinite(avgPx) && avgPx > 0 ? avgPx : null,
-      accFillSz: Number.isFinite(accFillSz) && accFillSz > 0 ? accFillSz : 0,
-    };
+    // An order canceled before any fill disappears from the live endpoint; history keeps it.
+    // The history endpoint has no ordId filter, so page through the instrument's recent history
+    // and pick the row whose ordId actually matches — never trust data[0].
+    let after: string | undefined;
+    for (let page = 0; page < 3; page += 1) {
+      const query: Record<string, string> = { instType: "SWAP", instId, limit: "100" };
+      if (after !== undefined) query.after = after;
+      const history = await this.call("GET", "/api/v5/trade/orders-history", { query, signed: true });
+      if (history.code === NOT_FOUND_CODE) return null;
+      this.assertEnvelope(history, "/api/v5/trade/orders-history");
+      const rows = Array.isArray(history.data) ? history.data : [];
+      for (const raw of rows) {
+        const row = asRecord(raw);
+        if (text(row, "ordId") === ordId) return parseOrderDetail(row);
+      }
+      if (rows.length < 100) return null;
+      after = text(asRecord(rows[rows.length - 1]), "ordId");
+      if (after === "") return null;
+    }
+    return null;
   }
 
   /** State of one algo order by exchange id; null when OKX has no such algo order. */
@@ -300,7 +324,11 @@ export class OkxTradeClient implements OrderTrade {
         query: { ordType: candidate, instType: "SWAP", instId, algoId },
         signed: true,
       });
-      if (history.code === "0") return parseAlgoDetail(history.data);
+      if (history.code === "0") {
+        const detail = parseAlgoDetail(history.data);
+        // Never copy another order's state into this row if the filter was not honored.
+        return detail !== null && detail.algoId === algoId ? detail : null;
+      }
       if (history.code !== NOT_FOUND_CODE) lastError = history;
     }
     if (lastError === null) return null;

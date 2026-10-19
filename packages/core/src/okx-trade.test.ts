@@ -164,10 +164,17 @@ describe("OkxTradeClient reads", () => {
     expect(await client(missing.fetchImpl).orderDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
   });
 
-  it("falls back to order history when a canceled order is gone from the live endpoint", async () => {
+  it("falls back to order history and selects the row whose ordId matches", async () => {
     const { calls, fetchImpl } = fakeFetch((call) =>
       call.url.pathname === "/api/v5/trade/orders-history"
-        ? json({ code: "0", msg: "", data: [{ ordId: "890", state: "canceled", avgPx: "", accFillSz: "0" }] })
+        ? json({
+            code: "0",
+            msg: "",
+            data: [
+              { ordId: "891", state: "filled", avgPx: "100", accFillSz: "1" },
+              { ordId: "890", state: "canceled", avgPx: "", accFillSz: "0" },
+            ],
+          })
         : json({ code: "51603", msg: "Order does not exist", data: [] }),
     );
     expect(await client(fetchImpl).orderDetail("NVDA-USDT-SWAP", "890")).toEqual({
@@ -177,9 +184,36 @@ describe("OkxTradeClient reads", () => {
       accFillSz: 0,
     });
     expect(calls.map((call) => call.url.pathname)).toEqual(["/api/v5/trade/order", "/api/v5/trade/orders-history"]);
+    expect(calls[1]?.url.searchParams.get("ordId")).toBeNull();
+
+    const absent = fakeFetch((call) =>
+      call.url.pathname === "/api/v5/trade/orders-history"
+        ? json({ code: "0", msg: "", data: [{ ordId: "891", state: "filled", avgPx: "100", accFillSz: "1" }] })
+        : json({ code: "51603", msg: "Order does not exist", data: [] }),
+    );
+    expect(await client(absent.fetchImpl).orderDetail("NVDA-USDT-SWAP", "890")).toBeNull();
 
     const gone = fakeFetch(() => json({ code: "51603", msg: "Order does not exist", data: [] }));
     expect(await client(gone.fetchImpl).orderDetail("NVDA-USDT-SWAP", "nope")).toBeNull();
+  });
+
+  it("queries pending algos once per ordType and combines the results", async () => {
+    const { calls, fetchImpl } = fakeFetch((call) => {
+      const ordType = call.url.searchParams.get("ordType");
+      return json({
+        code: "0",
+        msg: "",
+        data:
+          ordType === "conditional"
+            ? [{ algoId: "a1", algoClOrdId: "c1", side: "sell", posSide: "net", sz: "0.01", reduceOnly: "true", slTriggerPx: "209.15", slOrdPx: "-1", tpTriggerPx: "", tpOrdPx: "" }]
+            : [{ algoId: "a2", algoClOrdId: "c2", side: "sell", posSide: "net", sz: "0.01", reduceOnly: "true", slTriggerPx: "", slOrdPx: "", tpTriggerPx: "250", tpOrdPx: "-1" }],
+      });
+    });
+    const algos = await client(fetchImpl).pendingAlgos("NVDA-USDT-SWAP");
+    expect(algos.map((algo) => algo.algoId)).toEqual(["a1", "a2"]);
+    expect(calls.map((call) => call.url.searchParams.get("ordType"))).toEqual(["conditional", "oco"]);
+    expect(algos[0]?.slTriggerPx).toBe("209.15");
+    expect(algos[1]?.tpTriggerPx).toBe("250");
   });
 
   it("returns the state and spawned order id from algoDetail, with an algo history fallback", async () => {
