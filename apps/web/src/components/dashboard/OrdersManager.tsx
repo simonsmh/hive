@@ -44,12 +44,21 @@ function stopLevelOf(order: ConditionalOrderView): number | null {
   return order.setup_low * (1 - buffer / 100);
 }
 
-export function OrdersManager({ initialOrders }: { initialOrders: ConditionalOrderView[] }) {
+export function OrdersManager({
+  initialOrders,
+  evaluatorMode,
+}: {
+  initialOrders: ConditionalOrderView[];
+  /** Account mode the deployed evaluator actually evaluates; when known, only it is offered. */
+  evaluatorMode: "demo" | "live" | null;
+}) {
   const [orders, setOrders] = useState<ConditionalOrderView[]>(initialOrders);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const [symbol, setSymbol] = useState("");
+  const [mode, setMode] = useState("live");
+  const effectiveMode = evaluatorMode ?? mode;
   const [lever, setLever] = useState("3");
   const [sz, setSz] = useState("0.01");
   const [theme, setTheme] = useState("");
@@ -94,7 +103,7 @@ export function OrdersManager({ initialOrders }: { initialOrders: ConditionalOrd
         method: "POST",
         body: JSON.stringify({
           instId,
-          mode: "live",
+          mode: effectiveMode,
           lever: Number(lever),
           sz: sz.trim(),
           theme: theme.trim(),
@@ -114,7 +123,7 @@ export function OrdersManager({ initialOrders }: { initialOrders: ConditionalOrd
       setSymbol("");
       return `已创建 ${instId} 条件单，评估器将在 3 分钟内开始盯盘`;
     });
-  }, [symbol, lever, sz, theme, themeStopCapU, tpPct, expiresInDays, interval, minDrawdownPct, rsiMax, stopBufferPct, triggers, note, run]);
+  }, [symbol, effectiveMode, lever, sz, theme, themeStopCapU, tpPct, expiresInDays, interval, minDrawdownPct, rsiMax, stopBufferPct, triggers, note, run]);
 
   const cancel = useCallback(
     (order: ConditionalOrderView) => {
@@ -179,6 +188,7 @@ export function OrdersManager({ initialOrders }: { initialOrders: ConditionalOrd
                       {STATUS_LABELS[order.status] ?? order.status}
                     </span>
                     <span className="badge badge-accent">反转抄底</span>
+                    <span className="badge">{order.mode === "demo" ? "模拟账户" : "实盘账户"}</span>
                   </div>
                   <p className="meta">
                     {order.inst_id} · {order.lever}x · {order.sz} 张 · 主题 {order.theme} · 止损上限 {order.theme_stop_cap_u}U
@@ -233,6 +243,17 @@ export function OrdersManager({ initialOrders }: { initialOrders: ConditionalOrd
         <label>
           标的代码
           <input type="text" value={symbol} onChange={(event) => setSymbol(event.target.value)} placeholder="如 NVDA" required />
+        </label>
+        <label>
+          账户模式
+          {evaluatorMode ? (
+            <span className="meta"> {evaluatorMode === "demo" ? "模拟账户" : "实盘账户"}（与评估器配置一致）</span>
+          ) : (
+            <select value={mode} onChange={(event) => setMode(event.target.value)}>
+              <option value="live">实盘账户</option>
+              <option value="demo">模拟账户</option>
+            </select>
+          )}
         </label>
         <label>
           杠杆

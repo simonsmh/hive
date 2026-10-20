@@ -307,8 +307,11 @@ export function parseConditionalOrderInput(input: unknown, nowMs: number): Condi
     const o = requireObject(input, "body");
     const instId = typeof o.instId === "string" ? o.instId : "";
     if (!INST_ID.test(instId)) fail("instId must be a USDT-margined swap, e.g. NVDA-USDT-SWAP");
-    const mode = o.mode === undefined || o.mode === null ? "live" : o.mode;
-    if (mode !== "demo" && mode !== "live") fail('mode must be "demo" or "live"');
+    // Required: the evaluator only ever lists rows for its own account mode (from OKX_TRADE_DEMO,
+    // demo unless explicitly "false"), so a silently defaulted mode can strand an order in an
+    // account the evaluator never reads — or quietly turn an intended demo order into a live one.
+    const mode = o.mode;
+    if (mode !== "demo" && mode !== "live") fail('mode is required and must be "demo" or "live"');
     const template = o.template === undefined || o.template === null ? "reversal_long" : o.template;
     if (!(STRATEGY_TEMPLATES as readonly unknown[]).includes(template)) {
       fail(`template must be one of ${STRATEGY_TEMPLATES.join(", ")}`);
