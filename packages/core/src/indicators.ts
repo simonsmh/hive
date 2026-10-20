@@ -57,6 +57,22 @@ export function smaSeries(values: readonly number[], len: number): (number | nul
   return out;
 }
 
+/**
+ * SMA(fastLen) − SMA(slowLen) at each index; null until both averages exist (i.e. before index
+ * slowLen − 1 when slowLen > fastLen). Raw price units on purpose: callers normalize by an ATR
+ * series to compare spreads across symbols. Positive in an uptrend, negative in a downtrend, and
+ * near zero while the averages are tangled.
+ */
+export function maSpread(values: readonly number[], fastLen: number, slowLen: number): (number | null)[] {
+  const fast = smaSeries(values, fastLen);
+  const slow = smaSeries(values, slowLen);
+  return values.map((_, i) => {
+    const f = fast[i]!;
+    const s = slow[i]!;
+    return f === null || s === null ? null : f - s;
+  });
+}
+
 /** Highest value of the `len` values strictly before each index; null until `len` priors exist. */
 export function rollingMaxSeries(values: readonly number[], len: number): (number | null)[] {
   if (!Number.isInteger(len) || len < 1) throw new RangeError("len must be a positive integer");
@@ -120,6 +136,68 @@ export function efficiencyRatioSeries(closes: readonly number[], len: number): (
     out[i] = path === 0 ? 0 : Math.abs(closes[i]! - closes[i - len]!) / path;
   }
   return out;
+}
+
+export interface LinearRegression {
+  /** Change in value per index step (one bar), from the least-squares fit. */
+  slope: number;
+  /**
+   * Coefficient of determination of the fit: 1 is a perfect straight line. A constant series
+   * reads 0 — its slope is 0 and there is no variance for a trend to explain.
+   */
+  r2: number;
+}
+
+/**
+ * Least-squares line over `values` with x = 0..n−1. Null when fewer than 2 values exist (a single
+ * point has no slope). Raw price units: callers divide the slope by an ATR to compare across
+ * symbols and timeframes.
+ */
+export function linearRegression(values: readonly number[]): LinearRegression | null {
+  const n = values.length;
+  if (n < 2) return null;
+  const meanY = meanOf(values);
+  const meanX = (n - 1) / 2;
+  let sxy = 0;
+  let sxx = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = i - meanX;
+    sxy += dx * (values[i]! - meanY);
+    sxx += dx * dx;
+  }
+  const slope = sxy / sxx;
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dy = values[i]! - meanY;
+    const residual = dy - slope * (i - meanX);
+    ssRes += residual * residual;
+    ssTot += dy * dy;
+  }
+  const r2 = ssTot === 0 ? 0 : Math.min(1, Math.max(0, 1 - ssRes / ssTot));
+  return { slope, r2 };
+}
+
+export interface RollingRegression {
+  /** Least-squares slope of the trailing `len` values ending at each index; null before index len − 1. */
+  slope: (number | null)[];
+  /** R² of the same trailing fit at each index; null before index len − 1. */
+  r2: (number | null)[];
+}
+
+/** Rolling least-squares fit over the trailing `len` values (the window includes the bar itself). */
+export function rollingRegressionSlope(values: readonly number[], len: number): RollingRegression {
+  if (!Number.isInteger(len) || len < 2) throw new RangeError("len must be an integer of at least 2");
+  const slope: (number | null)[] = values.map(() => null);
+  const r2: (number | null)[] = values.map(() => null);
+  for (let i = len - 1; i < values.length; i += 1) {
+    const fit = linearRegression(values.slice(i - len + 1, i + 1));
+    if (fit) {
+      slope[i] = fit.slope;
+      r2[i] = fit.r2;
+    }
+  }
+  return { slope, r2 };
 }
 
 /** Mean of the non-null values in series[end-window+1 .. end]; null when the window holds none. */
