@@ -480,6 +480,18 @@ export interface TrendRuntimeState {
   /** Fill price the next add step is measured from (entry fill, then each add's fill). */
   lastAddAnchorPx: number | null;
   lastAddBarTs: number | null;
+  /**
+   * Newest protective algo id this instance placed through order-submit (amend_tpsl). The
+   * reconciler only ever cancels a leftover algo carrying this id: anything else protective on
+   * the account may belong to external exposure and must survive.
+   */
+  protectiveAlgoId: string | null;
+  /**
+   * An add accepted by order-submit whose fill has not been observed on the account yet. While
+   * set, no further add is planned and the unified stop is not advanced: committing the add
+   * before the fill is visible would leave the filled size outside the tracked protection.
+   */
+  pendingAdd: { szNum: number; barTs: number; newStopPx: number; anchorPx: number } | null;
   /** Open time of the newest bar an evaluation has consumed; minutes without a new bar are no-ops. */
   lastEvalBarTs: number | null;
   /** Comma-joined failed gate names from the last trigger check; used to log only real changes. */
@@ -497,6 +509,8 @@ export const EMPTY_TREND_STATE: TrendRuntimeState = {
   adds: 0,
   lastAddAnchorPx: null,
   lastAddBarTs: null,
+  protectiveAlgoId: null,
+  pendingAdd: null,
   lastEvalBarTs: null,
   lastChecksKey: null,
   exitReason: null,
@@ -511,6 +525,21 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
   const o = raw as Record<string, unknown>;
   const positionSz = numOrNull(o.positionSz);
   const adds = numOrNull(o.adds);
+  const protectiveAlgoId = typeof o.protectiveAlgoId === "string" && o.protectiveAlgoId !== "" ? o.protectiveAlgoId : null;
+  const pendingRaw = o.pendingAdd;
+  const pendingAdd =
+    typeof pendingRaw === "object" && pendingRaw !== null && !Array.isArray(pendingRaw)
+      ? (() => {
+          const p = pendingRaw as Record<string, unknown>;
+          const szNum = numOrNull(p.szNum);
+          const barTs = numOrNull(p.barTs);
+          const newStopPx = numOrNull(p.newStopPx);
+          const anchorPx = numOrNull(p.anchorPx);
+          return szNum !== null && szNum > 0 && barTs !== null && newStopPx !== null && anchorPx !== null
+            ? { szNum, barTs, newStopPx, anchorPx }
+            : null;
+        })()
+      : null;
   return {
     entryPx: numOrNull(o.entryPx),
     entryBarTs: numOrNull(o.entryBarTs),
@@ -521,6 +550,8 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
     adds: adds !== null && Number.isInteger(adds) && adds > 0 ? adds : 0,
     lastAddAnchorPx: numOrNull(o.lastAddAnchorPx),
     lastAddBarTs: numOrNull(o.lastAddBarTs),
+    protectiveAlgoId,
+    pendingAdd,
     lastEvalBarTs: numOrNull(o.lastEvalBarTs),
     lastChecksKey: typeof o.lastChecksKey === "string" ? o.lastChecksKey : null,
     exitReason: typeof o.exitReason === "string" ? o.exitReason : null,
@@ -697,14 +728,20 @@ export function protectiveAlgos(
  * amend_tpsl: order-submit places a fresh algo at (size, stop) and cancels the instrument's recorded
  * algos, so a single action replaces the whole set. A flat position plans a cancel of whatever
  * protective algos are left over. An already-exact set plans nothing.
+ *
+ * ignoreAlgoIds lists protective algos the caller has decided are not this strategy's to manage
+ * (e.g. another strategy's or a manual stop): they are excluded from planning so they neither
+ * trigger amend churn nor get swept, while the caller's own protection still converges.
  */
 export function planAlgoReconcile(
   desired: DesiredProtection,
   algos: readonly TrendAlgoView[],
   direction: TrendDirection,
   posSide: "net" | "long" | "short",
+  ignoreAlgoIds: readonly string[] = [],
 ): AlgoReconcileAction[] {
-  const protective = protectiveAlgos(algos, direction, posSide);
+  const ignored = new Set(ignoreAlgoIds);
+  const protective = protectiveAlgos(algos, direction, posSide).filter((algo) => !ignored.has(algo.algoId));
   if (desired.size <= 0) {
     return protective.length > 0 ? [{ kind: "cancel_algos", algoIds: protective.map((algo) => algo.algoId) }] : [];
   }

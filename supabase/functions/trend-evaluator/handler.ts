@@ -26,6 +26,7 @@ import {
   trendBarsNeeded,
   trendInitialStop,
   type TrendDirection,
+  type TrendAlgoView,
   type TrendParams,
   type TrendRuntimeState,
 } from "./core/trend.ts";
@@ -34,6 +35,8 @@ import type { Candle } from "./core/types.ts";
 export const SOURCE = "hive:trend-evaluator";
 export const INTENT_TTL_SEC = 120;
 export const ACTION_LEASE_SEC = 300;
+/** How long an accepted add may wait for its fill to appear on the account before it is given up. */
+export const PENDING_ADD_TIMEOUT_MS = 12 * 5 * 60_000;
 /** A series is stale when its newest confirmed bar is older than this many of its own intervals. */
 const MAX_BAR_AGE_INTERVALS = 3;
 /** Rejections that happened before OKX took any request. Anything else may have reached OKX and is treated as unknown. */
@@ -44,6 +47,7 @@ export type TrendAction =
   | "none"
   | "opened"
   | "added"
+  | "add_pending"
   | "exited"
   | "done"
   | "expired"
@@ -206,9 +210,14 @@ function findSidePosition(account: AccountState, instance: TrendInstanceRow): Po
 /**
  * Converges the exchange's protective algos to (totalSize at stopPx) after an action. The plan comes
  * from core; execution is: one amend_tpsl through order-submit (which replaces the instrument's
- * recorded algos), then a direct cancel of any protective leftover the amend did not own (the
- * position-manager precedent), then a fresh read whose plan must be empty. Returns the final plan
- * length (0 = converged) and human notes.
+ * recorded algos), then a direct cancel of the replaced own algo if the amend did not remove it
+ * (the position-manager precedent), then a fresh read whose plan must be empty.
+ *
+ * ownedAlgoId is the newest protective algo id this instance placed (null before the first
+ * converge). Only a leftover carrying that id is ever cancelled: any other protective algo may
+ * be guarding external exposure added after this instance opened, and deleting it would leave
+ * that exposure unprotected. Such algos are reported in externalAlgoIds and excluded from
+ * planning so they neither trigger amend churn nor get swept.
  */
 async function convergeProtection(
   instance: TrendInstanceRow,
@@ -217,13 +226,30 @@ async function convergeProtection(
   totalSize: number,
   stopPx: number,
   spec: InstrumentSpec,
-): Promise<{ converged: boolean; notes: string[] }> {
+  ownedAlgoId: string | null,
+): Promise<{ converged: boolean; notes: string[]; algoId: string | null; externalAlgoIds: string[] }> {
   const { deps } = ctx;
   const notes: string[] = [];
   const desired = { size: totalSize, stopPx, lotSz: spec.lotSz, tickSz: spec.tickSz };
+  const knownIds = new Set<string>();
+  if (ownedAlgoId) knownIds.add(ownedAlgoId);
+  // Unknown protective algos are excludable only once this instance tracks an algo id. Before
+  // the first converge we cannot tell ours from someone else's, so planning stays conservative
+  // (as before) and the sweep cancels nothing: deleting an unattributable algo could remove
+  // external protection, while the amend itself already replaces everything recorded.
+  const canDistinguish = ownedAlgoId !== null;
+  const externalIds = (algos: readonly TrendAlgoView[]): string[] =>
+    canDistinguish
+      ? protectiveAlgos(algos, instance.direction, instance.posSide)
+          .filter((algo) => !knownIds.has(algo.algoId))
+          .map((algo) => algo.algoId)
+      : [];
   let account = await deps.exchange.accountState(instance.instId);
-  let plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide);
-  if (plan.length === 0) return { converged: true, notes };
+  const ignoredNow = externalIds(account.algos);
+  if (ignoredNow.length > 0) notes.push(`external_algos_ignored:${ignoredNow.join(",")}`);
+  let plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide, ignoredNow);
+  let newAlgoId: string | null = null;
+  if (plan.length === 0) return { converged: true, notes, algoId: newAlgoId, externalAlgoIds: ignoredNow };
 
   for (const action of plan) {
     if (action.kind === "cancel_algos") {
@@ -262,24 +288,34 @@ async function convergeProtection(
       if (outcome.status !== "acked" || outcome.algoId === null) {
         notes.push(`reconcile_amend_failed:${describeOutcome(outcome)}`);
         events.push({ instanceId: instance.id, kind: "reconcile_failed", detail: { outcome: describeOutcome(outcome) } });
-        return { converged: false, notes };
+        return { converged: false, notes, algoId: newAlgoId, externalAlgoIds: externalIds(account.algos) };
       }
+      newAlgoId = outcome.algoId;
+      knownIds.add(newAlgoId);
       notes.push(`reconcile_amend:${outcome.algoId}`);
-      // The amend replaces algos recorded in the orders table; anything protective that is not the new
-      // algo (placed outside order-submit) is cancelled directly, like position-manager does.
+      // The amend replaces algos recorded in the orders table. A leftover carrying the replaced
+      // own algo id is cancelled directly (the position-manager precedent); anything else
+      // protective is left alone — it may belong to external exposure.
       const after = await deps.exchange.accountState(instance.instId);
       const leftovers = protectiveAlgos(after.algos, instance.direction, instance.posSide).filter(
         (algo) => algo.algoId !== outcome.algoId,
       );
-      if (leftovers.length > 0) {
-        await deps.exchange.cancelAlgos(leftovers.map((algo) => ({ algoId: algo.algoId, instId: instance.instId })));
-        notes.push(`cancelled_leftovers:${leftovers.map((algo) => algo.algoId).join(",")}`);
+      const ownedLeftovers = leftovers.filter((algo) => algo.algoId === ownedAlgoId);
+      const otherLeftovers = leftovers.filter((algo) => algo.algoId !== ownedAlgoId);
+      if (ownedLeftovers.length > 0) {
+        await deps.exchange.cancelAlgos(ownedLeftovers.map((algo) => ({ algoId: algo.algoId, instId: instance.instId })));
+        notes.push(`cancelled_leftovers:${ownedLeftovers.map((algo) => algo.algoId).join(",")}`);
+      }
+      if (otherLeftovers.length > 0) {
+        notes.push(
+          `${canDistinguish ? "external" : "untracked"}_algos_preserved:${otherLeftovers.map((algo) => algo.algoId).join(",")}`,
+        );
       }
     }
   }
 
   account = await deps.exchange.accountState(instance.instId);
-  plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide);
+  plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide, externalIds(account.algos));
   const converged = plan.length === 0;
   events.push({
     instanceId: instance.id,
@@ -287,7 +323,7 @@ async function convergeProtection(
     detail: { desiredSize: totalSize, desiredStop: stopPx, remainingPlan: plan },
   });
   if (!converged) notes.push("reconcile_incomplete");
-  return { converged, notes };
+  return { converged, notes, algoId: newAlgoId, externalAlgoIds: externalIds(account.algos) };
 }
 
 /**
@@ -545,40 +581,89 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       return conclude();
     }
 
-    const account = await deps.exchange.accountState(instance.instId);
-    const position = findPosition(account, instance);
-    if (!position) {
-      emit("open_unverified", { ordId: outcome.ordId });
-      await alert("trend_open_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId });
-      patch.status = "failed";
-      action = "failed";
-      notes.push("open_acked_but_no_position:check_okx");
-      return conclude();
-    }
-    const converge = await convergeProtection(instance, ctx, events, Math.abs(position.pos), stopPx, spec);
-    notes.push(...converge.notes);
+    // Ownership is recorded BEFORE any fallible verification: if the account read or the
+    // protection converge below throws, the row is already active when conclude() persists it,
+    // so the next cycle adopts the position instead of the collision guard refusing it forever.
+    // Entry price/size are provisional (the trigger close and the submitted size) until the
+    // verification below confirms them; the active branch corrects them on the next cycle.
     state = {
       ...state,
-      entryPx: position.avgPx,
+      entryPx: trigger.close,
       entryBarTs: trigger.barTs,
       entryAtr: trigger.atr,
       peakAtr: trigger.atr,
       stopPx,
-      positionSz: Math.abs(position.pos),
+      positionSz: Number(sz),
+      protectiveAlgoId: null,
+      pendingAdd: null,
       adds: 0,
-      lastAddAnchorPx: position.avgPx,
+      lastAddAnchorPx: null,
       lastAddBarTs: null,
       exitReason: null,
     };
     patch.state = state;
     patch.status = "active";
     action = "opened";
-    emit("opened", { ordId: outcome.ordId, sz, avgPx: position.avgPx, stopPx, protectionConverged: converge.converged });
-    await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: stopPx });
-    if (!converge.converged) {
-      await alert("trend_reconcile_failed", { stage: "open", stop_px: stopPx }, `open:${trigger.barTs}`);
+    emit("opened_ack", { ordId: outcome.ordId, sz, stopPx });
+
+    try {
+      const account = await deps.exchange.accountState(instance.instId);
+      const position = findPosition(account, instance);
+      if (!position) {
+        emit("open_unverified", { ordId: outcome.ordId });
+        await alert("trend_open_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId });
+        patch.status = "failed";
+        action = "failed";
+        notes.push("open_acked_but_no_position:check_okx");
+      } else {
+        const converge = await convergeProtection(
+          instance,
+          ctx,
+          events,
+          Math.abs(position.pos),
+          stopPx,
+          spec,
+          state.protectiveAlgoId,
+        );
+        notes.push(...converge.notes);
+        state = {
+          ...state,
+          entryPx: position.avgPx,
+          positionSz: Math.abs(position.pos),
+          protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
+        };
+        patch.state = state;
+        if (converge.externalAlgoIds.length > 0) {
+          await alert(
+            "trend_external_algos",
+            { algo_ids: converge.externalAlgoIds },
+            `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
+          );
+        }
+        emit("opened", {
+          ordId: outcome.ordId,
+          sz,
+          avgPx: position.avgPx,
+          stopPx,
+          protectionConverged: converge.converged,
+        });
+        await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: stopPx });
+        if (!converge.converged) {
+          await alert("trend_reconcile_failed", { stage: "open", stop_px: stopPx }, `open:${trigger.barTs}`);
+        }
+      }
+    } catch (error) {
+      // Already active (persisted by conclude below): the next cycle re-reads the account and
+      // converges protection, so a throw here degrades to a retry rather than a wedged row.
+      notes.push(`post_open_verify_threw:${describeError(error)}`);
+      events.push({
+        instanceId: instance.id,
+        kind: "reconcile_failed",
+        detail: { stage: "open", error: describeError(error) },
+      });
+      await alert("trend_reconcile_failed", { stage: "open_verify_threw" }, `open:${trigger.barTs}`);
     }
-    notes.push(`opened sz=${sz} avg=${position.avgPx} stop=${stopPx}`);
+    notes.push(`opened sz=${sz} avg=${state.entryPx} stop=${stopPx}`);
     return conclude();
   }
 
@@ -654,6 +739,82 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
   }
 
   const spec = await deps.exchange.instrumentSpec(instance.instId);
+  if (!shadow && state.pendingAdd) {
+    // A previous add was accepted but its fill had not landed yet: settle it before planning
+    // anything new, so the same add is never submitted twice and the unified stop never
+    // advances ahead of the observed fill.
+    const pending = state.pendingAdd;
+    const expected = state.positionSz + pending.szNum;
+    const fillTol = spec.lotSz / 2;
+    const pendingAccount = await deps.exchange.accountState(instance.instId);
+    const pendingPosition = findPosition(pendingAccount, instance);
+    const observed = pendingPosition ? Math.abs(pendingPosition.pos) : 0;
+    if (!pendingPosition || observed < expected - fillTol) {
+      if (lastBar.ts - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
+        // Market-order fills land within seconds; after this long the add is presumed dead.
+        // The order may still fill later — then the own-size cap treats it as external size.
+        state = { ...state, pendingAdd: null };
+        patch.state = state;
+        notes.push("add_fill_timeout:pending_cleared");
+        await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
+      } else {
+        action = "add_pending";
+        emit("add_fill_pending", { expected, observed });
+        notes.push(`add_fill_pending:expected=${expected}`);
+      }
+      return conclude();
+    }
+    const ownTotal = Math.min(observed, expected);
+    const converge = await convergeProtection(
+      instance,
+      ctx,
+      events,
+      ownTotal,
+      pending.newStopPx,
+      spec,
+      state.protectiveAlgoId,
+    );
+    notes.push(...converge.notes);
+    state = {
+      ...state,
+      entryPx:
+        ownTotal === observed
+          ? pendingPosition.avgPx
+          : (state.entryPx! * state.positionSz + pending.anchorPx * pending.szNum) / ownTotal,
+      positionSz: ownTotal,
+      protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
+      pendingAdd: null,
+      adds: state.adds + 1,
+      lastAddAnchorPx: pending.anchorPx,
+      lastAddBarTs: pending.barTs,
+      stopPx: pending.newStopPx,
+    };
+    patch.state = state;
+    if (converge.externalAlgoIds.length > 0) {
+      await alert(
+        "trend_external_algos",
+        { algo_ids: converge.externalAlgoIds },
+        `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
+      );
+    }
+    action = "added";
+    emit("added", {
+      ordId: "pending_settled",
+      sz: String(pending.szNum),
+      newStopPx: pending.newStopPx,
+      adds: state.adds,
+      protectionConverged: converge.converged,
+    });
+    await alert(
+      "trend_added",
+      { ord_id: "pending_settled", sz: String(pending.szNum), stop_px: pending.newStopPx, adds: state.adds },
+      `${pending.barTs}:${state.adds}`,
+    );
+    if (!converge.converged)
+      await alert("trend_reconcile_failed", { stage: "add", stop_px: pending.newStopPx }, `add:${pending.barTs}:${state.adds}`);
+    notes.push(`added sz=${pending.szNum} stop=${pending.newStopPx} (fill settled)`);
+    return conclude();
+  }
   if (exitDecision.atr !== null && state.stopPx !== null) {
     const plan = planTrendAdd(state, {
       direction: instance.direction,
@@ -744,22 +905,46 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       }
       // Only the size this instance owns goes on its book: its tracked size plus this add,
       // capped at what the account actually shows. Anything above that is someone else's.
-      const ownTotal = Math.min(Math.abs(position.pos), state.positionSz + plan.szNum);
-      const converge = await convergeProtection(instance, ctx, events, ownTotal, newStopPx, spec);
+      // The add is committed only once its fill is visible on the account: committing early
+      // would advance the stop and the add count while the filled size stays outside the
+      // unified protection. While pending, the next cycles settle it instead of re-submitting.
+      const expected = state.positionSz + plan.szNum;
+      const observed = Math.abs(position.pos);
+      if (observed < expected - spec.lotSz / 2) {
+        state = {
+          ...state,
+          pendingAdd: { szNum: plan.szNum, barTs: lastBar.ts, newStopPx, anchorPx: lastBar.close },
+        };
+        patch.state = state;
+        action = "add_pending";
+        emit("add_fill_pending", { ordId: outcome.ordId, expected });
+        notes.push(`add_pending_fill:${outcome.ordId}`);
+        return conclude();
+      }
+      const ownTotal = Math.min(observed, expected);
+      const converge = await convergeProtection(instance, ctx, events, ownTotal, newStopPx, spec, state.protectiveAlgoId);
       notes.push(...converge.notes);
       state = {
         ...state,
         entryPx:
-          ownTotal === Math.abs(position.pos)
+          ownTotal === observed
             ? position.avgPx
             : (state.entryPx! * state.positionSz + lastBar.close * plan.szNum) / ownTotal,
         positionSz: ownTotal,
+        protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
         adds: state.adds + 1,
         lastAddAnchorPx: lastBar.close,
         lastAddBarTs: lastBar.ts,
         stopPx: newStopPx,
       };
       patch.state = state;
+      if (converge.externalAlgoIds.length > 0) {
+        await alert(
+          "trend_external_algos",
+          { algo_ids: converge.externalAlgoIds },
+          `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
+        );
+      }
       action = "added";
       emit("added", { ordId: outcome.ordId, sz: plan.sz, newStopPx, adds: state.adds, protectionConverged: converge.converged });
       await alert("trend_added", { ord_id: outcome.ordId, sz: plan.sz, stop_px: newStopPx, adds: state.adds }, `${lastBar.ts}:${state.adds}`);
@@ -784,8 +969,25 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     if (plan.length > 0) {
       const claimed = await deps.store.claim(instance.id, ACTION_LEASE_SEC);
       if (claimed) {
-        const converge = await convergeProtection(instance, ctx, events, state.positionSz, state.stopPx, spec);
+        const converge = await convergeProtection(
+          instance,
+          ctx,
+          events,
+          state.positionSz,
+          state.stopPx,
+          spec,
+          state.protectiveAlgoId,
+        );
         notes.push(...converge.notes);
+        state = { ...state, protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId };
+        patch.state = state;
+        if (converge.externalAlgoIds.length > 0) {
+          await alert(
+            "trend_external_algos",
+            { algo_ids: converge.externalAlgoIds },
+            `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
+          );
+        }
         if (!converge.converged) await alert("trend_reconcile_failed", { stage: "drift", stop_px: state.stopPx }, `drift:${state.stopPx}`);
       } else {
         notes.push("reconcile_claimed_elsewhere");

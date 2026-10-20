@@ -74,6 +74,8 @@ Deno.test("recordEval patches only live rows and serializes the state", async ()
       adds: 0,
       lastAddAnchorPx: 109,
       lastAddBarTs: null,
+      protectiveAlgoId: null,
+      pendingAdd: null,
       lastEvalBarTs: null,
       lastChecksKey: null,
       exitReason: null,

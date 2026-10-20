@@ -507,3 +507,112 @@ Deno.test("kill switch skips the run and a wrong secret is rejected", async () =
   const denied = await handler(request("wrong-secret"));
   strictEqual(denied.status, 401);
 });
+
+Deno.test("live add stays pending until its fill is visible, then settles without resubmitting", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const activeState = {
+    entryPx: 109,
+    entryAtr: 5.5,
+    peakAtr: 5.5,
+    stopPx: 99.25,
+    positionSz: 0.01,
+    adds: 0,
+    lastAddAnchorPx: 109,
+    lastEvalBarTs: LAST_TS - BAR_MS,
+  };
+  // Cycle 1: the add is acked but the account still shows the pre-add size.
+  const state1 = newFakeState();
+  const instance1: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: activeState };
+  const preFill: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  const handler1 = makeHandler(fakeStore([instance1], { NVDA: bars }, state1), state1, ACKED, [preFill]);
+  await run(handler1);
+  strictEqual(state1.intents.length, 1);
+  strictEqual(state1.intents[0]!.action, "open");
+  const patch1 = state1.patches[0]!.patch;
+  ok(patch1.state?.pendingAdd);
+  strictEqual(patch1.state?.adds, 0);
+  strictEqual(patch1.state?.stopPx, 99.25);
+  ok(state1.events.map((event) => event.kind).includes("add_fill_pending"));
+
+  // Cycle 2: a new bar arrives and the fill is now visible — settle, don't resubmit.
+  const state2 = newFakeState();
+  const carried = { ...patch1.state, lastEvalBarTs: LAST_TS + BAR_MS };
+  const bars2 = [...bars, bar(6, 112, 115, 111, 114)];
+  const instance2: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: carried as unknown as Record<string, unknown> };
+  const filled: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+  const handler2 = makeHandler(fakeStore([instance2], { NVDA: bars2 }, state2), state2, ACKED, [filled]);
+  await run(handler2);
+  strictEqual(state2.intents.length, 0);
+  const patch2 = state2.patches[0]!.patch;
+  strictEqual(patch2.state?.pendingAdd, null);
+  strictEqual(patch2.state?.adds, 1);
+  strictEqual(patch2.state?.stopPx, 109.38);
+  strictEqual(patch2.state?.positionSz, 0.02);
+  ok(state2.events.map((event) => event.kind).includes("added"));
+});
+
+Deno.test("reconciler never cancels a protective algo it does not own", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      protectiveAlgoId: "algo-1",
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // algo-1 is ours at the unified stop; ext-1 guards someone else's exposure at another stop.
+  const account: AccountState = {
+    positions: [positionRow(0.01, 109)],
+    algos: [slAlgo("algo-1", 0.01, "99.25"), slAlgo("ext-1", 0.05, "95")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  deepStrictEqual(state.cancels, []);
+  strictEqual(state.intents.length, 0);
+  ok(state.alerts.some((alert) => alert.kind === "trend_external_algos"));
+});
+
+Deno.test("open stays recoverable when post-open verification throws", async () => {
+  const state = newFakeState();
+  let reads = 0;
+  const store = fakeStore([{ ...BASE_INSTANCE, runMode: "live" as const }], { NVDA: breakoutSeries() }, state);
+  const exchange: TrendExchange = {
+    instrumentSpec: () => Promise.resolve({ ctVal: 1, lotSz: 0.01, minSz: 0.01, tickSz: 0.01 }),
+    accountState: () => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve({ positions: [], algos: [] });
+      return Promise.reject(new Error("boom"));
+    },
+    cancelAlgos: () => Promise.resolve(),
+  };
+  const submitter: OrderSubmitter = { submit: () => Promise.resolve(ACKED) };
+  const handler = createTrendEvaluatorHandler({
+    cronSecret: CRON,
+    mode: "live",
+    liveEnabled: true,
+    dryRun: false,
+    store,
+    exchange,
+    submitter,
+    now: () => NOW,
+    newIntentId: () => "tf-test-1",
+    log: () => {},
+  });
+  const { status } = await run(handler);
+  strictEqual(status, 200);
+  const patch = state.patches[0]!.patch;
+  // Already active: the next cycle adopts the position instead of the collision guard wedging it.
+  strictEqual(patch.status, "active");
+  strictEqual(patch.state?.positionSz, 0.01);
+  ok(state.events.map((event) => event.kind).includes("opened_ack"));
+  ok(patch.lastNote.includes("post_open_verify_threw"));
+  ok(state.alerts.some((alert) => alert.kind === "trend_reconcile_failed"));
+});

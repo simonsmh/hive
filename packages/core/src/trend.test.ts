@@ -373,6 +373,21 @@ describe("planAlgoReconcile", () => {
     ]);
     expect(planAlgoReconcile({ ...desired, size: 0 }, [], "long", "net")).toEqual([]);
   });
+
+  it("excludes ignored algo ids from planning (external protection is not ours to manage)", () => {
+    // Our own algo is exact; an external algo at another stop must not trigger an amend.
+    expect(planAlgoReconcile(desired, [algo({ sz: 0.02 }), algo({ algoId: "ext", sz: 0.05, slTriggerPx: "90" })], "long", "net", ["ext"])).toEqual([]);
+    // Without the ignore list the same external algo would drive amend churn.
+    expect(planAlgoReconcile(desired, [algo({ sz: 0.02 }), algo({ algoId: "ext", sz: 0.05, slTriggerPx: "90" })], "long", "net")).toEqual([
+      { kind: "amend_tpsl", sz: "0.02", slTriggerPx: "100.00" },
+    ]);
+    // An external algo at the same stop no longer inflates coverage.
+    expect(planAlgoReconcile(desired, [algo({ sz: 0.02 }), algo({ algoId: "ext", sz: 0.05 })], "long", "net", ["ext"])).toEqual([]);
+    // Ignoring everything still plans an amend when our own protection is missing.
+    expect(planAlgoReconcile(desired, [algo({ algoId: "ext", sz: 0.02 })], "long", "net", ["ext"])).toEqual([
+      { kind: "amend_tpsl", sz: "0.02", slTriggerPx: "100.00" },
+    ]);
+  });
 });
 
 describe("state helpers", () => {
@@ -384,6 +399,18 @@ describe("state helpers", () => {
     expect(parsed.positionSz).toBe(0.02);
     expect(parsed.adds).toBe(1);
     expect(parsed.peakAtr).toBeNull();
+  });
+
+  it("parseTrendState round-trips protectiveAlgoId and pendingAdd, dropping malformed values", () => {
+    const parsed = parseTrendState({
+      protectiveAlgoId: "algo-1",
+      pendingAdd: { szNum: 0.01, barTs: 123, newStopPx: 99, anchorPx: 101 },
+    });
+    expect(parsed.protectiveAlgoId).toBe("algo-1");
+    expect(parsed.pendingAdd).toEqual({ szNum: 0.01, barTs: 123, newStopPx: 99, anchorPx: 101 });
+    expect(parseTrendState({ protectiveAlgoId: 42 }).protectiveAlgoId).toBeNull();
+    expect(parseTrendState({ pendingAdd: { szNum: 0.01 } }).pendingAdd).toBeNull();
+    expect(parseTrendState({ pendingAdd: "x" }).pendingAdd).toBeNull();
   });
 
   it("nextPeakAtr only grows", () => {
