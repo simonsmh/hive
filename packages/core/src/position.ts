@@ -238,6 +238,29 @@ export interface ReduceIntentInput {
   ttlSec: number;
 }
 
+export type CloseIntentInput = ReduceIntentInput;
+
+/** okx.intent.v1 close: market, reduce-only, on the closing side, sized to the full position. */
+export function closeIntent(input: CloseIntentInput): Record<string, unknown> {
+  return {
+    schema: "okx.intent.v1",
+    intentId: input.intentId,
+    idempotencyKey: input.idempotencyKey,
+    action: "close",
+    instId: input.instId,
+    side: closingSide(input.direction),
+    posSide: input.posSide,
+    tdMode: input.tdMode,
+    sz: input.sz,
+    ordType: "market",
+    reduceOnly: true,
+    reason: input.reason,
+    source: input.source,
+    createdAt: input.createdAt,
+    ttlSec: input.ttlSec,
+  };
+}
+
 /** okx.intent.v1 reduce: market, reduce-only, on the closing side. */
 export function reduceIntent(input: ReduceIntentInput): Record<string, unknown> {
   return {
