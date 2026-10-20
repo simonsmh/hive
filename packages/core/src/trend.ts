@@ -272,15 +272,22 @@ export function checkVolume(
   return { pass: meanPrior > 0 && last.volume >= params.volumeMultiple * meanPrior, volume: last.volume, meanPrior };
 }
 
-/** How many peer series break out in the strategy's direction on their own latest bar. */
+/**
+ * How many peer series break out in the strategy's direction on their own latest bar. A peer only
+ * confirms when its newest bar is the primary series' newest bar (`asOfTs`): a peer whose feed has
+ * stalled still has a "latest" bar, and an hours-old breakout must not satisfy a live entry gate.
+ */
 export function countPeerConfirmations(
   peerBars: readonly (readonly Candle[])[],
   direction: TrendDirection,
   params: Pick<TrendParams, "donchianLen">,
+  asOfTs: number | null,
 ): number {
   let count = 0;
   for (const series of peerBars) {
-    if (series.length > 0 && checkBreakout(series, direction, params).pass) count += 1;
+    const last = series[series.length - 1];
+    if (!last || asOfTs === null || last.ts !== asOfTs) continue;
+    if (checkBreakout(series, direction, params).pass) count += 1;
   }
   return count;
 }
@@ -340,7 +347,7 @@ export function evaluateTrendTrigger(
   const triggerBar = checkTriggerBar(bars, atr, direction, params);
   const breakout = checkBreakout(bars, direction, params);
   const volume = checkVolume(bars, params);
-  const peerCount = countPeerConfirmations(peerBars, direction, params);
+  const peerCount = countPeerConfirmations(peerBars, direction, params, bars[bars.length - 1]?.ts ?? null);
   const peers = { count: peerCount, required: params.peerMinCount, pass: peerCount >= params.peerMinCount };
   const regime = checkTrendRegime(bars, params);
 
@@ -396,6 +403,19 @@ function stepDecimals(step: number): number {
 function roundToStep(value: number, step: number): number {
   const ticks = Math.round(value / step);
   return Number((ticks * step).toFixed(stepDecimals(step)));
+}
+
+/**
+ * Rounds a protective stop onto the tick grid in the position's favour — up for a long, down for
+ * a short — never away from it. Nearest-tick rounding can move a stop a half-tick against the
+ * position, which silently widens the loss a plan was verified against; directional rounding
+ * guarantees the submitted stop's worst-case loss is at most the verified one.
+ */
+export function roundTrendStop(direction: TrendDirection, px: number, tickSz: number): number {
+  if (!(tickSz > 0) || !Number.isFinite(px)) return px;
+  const ticks = px / tickSz;
+  const whole = direction === "long" ? Math.ceil(ticks - 1e-9) : Math.floor(ticks + 1e-9);
+  return Number((whole * tickSz).toFixed(stepDecimals(tickSz)));
 }
 
 function formatStep(value: number, step: number): string {
@@ -730,8 +750,11 @@ export function parseTrendStrategyInput(input: unknown, nowMs: number): TrendStr
     const o = requireObject(input, "body");
     const instId = typeof o.instId === "string" ? o.instId : "";
     if (!INST_ID.test(instId)) fail("instId must be a USDT-margined swap, e.g. NVDA-USDT-SWAP");
-    const mode = o.mode === undefined || o.mode === null ? "live" : o.mode;
-    if (mode !== "demo" && mode !== "live") fail('mode must be "demo" or "live"');
+    // Required, like runMode: the evaluator only ever lists rows for its own account mode (from
+    // OKX_TRADE_DEMO), so a silently defaulted mode can strand a dashboard-created instance in an
+    // account the evaluator never reads — armed forever, with nothing evaluating it.
+    const mode = o.mode;
+    if (mode !== "demo" && mode !== "live") fail('mode is required and must be "demo" or "live"');
     if (o.runMode !== "shadow" && o.runMode !== "live") {
       fail('runMode is required and must be "shadow" or "live"');
     }

@@ -17,6 +17,7 @@ import {
   parseTrendStrategyInput,
   planAlgoReconcile,
   planTrendAdd,
+  roundTrendStop,
   trendBarsNeeded,
   trendInitialStop,
   worstCaseLossU,
@@ -127,8 +128,47 @@ describe("checkVolume", () => {
 describe("countPeerConfirmations", () => {
   it("counts only peers breaking out in the direction", () => {
     const flat = [bar(0, 100, 101, 99, 100), bar(1, 100, 101, 99, 100), bar(2, 100, 101, 99, 100), bar(3, 100, 101, 99, 100.2)];
-    expect(countPeerConfirmations([breakoutSeries(), flat], "long", { donchianLen: 3 })).toBe(1);
-    expect(countPeerConfirmations([breakoutSeries(), flat], "short", { donchianLen: 3 })).toBe(0);
+    expect(countPeerConfirmations([breakoutSeries(), flat], "long", { donchianLen: 3 }, 4)).toBe(1);
+    expect(countPeerConfirmations([breakoutSeries(), flat], "short", { donchianLen: 3 }, 4)).toBe(0);
+  });
+
+  it("does not count a peer whose newest bar is stale relative to the primary bar", () => {
+    // The same breakout shape, but the peer's feed stalled one bar ago: its latest bar is ts 3
+    // while the primary series is deciding on ts 4. The old breakout must not confirm anything.
+    const stalled = [
+      bar(0, 100, 101, 99, 100),
+      bar(1, 100, 101, 99, 100.5),
+      bar(2, 100.5, 101.5, 99.5, 101),
+      bar(3, 101, 110, 100, 109),
+    ];
+    expect(countPeerConfirmations([stalled], "long", { donchianLen: 3 }, 4)).toBe(0);
+    expect(countPeerConfirmations([stalled], "long", { donchianLen: 3 }, 3)).toBe(1);
+    expect(countPeerConfirmations([breakoutSeries()], "long", { donchianLen: 3 }, null)).toBe(0);
+  });
+});
+
+describe("roundTrendStop", () => {
+  it("rounds toward the position, never away from it", () => {
+    expect(roundTrendStop("long", 109.385, 0.01)).toBe(109.39);
+    expect(roundTrendStop("short", 109.385, 0.01)).toBe(109.38);
+    expect(roundTrendStop("long", 109.38, 0.05)).toBe(109.4);
+    expect(roundTrendStop("short", 109.38, 0.05)).toBe(109.35);
+  });
+
+  it("leaves an on-tick stop untouched", () => {
+    expect(roundTrendStop("long", 109.38, 0.01)).toBe(109.38);
+    expect(roundTrendStop("short", 109.38, 0.01)).toBe(109.38);
+  });
+
+  it("never widens the worst-case loss a plan was verified against", () => {
+    const longStop = 109.385;
+    expect(worstCaseLossU("long", 2, 111, roundTrendStop("long", longStop, 0.01), 1)).toBeLessThanOrEqual(
+      worstCaseLossU("long", 2, 111, longStop, 1),
+    );
+    const shortStop = 110.615;
+    expect(worstCaseLossU("short", 2, 108, roundTrendStop("short", shortStop, 0.01), 1)).toBeLessThanOrEqual(
+      worstCaseLossU("short", 2, 108, shortStop, 1),
+    );
   });
 });
 
@@ -370,6 +410,7 @@ describe("parseTrendParams", () => {
 describe("parseTrendStrategyInput", () => {
   const NOW = Date.parse("2026-10-20T12:00:00.000Z");
   const body = {
+    mode: "live",
     runMode: "shadow",
     instId: "NVDA-USDT-SWAP",
     direction: "long",
@@ -396,6 +437,13 @@ describe("parseTrendStrategyInput", () => {
     const parsed = parseTrendStrategyInput(without, NOW);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.error).toMatch(/runMode/);
+  });
+
+  it("requires mode to be explicit, so an instance cannot land in an account the evaluator never reads", () => {
+    const { mode: _dropped, ...without } = body;
+    const parsed = parseTrendStrategyInput(without, NOW);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toMatch(/mode/);
   });
 
   it("rejects a theme cap above the platform maximum and self-peering", () => {
