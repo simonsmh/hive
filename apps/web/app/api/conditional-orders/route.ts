@@ -1,6 +1,7 @@
 import { parseConditionalOrderInput } from "@hive/core";
 import { authorize, handle, jsonResponse, readJsonBody } from "../../../lib/api";
 import { cancelOrder, createOrder, listOrderViews } from "@/src/modules/orders/query";
+import { evaluatorAccountMode } from "@/src/modules/evaluator-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +27,18 @@ export async function POST(request: Request): Promise<Response> {
 
     const parsed = parseConditionalOrderInput(await readJsonBody(request), Date.now());
     if (!parsed.ok) return jsonResponse({ error: parsed.error }, 400);
+
+    // The evaluator only ever evaluates rows in its own account mode: a mismatched mode would
+    // sit armed forever (and could unexpectedly activate if the deployment mode ever flips).
+    const evaluatorMode = await evaluatorAccountMode();
+    if (evaluatorMode !== null && parsed.value.mode !== evaluatorMode) {
+      return jsonResponse(
+        {
+          error: `mode "${parsed.value.mode}" does not match the evaluator's configured account mode "${evaluatorMode}"; the order would never be evaluated`,
+        },
+        400,
+      );
+    }
 
     return jsonResponse({ order: await createOrder(parsed.value) }, 201);
   });
