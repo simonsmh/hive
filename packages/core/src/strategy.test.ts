@@ -201,6 +201,7 @@ describe("invalidation and stop level", () => {
 describe("parseConditionalOrderInput", () => {
   const now = Date.parse("2026-10-18T00:00:00Z");
   const base = {
+    mode: "live",
     instId: "NVDA-USDT-SWAP",
     lever: 3,
     sz: "0.01",
@@ -218,6 +219,23 @@ describe("parseConditionalOrderInput", () => {
     expect(parsed.value.tdMode).toBe("isolated");
     expect(parsed.value.expiresAt).toBe("2026-11-01T00:00:00.000Z");
     expect(parsed.value.params).toEqual(DEFAULT_REVERSAL_PARAMS);
+  });
+
+  it("requires an explicit mode instead of silently defaulting to live", () => {
+    const { mode: _mode, ...withoutMode } = base;
+    expect(parseConditionalOrderInput(withoutMode, now)).toEqual({
+      ok: false,
+      error: expect.stringContaining("mode is required"),
+    });
+    expect(parseConditionalOrderInput({ ...base, mode: null }, now).ok).toBe(false);
+    expect(parseConditionalOrderInput({ ...base, mode: "paper" }, now).ok).toBe(false);
+  });
+
+  it("accepts an explicit demo order", () => {
+    const parsed = parseConditionalOrderInput({ ...base, mode: "demo" }, now);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.mode).toBe("demo");
   });
 
   it("rejects bad instruments, oversized stop caps and past expiries", () => {
