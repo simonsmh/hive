@@ -987,6 +987,138 @@ Deno.test("a timed-out pending add with no fill is still cleared without touchin
   ok(patch.lastNote.includes("add_fill_timeout:pending_cleared"));
 });
 
+Deno.test("expiry settles an observed partial add instead of dropping it", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    expiresAtMs: NOW - 1_000,
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      // An accepted 0.02 add, only 0.01 landed, expiry hits before the fill timeout.
+      pendingAdd: { szNum: 0.02, barTs: LAST_TS - BAR_MS, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const partial: AccountState = {
+    positions: [positionRow(0.02, 110)],
+    algos: [slAlgo("algo-2", 0.02, "109.38")],
+  };
+  const flat: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [
+    partial,
+    partial,
+    partial,
+    flat,
+  ]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "expired");
+  // The partial delta is adopted into the book (not dropped): the close covers the
+  // settled 0.02, and the settled add is recorded.
+  strictEqual(patch.state?.pendingAdd, null);
+  strictEqual(patch.state?.adds, 1);
+  strictEqual(patch.state?.positionSz, 0);
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.02");
+  ok(patch.lastNote.includes("add_partial_fill"));
+});
+
+Deno.test("an exit fires while an add is pending: the visible exposure is closed", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 10,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      // The add's fill is not visible yet (within the timeout): the exit must not wait.
+      pendingAdd: { szNum: 0.01, barTs: LAST_TS - BAR_MS, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const noFill: AccountState = {
+    positions: [positionRow(0.01, 109)],
+    algos: [slAlgo("algo-2", 0.01, "99.25")],
+  };
+  const flat: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [
+    noFill,
+    noFill,
+    noFill,
+    flat,
+  ]);
+  await run(handler);
+  // Only the exit close is submitted, sized to the visible 0.01 — not blocked by the pending add.
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.01");
+  const kinds = state.events.map((event) => event.kind);
+  ok(kinds.includes("exit_triggered"));
+  ok(kinds.includes("exit_with_pending_add"));
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "done");
+  strictEqual(patch.state?.pendingAdd, null);
+  strictEqual(patch.state?.exitReason, "atr_decay");
+  ok(state.alerts.some((a) => a.kind === "trend_add_failed" && a.payload.outcome === "exit_with_pending_add"));
+});
+
+Deno.test("an adverse add fill tightens the unified stop to respect the theme cap", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const before: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  // The add fills 2 points above the decision close: (115 - 109.38) * 0.02 = 0.1124 > 0.1 cap.
+  const adverse: AccountState = { positions: [positionRow(0.02, 115)], algos: [slAlgo("algo-2", 0.02, "110")] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: bars }, state), state, ACKED, [
+    before,
+    adverse,
+    adverse,
+    adverse,
+  ]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.adds, 1);
+  strictEqual(patch.state?.positionSz, 0.02);
+  // Tightened to the cap-implied level: 115 - 0.1 / 0.02 = 110 (was 109.38).
+  strictEqual(patch.state?.stopPx, 110);
+  ok(state.events.map((event) => event.kind).includes("add_stop_tightened"));
+  ok(state.alerts.some((a) => a.kind === "trend_add_stop_tightened"));
+  ok(patch.lastNote.includes("add_stop_tightened"));
+});
+
 Deno.test("live open verification persists the executed initial unit size", async () => {
   const state = newFakeState();
   // Configured firstSz is 0.10 but risk sizing executes 0.01: the persisted unit is the

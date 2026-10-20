@@ -21,6 +21,7 @@ import {
   planAlgoReconcile,
   planTrendAdd,
   protectiveAlgos,
+  revalidateAddStop,
   roundTrendStop,
   TREND_BAR_MS,
   trendBarsNeeded,
@@ -383,19 +384,24 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
    * includes the add, "waiting" while the fill is not visible yet, and "timeout_cleared"
    * when the add is presumed dead and dropped. Terminal paths (exit, expiry) call this
    * BEFORE closing out, so a just-filled add is never left out of the closing size.
+   * With `terminal: true` the settle never waits: a terminal path cannot defer to the
+   * fill-timeout, so an observed partial delta is settled immediately and a fill that
+   * never appeared drops the marker at once.
    */
   const settlePendingAdd = async (
     nowBarTs: number,
     spec: InstrumentSpec,
+    opts?: { terminal?: boolean },
   ): Promise<"settled" | "waiting" | "timeout_cleared"> => {
     const pending = state.pendingAdd!;
     const expected = state.positionSz + pending.szNum;
     const fillTol = spec.lotSz / 2;
+    const terminal = opts?.terminal === true;
     const pendingAccount = await deps.exchange.accountState(instance.instId);
     const pendingPosition = findPosition(pendingAccount, instance);
     const observed = pendingPosition ? Math.abs(pendingPosition.pos) : 0;
     if (!pendingPosition || observed < expected - fillTol) {
-      if (nowBarTs - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
+      if (terminal || nowBarTs - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
         const fillDelta = observed - state.positionSz;
         if (pendingPosition !== null && fillDelta > fillTol) {
           // A partial fill landed but the remainder never did (canceled or rejected after a
@@ -408,8 +414,12 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
           state = { ...state, pendingAdd: null };
           patch.state = state;
           dirty = true;
-          notes.push("add_fill_timeout:pending_cleared");
-          await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
+          notes.push(terminal ? "terminal_cleared_pending_add" : "add_fill_timeout:pending_cleared");
+          await alert(
+            "trend_add_failed",
+            { outcome: terminal ? "terminal_cleared_pending_add" : "add_fill_timeout" },
+            `${pending.barTs}:${state.adds}`,
+          );
           return "timeout_cleared";
         }
       } else {
@@ -422,29 +432,61 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     const ownTotal = Math.min(observed, expected);
     // The settled size can be smaller than the requested add size on a partial fill.
     const settledSz = ownTotal - state.positionSz;
+    const settledEntryPx =
+      ownTotal === observed
+        ? pendingPosition.avgPx
+        : (state.entryPx! * state.positionSz + pending.anchorPx * pending.szNum) / ownTotal;
+    // The fill can land away from the anchor the plan was sized from (and the order gateway
+    // only checked the new order's own loss): revalidate the whole-position loss at the
+    // unified stop against the observed fill, tightening the stop if the theme cap would
+    // otherwise be breached.
+    const revalidated = revalidateAddStop(
+      instance.direction,
+      ownTotal,
+      settledEntryPx,
+      pending.newStopPx,
+      state.stopPx ?? pending.newStopPx,
+      instance.themeStopCapU,
+      spec.ctVal,
+    );
+    const finalStopPx = roundTrendStop(instance.direction, revalidated.stopPx, spec.tickSz);
+    if (revalidated.tightened) {
+      emit("add_stop_tightened", {
+        plannedStopPx: pending.newStopPx,
+        finalStopPx,
+        aggregateLossU: round4(revalidated.aggregateLossU),
+      });
+      await alert(
+        "trend_add_stop_tightened",
+        {
+          planned_stop_px: pending.newStopPx,
+          final_stop_px: finalStopPx,
+          aggregate_loss_u: round4(revalidated.aggregateLossU),
+        },
+        `${pending.barTs}:${state.adds}`,
+      );
+      notes.push(`add_stop_tightened:${pending.newStopPx}->${finalStopPx}`);
+    }
     const converge = await convergeProtection(
       instance,
       ctx,
       events,
       ownTotal,
-      pending.newStopPx,
+      finalStopPx,
       spec,
       state.protectiveAlgoId,
     );
     notes.push(...converge.notes);
     state = {
       ...state,
-      entryPx:
-        ownTotal === observed
-          ? pendingPosition.avgPx
-          : (state.entryPx! * state.positionSz + pending.anchorPx * pending.szNum) / ownTotal,
+      entryPx: settledEntryPx,
       positionSz: ownTotal,
       protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
       pendingAdd: null,
       adds: state.adds + 1,
       lastAddAnchorPx: pending.anchorPx,
       lastAddBarTs: pending.barTs,
-      stopPx: pending.newStopPx,
+      stopPx: finalStopPx,
     };
     patch.state = state;
     if (converge.externalAlgoIds.length > 0) {
@@ -458,13 +500,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     emit("added", {
       ordId: "pending_settled",
       sz: String(settledSz),
-      newStopPx: pending.newStopPx,
+      newStopPx: finalStopPx,
       adds: state.adds,
       protectionConverged: converge.converged,
     });
     await alert(
       "trend_added",
-      { ord_id: "pending_settled", sz: String(settledSz), stop_px: pending.newStopPx, adds: state.adds },
+      { ord_id: "pending_settled", sz: String(settledSz), stop_px: finalStopPx, adds: state.adds },
       `${pending.barTs}:${state.adds}`,
     );
     if (!converge.converged)
@@ -499,19 +541,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       })();
     if (instance.status === "active" && (shadow ? state.positionSz > 0 : true)) {
       if (!shadow && state.pendingAdd) {
-        // Settle a pending add before the terminal close, so a just-filled add is included
-        // in the closing size instead of being left open after the instance expires.
-        const pendingBarTs = state.pendingAdd.barTs;
+        // Settle a pending add before the terminal close, so a just-filled (or partially
+        // filled) add is included in the closing size instead of being left open after the
+        // instance expires. Terminal settle never waits: an observed partial delta is
+        // settled into the book, and a fill that never appeared drops the marker at once —
+        // a remainder that fills later becomes external size.
         const spec = await deps.exchange.instrumentSpec(instance.instId);
-        const settled = await settlePendingAdd(closeBar.ts, spec);
-        if (settled === "waiting") {
-          // Expiry cannot wait for the fill: drop the marker and close what is on the book.
-          state = { ...state, pendingAdd: null };
-          patch.state = state;
-          dirty = true;
-          notes.push("expiry_cleared_pending_add");
-          await alert("trend_add_failed", { outcome: "expiry_cleared_pending_add" }, `${pendingBarTs}:${state.adds}`);
-        }
+        await settlePendingAdd(closeBar.ts, spec, { terminal: true });
       }
       const closed = await closeOut(instance, ctx, {
         shadow,
@@ -887,10 +923,18 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
   const spec = await deps.exchange.instrumentSpec(instance.instId);
   // A pending add settles BEFORE the exit decision: if its fill landed, the exit's closing
   // size must include it — evaluating (or executing) the exit first would leave the
-  // just-filled add open after the strategy is marked done.
+  // just-filled add open after the strategy is marked done. While the fill is not visible
+  // yet ("waiting"), the exit is still evaluated against the visible exposure: a pending
+  // add must not suppress a valid exit signal for up to the fill-timeout window. A
+  // triggered exit then drops the pending marker — a late fill, if any, becomes external
+  // size, same as the fill-timeout path. A timed-out add ("timeout_cleared") keeps the
+  // historical behavior of concluding immediately: the add is presumed dead and the next
+  // bar re-plans from a clean book.
+  let pendingAddWaiting = false;
   if (!shadow && state.pendingAdd) {
     const settled = await settlePendingAdd(lastBar.ts, spec);
-    if (settled !== "settled") return conclude();
+    if (settled === "timeout_cleared") return conclude();
+    pendingAddWaiting = settled === "waiting";
   }
 
   const exitDecision = evaluateTrendExit(bars, state, params, instance.direction);
@@ -905,6 +949,23 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       ma: exitDecision.ma,
       close: exitDecision.close,
     });
+    if (pendingAddWaiting && state.pendingAdd) {
+      // The exit fires while the add's fill is still invisible: close the exposure that is
+      // visible and drop the pending marker. The add order itself cannot be cancelled from
+      // here (no order id is tracked and the exchange surface only cancels algos); a late
+      // fill, if any, becomes external size, same as the fill-timeout path.
+      const dropped = state.pendingAdd;
+      state = { ...state, pendingAdd: null };
+      patch.state = state;
+      dirty = true;
+      emit("exit_with_pending_add", { pendingSz: dropped.szNum, pendingBarTs: dropped.barTs });
+      await alert(
+        "trend_add_failed",
+        { outcome: "exit_with_pending_add", pending_sz: dropped.szNum, pending_bar_ts: dropped.barTs },
+        `${dropped.barTs}:${state.adds}`,
+      );
+      notes.push(`exit_with_pending_add:sz=${dropped.szNum}:marker_dropped`);
+    }
     const closed = await closeOut(instance, ctx, {
       shadow,
       state,
@@ -1054,20 +1115,53 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         return conclude();
       }
       const ownTotal = Math.min(observed, expected);
-      const converge = await convergeProtection(instance, ctx, events, ownTotal, newStopPx, spec, state.protectiveAlgoId);
+      const newEntryPx =
+        ownTotal === observed
+          ? position.avgPx
+          : (state.entryPx! * state.positionSz + lastBar.close * plan.szNum) / ownTotal;
+      // planTrendAdd sized the add and the unified stop from this bar's close, but the fill
+      // can land away from it during the submit-to-fill delay (and the order gateway only
+      // checked the new order's own loss): revalidate the whole-position loss at the unified
+      // stop against the observed fill, tightening the stop if the theme cap would be
+      // breached.
+      const revalidated = revalidateAddStop(
+        instance.direction,
+        ownTotal,
+        newEntryPx,
+        newStopPx,
+        state.stopPx ?? newStopPx,
+        instance.themeStopCapU,
+        spec.ctVal,
+      );
+      const finalStopPx = roundTrendStop(instance.direction, revalidated.stopPx, spec.tickSz);
+      if (revalidated.tightened) {
+        emit("add_stop_tightened", {
+          plannedStopPx: newStopPx,
+          finalStopPx,
+          aggregateLossU: round4(revalidated.aggregateLossU),
+        });
+        await alert(
+          "trend_add_stop_tightened",
+          {
+            planned_stop_px: newStopPx,
+            final_stop_px: finalStopPx,
+            aggregate_loss_u: round4(revalidated.aggregateLossU),
+          },
+          `${lastBar.ts}:${state.adds}`,
+        );
+        notes.push(`add_stop_tightened:${newStopPx}->${finalStopPx}`);
+      }
+      const converge = await convergeProtection(instance, ctx, events, ownTotal, finalStopPx, spec, state.protectiveAlgoId);
       notes.push(...converge.notes);
       state = {
         ...state,
-        entryPx:
-          ownTotal === observed
-            ? position.avgPx
-            : (state.entryPx! * state.positionSz + lastBar.close * plan.szNum) / ownTotal,
+        entryPx: newEntryPx,
         positionSz: ownTotal,
         protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
         adds: state.adds + 1,
         lastAddAnchorPx: lastBar.close,
         lastAddBarTs: lastBar.ts,
-        stopPx: newStopPx,
+        stopPx: finalStopPx,
       };
       patch.state = state;
       if (converge.externalAlgoIds.length > 0) {
@@ -1078,10 +1172,10 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         );
       }
       action = "added";
-      emit("added", { ordId: outcome.ordId, sz: plan.sz, newStopPx, adds: state.adds, protectionConverged: converge.converged });
-      await alert("trend_added", { ord_id: outcome.ordId, sz: plan.sz, stop_px: newStopPx, adds: state.adds }, `${lastBar.ts}:${state.adds}`);
-      if (!converge.converged) await alert("trend_reconcile_failed", { stage: "add", stop_px: newStopPx }, `add:${lastBar.ts}:${state.adds}`);
-      notes.push(`added sz=${plan.sz} stop=${newStopPx}`);
+      emit("added", { ordId: outcome.ordId, sz: plan.sz, newStopPx: finalStopPx, adds: state.adds, protectionConverged: converge.converged });
+      await alert("trend_added", { ord_id: outcome.ordId, sz: plan.sz, stop_px: finalStopPx, adds: state.adds }, `${lastBar.ts}:${state.adds}`);
+      if (!converge.converged) await alert("trend_reconcile_failed", { stage: "add", stop_px: finalStopPx }, `add:${lastBar.ts}:${state.adds}`);
+      notes.push(`added sz=${plan.sz} stop=${finalStopPx}`);
       return conclude();
     }
     if (plan.reason === "risk_cap") {

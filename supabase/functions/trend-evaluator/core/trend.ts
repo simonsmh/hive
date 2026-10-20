@@ -460,6 +460,50 @@ export function worstCaseLossU(
   return Math.max(0, -pnlPerUnit * totalSz * ctVal);
 }
 
+export interface RevalidatedAddStop {
+  /** The stop to protect at: the planned stop, tightened only if the cap demands it. */
+  stopPx: number;
+  /** True when the observed fill breached the cap and the stop was tightened. */
+  tightened: boolean;
+  /** Whole-position worst-case loss at the planned stop, from the observed fill. */
+  aggregateLossU: number;
+}
+
+/**
+ * Revalidates the unified stop against the OBSERVED add fill before the add is accepted.
+ *
+ * planTrendAdd sized the add and the unified stop from the decision bar's close, but the fill
+ * can land away from it during the submit-to-fill delay — and the order gateway only checked
+ * the new order's own loss, never the existing-plus-added aggregate. Recompute the
+ * whole-position worst-case loss from the observed average entry: when it still respects the
+ * theme cap the planned stop stands; otherwise the stop is tightened to the cap-implied level
+ * (never worse than the current stop) so the risk invariant holds for the size on the book.
+ */
+export function revalidateAddStop(
+  direction: TrendDirection,
+  ownTotalSz: number,
+  observedAvgPx: number,
+  plannedStopPx: number,
+  currentStopPx: number,
+  themeStopCapU: number,
+  ctVal: number,
+): RevalidatedAddStop {
+  const aggregateLossU = worstCaseLossU(direction, ownTotalSz, observedAvgPx, plannedStopPx, ctVal);
+  if (!(aggregateLossU > themeStopCapU)) {
+    return { stopPx: plannedStopPx, tightened: false, aggregateLossU };
+  }
+  const sign = dirSign(direction);
+  const divisor = ownTotalSz * ctVal;
+  // Solve worstCaseLossU == cap for the stop: |avgPx - stopPx| * totalSz * ctVal = cap.
+  const capImplied =
+    divisor > 0 ? observedAvgPx - sign * (themeStopCapU / divisor) : plannedStopPx;
+  const tightened =
+    direction === "long"
+      ? Math.max(plannedStopPx, capImplied, currentStopPx)
+      : Math.min(plannedStopPx, capImplied, currentStopPx);
+  return { stopPx: tightened, tightened: true, aggregateLossU };
+}
+
 // ---------------------------------------------------------------------------
 // Runtime state: the strategy's memory between evaluations, stored as jsonb.
 // parseTrendState is a tolerant reader — a corrupt or older state degrades to

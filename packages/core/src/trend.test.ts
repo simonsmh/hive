@@ -17,6 +17,7 @@ import {
   parseTrendStrategyInput,
   planAlgoReconcile,
   planTrendAdd,
+  revalidateAddStop,
   roundTrendStop,
   trendBarsNeeded,
   trendInitialStop,
@@ -230,6 +231,44 @@ describe("worstCaseLossU", () => {
     expect(worstCaseLossU("long", 0.02, 105, 99.25, 1)).toBeCloseTo(0.115);
     expect(worstCaseLossU("long", 0.02, 105, 110, 1)).toBe(0);
     expect(worstCaseLossU("short", 0.02, 95, 100.75, 1)).toBeCloseTo(0.115);
+  });
+});
+
+describe("revalidateAddStop", () => {
+  it("keeps the planned stop when the observed fill respects the cap", () => {
+    const r = revalidateAddStop("long", 0.03, 100, 98, 97, 0.1, 1);
+    expect(r.tightened).toBe(false);
+    expect(r.stopPx).toBe(98);
+    expect(r.aggregateLossU).toBeCloseTo(0.06);
+  });
+
+  it("tightens a long stop to the cap-implied level on an adverse fill", () => {
+    const r = revalidateAddStop("long", 0.03, 102, 98, 97, 0.1, 1);
+    expect(r.tightened).toBe(true);
+    expect(r.stopPx).toBeCloseTo(98.6667, 4);
+    // The tightened stop restores the invariant exactly.
+    expect(worstCaseLossU("long", 0.03, 102, r.stopPx, 1)).toBeLessThanOrEqual(0.1 + 1e-9);
+  });
+
+  it("tightens a short stop to the cap-implied level on an adverse fill", () => {
+    const r = revalidateAddStop("short", 0.03, 98, 102, 103, 0.1, 1);
+    expect(r.tightened).toBe(true);
+    expect(r.stopPx).toBeCloseTo(101.3333, 4);
+    expect(worstCaseLossU("short", 0.03, 98, r.stopPx, 1)).toBeLessThanOrEqual(0.1 + 1e-9);
+  });
+
+  it("never moves the stop against the current stop", () => {
+    // Defensive path: current stop tighter than planned; the clamp keeps it.
+    const r = revalidateAddStop("long", 0.03, 100, 98, 99.5, 0.05, 1);
+    expect(r.tightened).toBe(true);
+    expect(r.stopPx).toBe(99.5);
+  });
+
+  it("does not tighten when the aggregate loss is exactly at the cap", () => {
+    const r = revalidateAddStop("long", 0.1, 100, 99, 98, 0.1, 1);
+    expect(r.aggregateLossU).toBe(0.1);
+    expect(r.tightened).toBe(false);
+    expect(r.stopPx).toBe(99);
   });
 });
 
