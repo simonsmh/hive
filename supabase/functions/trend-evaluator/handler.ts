@@ -21,6 +21,7 @@ import {
   planAlgoReconcile,
   planTrendAdd,
   protectiveAlgos,
+  roundTrendStop,
   TREND_BAR_MS,
   trendBarsNeeded,
   trendInitialStop,
@@ -190,6 +191,19 @@ function findPosition(account: AccountState, instance: TrendInstanceRow): Positi
 }
 
 /**
+ * Any position row on the instance's side, whatever its direction. The account aggregates every
+ * same-instrument exposure into that one row, so any non-zero value — a manual position, another
+ * strategy's — is exposure this instance does not own.
+ */
+function findSidePosition(account: AccountState, instance: TrendInstanceRow): PositionRow | null {
+  const row = account.positions.find((candidate) =>
+    instance.posSide === "net" ? candidate.posSide === "net" : candidate.posSide === instance.posSide,
+  );
+  if (!row || row.pos === 0 || !Number.isFinite(row.pos)) return null;
+  return row;
+}
+
+/**
  * Converges the exchange's protective algos to (totalSize at stopPx) after an action. The plan comes
  * from core; execution is: one amend_tpsl through order-submit (which replaces the instrument's
  * recorded algos), then a direct cancel of any protective leftover the amend did not own (the
@@ -310,11 +324,14 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     events.push({ instanceId: instance.id, kind, detail });
     dirty = true;
   };
-  const alert = async (kind: string, payload: Record<string, unknown>): Promise<void> => {
+  const alert = async (kind: string, payload: Record<string, unknown>, occurrence?: string): Promise<void> => {
     if (deps.dryRun) return;
     await deps.store
       .insertAlert({
-        dedup_key: `trend:${instance.id}:${kind}`,
+        // Kinds that can happen more than once per instance (adds, close/reconcile failures)
+        // pass an occurrence discriminator: with a per-kind key alone, insertAlert's
+        // ignore-duplicates would fan out only the first occurrence and swallow the rest.
+        dedup_key: `trend:${instance.id}:${kind}${occurrence ? `:${occurrence}` : ""}`,
         rule_id: null,
         symbol: instance.symbol,
         kind,
@@ -335,26 +352,24 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
 
   const bars = await deps.store.confirmedCandles(instance.symbol, "5m", trendBarsNeeded(params));
   const lastBar = bars[bars.length - 1];
-  if (!lastBar || nowMs - lastBar.ts > MAX_BAR_AGE_INTERVALS * TREND_BAR_MS) {
-    const marker = lastBar?.ts ?? 0;
-    if (marker !== (state.lastEvalBarTs ?? -1)) {
-      emit("eval_skip", { reason: lastBar ? "stale_bars" : "no_bars", lastBarTs: lastBar?.ts ?? null });
-      state = { ...state, lastEvalBarTs: marker === 0 ? state.lastEvalBarTs : marker };
-      patch.state = state;
-    }
-    notes.push(lastBar ? "stale_bars" : "no_bars");
-    return conclude();
-  }
 
-  // Expiry: an armed instance simply ends; an active one is closed out first, then ends. If the
-  // close cannot be completed the instance stays active past its expiry and retries next cycle —
-  // expiring it anyway would leave a live position with no manager.
+  // Expiry is processed before the staleness gate. Closing a live position reads the account, not
+  // the tape, so a candle-collection outage must not strand an active instance past its expiry
+  // (or leave an armed one un-expired) until fresh bars resume. With no bar at all, a synthetic
+  // one — stamped at the expiry so retry idempotency keys stay stable, priced at the entry for
+  // the shadow simulation — stands in for the close bookkeeping.
   if (nowMs > instance.expiresAtMs) {
+    const closeBar: Candle =
+      lastBar ??
+      (() => {
+        const px = state.entryPx ?? 0;
+        return { ts: instance.expiresAtMs, open: px, high: px, low: px, close: px, volume: 0, volCcy: 0, confirmed: true };
+      })();
     if (instance.status === "active" && (shadow ? state.positionSz > 0 : true)) {
       const closed = await closeOut(instance, ctx, {
         shadow,
         state,
-        lastBar,
+        lastBar: closeBar,
         reason: "expired",
         events,
         notes,
@@ -370,6 +385,17 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     patch.status = "expired";
     action = "expired";
     emit("expired", { wasActive: instance.status === "active" });
+    return conclude();
+  }
+
+  if (!lastBar || nowMs - lastBar.ts > MAX_BAR_AGE_INTERVALS * TREND_BAR_MS) {
+    const marker = lastBar?.ts ?? 0;
+    if (marker !== (state.lastEvalBarTs ?? -1)) {
+      emit("eval_skip", { reason: lastBar ? "stale_bars" : "no_bars", lastBarTs: lastBar?.ts ?? null });
+      state = { ...state, lastEvalBarTs: marker === 0 ? state.lastEvalBarTs : marker };
+      patch.state = state;
+    }
+    notes.push(lastBar ? "stale_bars" : "no_bars");
     return conclude();
   }
 
@@ -475,6 +501,19 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       return conclude();
     }
 
+    // Collision prevention: this state machine accounts for exactly one owner per instrument
+    // side, but the account aggregates every same-instrument exposure into one row. If anything
+    // already sits on this side — a manual position, another strategy — opening would adopt that
+    // size into this instance's book (and a later exit would close it). Refuse and stay armed.
+    const preOpen = await deps.exchange.accountState(instance.instId);
+    const existing = findSidePosition(preOpen, instance);
+    if (existing) {
+      emit("open_skipped", { reason: "position_collision", observedPos: existing.pos, observedAvgPx: existing.avgPx });
+      await alert("trend_open_blocked", { reason: "position_collision", observed_pos: existing.pos });
+      notes.push(`open_skipped:position_collision:${existing.pos}`);
+      return conclude();
+    }
+
     const outcome = await deps.submitter.submit(
       openIntent({
         intentId: ctx.newIntentId(),
@@ -537,7 +576,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     emit("opened", { ordId: outcome.ordId, sz, avgPx: position.avgPx, stopPx, protectionConverged: converge.converged });
     await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: stopPx });
     if (!converge.converged) {
-      await alert("trend_reconcile_failed", { stage: "open", stop_px: stopPx });
+      await alert("trend_reconcile_failed", { stage: "open", stop_px: stopPx }, `open:${trigger.barTs}`);
     }
     notes.push(`opened sz=${sz} avg=${position.avgPx} stop=${stopPx}`);
     return conclude();
@@ -572,7 +611,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       notes.push("position_gone");
       return conclude();
     }
-    state = { ...state, entryPx: position.avgPx, positionSz: Math.abs(position.pos) };
+    // Track only this instance's own size: the account row aggregates any same-instrument
+    // exposure, so an outside add must not be adopted into this book (a later exit would close
+    // it), and the account's blended average must not replace this instance's entry price while
+    // the sizes disagree.
+    const observedSz = Math.abs(position.pos);
+    const ownSz = state.positionSz > 0 ? Math.min(state.positionSz, observedSz) : observedSz;
+    state = { ...state, positionSz: ownSz, ...(ownSz === observedSz ? { entryPx: position.avgPx } : {}) };
     patch.state = state;
   }
 
@@ -657,7 +702,10 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         notes.push("add_aborted:instance_no_longer_active");
         return conclude();
       }
-      const newStopPx = roundToStep(plan.newStopPx, spec.tickSz);
+      // Directional, not nearest-tick: planTrendAdd verified the theme cap against the
+      // unrounded stop, and rounding toward the position can only shrink the loss from there,
+      // so the submitted stop never breaches the verified cap by a rounding half-tick.
+      const newStopPx = roundTrendStop(instance.direction, plan.newStopPx, spec.tickSz);
       const outcome = await deps.submitter.submit(
         openIntent({
           intentId: ctx.newIntentId(),
@@ -681,7 +729,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       if (outcome.status !== "acked") {
         emit("add_failed", { outcome: describeOutcome(outcome), placed: !isNothingPlaced(outcome) });
         if (!isNothingPlaced(outcome)) {
-          await alert("trend_add_failed", { outcome: describeOutcome(outcome) });
+          await alert("trend_add_failed", { outcome: describeOutcome(outcome) }, `${lastBar.ts}:${state.adds}`);
         }
         notes.push(`add_not_completed:${describeOutcome(outcome)}`);
         return conclude();
@@ -690,16 +738,22 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       const position = findPosition(account, instance);
       if (!position) {
         emit("add_unverified", { ordId: outcome.ordId });
-        await alert("trend_add_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId });
+        await alert("trend_add_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId }, `${lastBar.ts}:${state.adds}`);
         notes.push("add_acked_but_no_position:check_okx");
         return conclude();
       }
-      const converge = await convergeProtection(instance, ctx, events, Math.abs(position.pos), newStopPx, spec);
+      // Only the size this instance owns goes on its book: its tracked size plus this add,
+      // capped at what the account actually shows. Anything above that is someone else's.
+      const ownTotal = Math.min(Math.abs(position.pos), state.positionSz + plan.szNum);
+      const converge = await convergeProtection(instance, ctx, events, ownTotal, newStopPx, spec);
       notes.push(...converge.notes);
       state = {
         ...state,
-        entryPx: position.avgPx,
-        positionSz: Math.abs(position.pos),
+        entryPx:
+          ownTotal === Math.abs(position.pos)
+            ? position.avgPx
+            : (state.entryPx! * state.positionSz + lastBar.close * plan.szNum) / ownTotal,
+        positionSz: ownTotal,
         adds: state.adds + 1,
         lastAddAnchorPx: lastBar.close,
         lastAddBarTs: lastBar.ts,
@@ -708,8 +762,8 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       patch.state = state;
       action = "added";
       emit("added", { ordId: outcome.ordId, sz: plan.sz, newStopPx, adds: state.adds, protectionConverged: converge.converged });
-      await alert("trend_added", { ord_id: outcome.ordId, sz: plan.sz, stop_px: newStopPx, adds: state.adds });
-      if (!converge.converged) await alert("trend_reconcile_failed", { stage: "add", stop_px: newStopPx });
+      await alert("trend_added", { ord_id: outcome.ordId, sz: plan.sz, stop_px: newStopPx, adds: state.adds }, `${lastBar.ts}:${state.adds}`);
+      if (!converge.converged) await alert("trend_reconcile_failed", { stage: "add", stop_px: newStopPx }, `add:${lastBar.ts}:${state.adds}`);
       notes.push(`added sz=${plan.sz} stop=${newStopPx}`);
       return conclude();
     }
@@ -732,7 +786,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       if (claimed) {
         const converge = await convergeProtection(instance, ctx, events, state.positionSz, state.stopPx, spec);
         notes.push(...converge.notes);
-        if (!converge.converged) await alert("trend_reconcile_failed", { stage: "drift", stop_px: state.stopPx });
+        if (!converge.converged) await alert("trend_reconcile_failed", { stage: "drift", stop_px: state.stopPx }, `drift:${state.stopPx}`);
       } else {
         notes.push("reconcile_claimed_elsewhere");
       }
@@ -759,7 +813,7 @@ interface CloseOutArgs {
   reason: string;
   events: TrendEventInsert[];
   notes: string[];
-  alert: (kind: string, payload: Record<string, unknown>) => Promise<void>;
+  alert: (kind: string, payload: Record<string, unknown>, occurrence?: string) => Promise<void>;
 }
 
 /**
@@ -803,7 +857,15 @@ async function closeOut(
     return null;
   }
 
-  const sz = formatToStep(Math.abs(position.pos), spec.lotSz);
+  // Close only this instance's own tracked size, never the account aggregate: in net mode the
+  // row can carry someone else's exposure on top of ours, and that part is not ours to close.
+  const observedSz = Math.abs(position.pos);
+  const ownSz = state.positionSz > 0 ? Math.min(state.positionSz, observedSz) : observedSz;
+  if (!(ownSz > 0)) {
+    events.push({ instanceId: instance.id, kind: "position_gone", detail: { during: reason } });
+    return { ...state, positionSz: 0, exitReason: reason };
+  }
+  const sz = formatToStep(ownSz, spec.lotSz);
   const outcome = await deps.submitter.submit(
     closeIntent({
       intentId: ctx.newIntentId(),
@@ -826,7 +888,7 @@ async function closeOut(
       detail: { outcome: describeOutcome(outcome), placed: !isNothingPlaced(outcome), reason },
     });
     if (!isNothingPlaced(outcome)) {
-      await alert("trend_close_failed", { outcome: describeOutcome(outcome), reason });
+      await alert("trend_close_failed", { outcome: describeOutcome(outcome), reason }, `${lastBar.ts}:${reason}`);
     }
     notes.push(`close_failed:${describeOutcome(outcome)}`);
     return null;
@@ -834,13 +896,28 @@ async function closeOut(
 
   const after = await deps.exchange.accountState(instance.instId);
   const remaining = findPosition(after, instance);
-  if (remaining) {
+  const remainingSz = remaining ? Math.abs(remaining.pos) : 0;
+  // Success is the position shrinking by exactly our size; anything left up to that is external
+  // exposure that was never ours, not a failed close.
+  const expectedRemaining = Math.max(0, observedSz - ownSz);
+  if (remainingSz > expectedRemaining + spec.lotSz / 2) {
     events.push({ instanceId: instance.id, kind: "close_unverified", detail: { ordId: outcome.ordId } });
-    await alert("trend_close_failed", { outcome: "acked_but_position_remains", ordId: outcome.ordId });
+    await alert("trend_close_failed", { outcome: "acked_but_position_remains", ordId: outcome.ordId }, `${lastBar.ts}:${reason}`);
     notes.push("close_acked_but_position_remains:check_okx");
     return null;
   }
-  const orphans = protectiveAlgos(after.algos, instance.direction, instance.posSide);
+  // Sweep our protective algos. Flat account: every protective algo on this side is an orphan.
+  // External size remains: only the algos at this instance's own stop are identifiably ours —
+  // the rest may be protecting the remaining position and stay untouched.
+  const allProtective = protectiveAlgos(after.algos, instance.direction, instance.posSide);
+  const orphans =
+    remainingSz === 0
+      ? allProtective
+      : state.stopPx === null
+        ? []
+        : allProtective.filter(
+            (algo) => roundToStep(Number(algo.slTriggerPx), spec.tickSz) === roundToStep(state.stopPx!, spec.tickSz),
+          );
   if (orphans.length > 0) {
     await deps.exchange
       .cancelAlgos(orphans.map((algo) => ({ algoId: algo.algoId, instId: instance.instId })))
@@ -875,9 +952,10 @@ export function createTrendEvaluatorHandler(deps: TrendEvaluatorDeps): (request:
     }
 
     const started = now();
-    if (deps.mode === "live" && !deps.liveEnabled) {
-      return json(200, { status: "disabled", reason: "live_disabled", mode: deps.mode });
-    }
+    // The live-trading switch gates only instances that can submit. Shadow instances never call
+    // order-submit — they are the safe way to observe the strategy before trading is enabled —
+    // so they keep evaluating while live submissions are switched off.
+    const liveBlocked = deps.mode === "live" && !deps.liveEnabled && !deps.dryRun;
 
     let engaged: boolean;
     let instances: TrendInstanceRow[];
@@ -893,6 +971,10 @@ export function createTrendEvaluatorHandler(deps: TrendEvaluatorDeps): (request:
 
     const reports: InstanceReport[] = [];
     for (const instance of instances) {
+      if (liveBlocked && instance.runMode === "live") {
+        reports.push({ id: instance.id, instId: instance.instId, action: "none", notes: ["live_disabled"] });
+        continue;
+      }
       const ctx: RunContext = { deps, nowMs: now(), newIntentId, log };
       try {
         reports.push(await evaluateInstance(instance, ctx));
@@ -912,6 +994,7 @@ export function createTrendEvaluatorHandler(deps: TrendEvaluatorDeps): (request:
       status: "ok",
       mode: deps.mode,
       dryRun: deps.dryRun,
+      liveDisabled: liveBlocked,
       instances: instances.length,
       reports,
       durationMs: now() - started,

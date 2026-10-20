@@ -142,6 +142,7 @@ function makeHandler(
   state: FakeState,
   outcome: SubmitOutcome = ACKED,
   accountScript: AccountState[] = [{ positions: [], algos: [] }],
+  liveEnabled = true,
 ) {
   const submitter: OrderSubmitter = {
     submit: (intent) => {
@@ -152,7 +153,7 @@ function makeHandler(
   return createTrendEvaluatorHandler({
     cronSecret: CRON,
     mode: "live",
-    liveEnabled: true,
+    liveEnabled,
     dryRun: false,
     store,
     exchange: fakeExchange(state, accountScript),
@@ -239,7 +240,11 @@ Deno.test("live instance opens through order-submit and verifies the position an
     positions: [positionRow(0.01, 109.2)],
     algos: [slAlgo("algo-1", 0.01, "99.25")],
   };
-  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [account]);
+  // First read is the pre-open collision check (must be flat), then the post-open account.
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    account,
+  ]);
   const { status } = await run(handler);
   strictEqual(status, 200);
   strictEqual(state.intents.length, 1);
@@ -353,6 +358,143 @@ Deno.test("expired armed instance ends without evaluating the trigger", async ()
   await run(handler);
   strictEqual(state.patches[0]!.patch.status, "expired");
   strictEqual(state.intents.length, 0);
+});
+
+Deno.test("live open is refused when the account already holds a position on the instrument", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  const account: AccountState = { positions: [positionRow(0.05, 200)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  strictEqual(state.intents.length, 0);
+  const skipped = state.events.find((event) => event.kind === "open_skipped");
+  strictEqual((skipped!.detail as { reason: string }).reason, "position_collision");
+  ok(state.alerts.some((alert) => alert.kind === "trend_open_blocked"));
+  strictEqual(state.patches[0]!.patch.status, undefined);
+});
+
+Deno.test("expired active instance closes out even when the tape is stale", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    expiresAtMs: NOW - 1,
+    state: {
+      entryPx: 109,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const stale = flatSeries().map((b) => ({ ...b, ts: b.ts - 30 * MIN }));
+  const before: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  const after: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: stale }, state), state, ACKED, [before, after]);
+  await run(handler);
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.patches[0]!.patch.status, "expired");
+  ok(state.events.map((event) => event.kind).includes("expired"));
+});
+
+Deno.test("expired armed instance ends even when the tape is stale", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, expiresAtMs: NOW - 1 };
+  const stale = flatSeries().map((b) => ({ ...b, ts: b.ts - 30 * MIN }));
+  const handler = makeHandler(fakeStore([instance], { NVDA: stale }, state), state);
+  await run(handler);
+  strictEqual(state.patches[0]!.patch.status, "expired");
+  strictEqual(state.intents.length, 0);
+});
+
+Deno.test("shadow instances evaluate while live submissions are disabled; live instances wait", async () => {
+  const state = newFakeState();
+  const shadow = { ...BASE_INSTANCE };
+  const live = { ...BASE_INSTANCE, id: "tf-2", runMode: "live" as const };
+  const handler = makeHandler(fakeStore([shadow, live], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+  ], false);
+  const { body } = await run(handler);
+  strictEqual((body as unknown as { liveDisabled: boolean }).liveDisabled, true);
+  ok(state.events.some((event) => event.kind === "shadow_open" && event.instanceId === "tf-1"));
+  ok(!state.events.some((event) => event.instanceId === "tf-2"));
+  strictEqual(state.intents.length, 0);
+  const reports = (body as unknown as { reports: { notes: string[] }[] }).reports;
+  ok(reports[1]!.notes.includes("live_disabled"));
+});
+
+Deno.test("live exit closes only the instance's own size when the account row carries external size", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 10,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const before: AccountState = {
+    positions: [positionRow(0.03, 109)],
+    algos: [slAlgo("algo-own", 0.01, "99.25"), slAlgo("algo-external", 0.02, "95")],
+  };
+  const after: AccountState = {
+    positions: [positionRow(0.02, 109)],
+    algos: [slAlgo("algo-own", 0.01, "99.25"), slAlgo("algo-external", 0.02, "95")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [before, before, after]);
+  await run(handler);
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.01");
+  strictEqual(state.patches[0]!.patch.status, "done");
+  // Only this instance's stop is swept; the external position's protection stays in place.
+  deepStrictEqual(state.cancels, [{ algoId: "algo-own", instId: "NVDA-USDT-SWAP" }]);
+});
+
+Deno.test("repeat adds alert under distinct dedup keys", async () => {
+  const mk = (shift: number) => {
+    const fake = newFakeState();
+    const instance: TrendInstanceRow = {
+      ...BASE_INSTANCE,
+      runMode: "live",
+      status: "active",
+      state: {
+        entryPx: 109,
+        entryAtr: 5.5,
+        peakAtr: 5.5,
+        stopPx: 99.25,
+        positionSz: 0.01,
+        adds: 0,
+        lastAddAnchorPx: 109,
+        lastEvalBarTs: LAST_TS - BAR_MS + shift,
+      },
+    };
+    const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)].map((b) => ({ ...b, ts: b.ts + shift }));
+    const before: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+    const after: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+    const handler = makeHandler(fakeStore([instance], { NVDA: bars }, fake), fake, ACKED, [before, after]);
+    return { fake, handler };
+  };
+  const a = mk(0);
+  await run(a.handler);
+  const b = mk(2 * BAR_MS);
+  await run(b.handler);
+  const keyA = a.fake.alerts.find((alert) => alert.kind === "trend_added")!.dedup_key;
+  const keyB = b.fake.alerts.find((alert) => alert.kind === "trend_added")!.dedup_key;
+  ok(keyA.startsWith("trend:tf-1:trend_added:"));
+  ok(keyB.startsWith("trend:tf-1:trend_added:"));
+  ok(keyA !== keyB);
 });
 
 Deno.test("kill switch skips the run and a wrong secret is rejected", async () => {
