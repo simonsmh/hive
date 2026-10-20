@@ -70,7 +70,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **积压**：每次运行循环领取整批（每批 20 条，4 并发）。只有剩余预算（90 秒）能覆盖最坏一批（约 40 秒）时才继续领取，因此不会留下未处理且被租约锁住的投递。
 - **重试**：失败后按 30 秒起的指数退避，兜底 cron 的 30 秒粒度不会额外拉长重试。
 - **不调整的部分**：轮询仍为 30 秒，避免把非官方 Jin10 接口的请求频率翻倍。
-- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天约 15,540 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、推送通知 1,440、Yahoo 行情 720、持仓管理 480、策略评估 480、订单对账 480、BlockBeats 轮询 288、同花顺约 130），约 46.6 万次/月。分发唤醒只在有新快讯入库的轮询后发生（三个新闻源合计），按快讯实际频率估算远低于「每次轮询都唤醒」的理论上限，合计仍在 50 万次内，但余量已薄：BlockBeats 因此只每 5 分钟轮询（每分钟将再加约 3.5 万次/月）。新增 Edge Function、新增调度或提高调度频率前请重新计算，并以实际用量为准。
+- **免费额度**：Supabase 免费版每月 50 万次 Edge Function 调用。按计划调度的调用合计每天约 16,020 次（OKX 采集 2,880、Jin10 轮询 2,880、分发兜底 2,880、OKX 快讯 1,440、告警评估 1,440、推送通知 1,440、Yahoo 行情 720、持仓管理 480、策略评估 480、订单对账 480、趋势评估 480、BlockBeats 轮询 288、同花顺约 130），约 48.1 万次/月。分发唤醒只在有新快讯入库的轮询后发生（三个新闻源合计），按快讯实际频率估算远低于「每次轮询都唤醒」的理论上限，合计仍在 50 万次内，但余量已薄：BlockBeats 因此只每 5 分钟轮询（每分钟将再加约 3.5 万次/月）。新增 Edge Function、新增调度或提高调度频率前请重新计算，并以实际用量为准。
 
 生产环境观测最近一天的快讯送达延迟（`published_at` 为 Jin10 快讯时间，`delivered_at` 为首次成功投递时间）：
 
@@ -149,7 +149,7 @@ scripts/
 | `HIVE_DASHBOARD_PASSWORD` | web | 仪表盘登录密码，仅服务端读取。未配置时无法登录（fail closed）。见「仪表盘与访问密码」 |
 | `HIVE_SESSION_SECRET` | web | 仪表盘会话 Cookie 的 HMAC 密钥，至少 32 个字符。未配置或过短时无法登录。生成：`openssl rand -hex 32` |
 | `COLLECTOR_SECRET` | okx-collector（Edge secret） | pg_net 调用函数时使用的 Bearer 密钥。**必须与 Vault 中的 `okx_collector_secret` 相同**。通过 `supabase secrets set` 设置，见下文 |
-| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector、position-manager、strategy-evaluator、order-sync、push-notify（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
+| `EDGE_CRON_SECRET` | jin10-poller、okx-news-poller、blockbeats-poller、webhook-dispatcher、alert-evaluator、yahoo-collector、ths-collector、position-manager、strategy-evaluator、order-sync、trend-evaluator、push-notify（Edge secret） | pg_net 调用这些函数时使用的 Bearer 密钥。**必须与 Vault 中的 `edge_cron_secret` 相同**。未配置时这些函数都拒绝请求 |
 | `JIN10_FLASH_URL`、`JIN10_APP_ID`、`JIN10_VERSION`、`JIN10_REFERER`、`JIN10_QUERY` | jin10-poller（Edge secret，可选） | 覆盖 Jin10 快讯接口的地址、请求头与查询参数。默认值见 `supabase/functions/jin10-poller/handler.ts` 中的 `DEFAULT_JIN10_CONFIG`。上游改版时可直接覆盖，无需重新发版 |
 | `OKX_BASE_URL` | okx-collector、okx-news-poller（Edge secret，可选） | 默认 `https://www.okx.com` |
 | `YAHOO_BASE_URL` | yahoo-collector（Edge secret，可选） | 默认 `https://query1.finance.yahoo.com`。仅在需要切换上游地址时设置 |
@@ -268,7 +268,7 @@ pnpm typecheck     # tsc（core / web / worker）
 pnpm test          # vitest（core / worker / web）
 pnpm sync:edge-core  # 修改 packages/core 中的采集相关模块后必须运行，生成 Edge Function 的 core/ 副本
 
-for f in okx-collector jin10-poller okx-news-poller blockbeats-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector order-submit position-manager position-subscriptions push-notify strategy-evaluator order-sync; do
+for f in okx-collector jin10-poller okx-news-poller blockbeats-poller webhook-dispatcher alert-evaluator yahoo-collector ths-collector google-finance-collector order-submit position-manager position-subscriptions push-notify strategy-evaluator order-sync trend-evaluator; do
   (cd supabase/functions/$f && deno lint && deno check index.ts handler.ts store.ts *.test.ts && deno test)
 done
 ```
@@ -301,6 +301,7 @@ done
    - `…000035_set_leverage_action.sql`：`order_intents.action` 的 CHECK 增加 `set_leverage`（order-submit 调杠杆动作）
    - `…000036_order_sync_cron.sql`：`hive-order-sync`（每 3 分钟）调度 order-sync 对账
    - `…000037_orders_state_okx_values.sql`：`orders.state` 的 CHECK 扩至 OKX 全部状态值（algo 的 effective/partially_effective/order_failed 与 mmp_canceled）
+   - `…000038_trend_strategies.sql`：`trend_strategies` + `trend_strategy_events` 两表、动作租约 `hive_trend_claim`、`hive-trend-evaluator`（每 3 分钟）调度 trend-evaluator
 3. 部署 Edge Functions。在仓库根目录执行：
 
    ```bash
@@ -320,6 +321,7 @@ done
    supabase functions deploy push-notify --no-verify-jwt
    supabase functions deploy strategy-evaluator --no-verify-jwt
    supabase functions deploy order-sync --no-verify-jwt
+   supabase functions deploy trend-evaluator --no-verify-jwt
 
    ```
 
@@ -986,6 +988,17 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
 ### 未实现（P0d，本 PR 不包含）
 
 保本移动止损、波动率突增保护、时间衰减减仓、ATR 追踪止损均未实现，没有保留任何占位钩子。
+
+## 趋势跟随（trend_follow，pg_cron 每 3 分钟）
+
+托管执行的趋势跟随策略，与条件单（reversal_long）同构：实例存 `trend_strategies`，`trend-evaluator` 每 3 分钟用 `@hive/core`（`indicators.ts` + `trend.ts`）的纯函数评估已确认的 5 分钟 K 线，全部决策都是公式，没有临场判断。
+
+- **触发（六闸全过才开仓）**：ATR(14) 创近 36 根新高且 ≥ 均值 ×1.25；触发 K 线 TR ≥ 2×ATR 且收盘落在方向端 25% 内；收盘穿越 Donchian(20)；量 ≥ 前 20 根均量 ×1.5；同组标的同向破位计数达标；Kaufman 效率比 ≥ 0.3（趋势体制）。止损 = 破位基底外 0.5×ATR；首仓按风险预算定尺（`themeStopCapU ÷ 止损距离`，不超过实例 `firstSz`）。
+- **加仓（金字塔）**：收盘顺向走出 0.5×ATR 步长触发；统一止损锚定触发 K 的基底且只向有利方向移动；加仓前验算风险不变量——全仓在统一止损下的最坏亏损 ≤ `themeStopCapU`，不满足则按手数递减或不加；加仓量 ≤ 首仓。
+- **退出**：ATR 自入场后峰值回落 ≥ 28%，或收盘反穿 5 分钟 MA60，先到先走，经 `close` 全平并清扫残留保护单。
+- **止损对账**：核心不变量是「任何时刻交易所保护单恰好覆盖全仓且触发价等于统一止损」。纯函数 `planAlgoReconcile` 比对期望与 order-sync 读到的实盘 algos，收敛动作只有一种：经 order-submit 发一条 `amend_tpsl`（新 algo 覆盖全仓@统一止损，网关随即撤销其记录在案的旧 algos），随后按 position-manager 的先例直接撤销 amend 未覆盖的残留保护单，再读一次验证计划为空；失败写事件并产生 critical 告警。
+- **影子模式**：`run_mode = 'shadow'` 的实例跑完整状态机（模拟成交、加仓、退出）并写事件，但绝不提交订单；`run_mode = 'live'` 才真下单。创建时必须显式传 runMode。看板「趋势策略」面板（`/trend`）与 API `/api/trend-strategies` 管理实例，每次状态转换、触发、跳过与对账都写入 `trend_strategy_events`。
+- **调度取舍**：每分钟调度会增加约 4.3 万次/月调用、突破免费额度，故与其它评估器一致取每 3 分钟；决策以 5 分钟 K 线为粒度，无新 K 线的轮次不写任何数据。
 
 ## 安全
 

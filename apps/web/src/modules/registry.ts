@@ -19,6 +19,7 @@ export const PANELS: readonly PanelRegistration[] = [
   { id: "alerts", title: "告警", icon: "bell", href: "/alerts", order: 40 },
   { id: "symbols", title: "标的管理", icon: "list", href: "/symbols", order: 45 },
   { id: "orders", title: "条件单", icon: "target", href: "/orders", order: 47 },
+  { id: "trend", title: "趋势策略", icon: "chart", href: "/trend", order: 48 },
   { id: "settings", title: "设置", icon: "gear", href: "/settings", order: 50 },
 ];
 
