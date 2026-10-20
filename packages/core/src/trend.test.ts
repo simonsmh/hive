@@ -413,6 +413,13 @@ describe("state helpers", () => {
     expect(parseTrendState({ pendingAdd: "x" }).pendingAdd).toBeNull();
   });
 
+  it("parseTrendState defaults openVerified to true, keeps an explicit false", () => {
+    expect(parseTrendState({}).openVerified).toBe(true);
+    expect(parseTrendState({ openVerified: true }).openVerified).toBe(true);
+    expect(parseTrendState({ openVerified: false }).openVerified).toBe(false);
+    expect(parseTrendState({ openVerified: "yes" }).openVerified).toBe(true);
+  });
+
   it("nextPeakAtr only grows", () => {
     expect(nextPeakAtr({ peakAtr: 5 }, 4)).toBe(5);
     expect(nextPeakAtr({ peakAtr: 5 }, 6)).toBe(6);

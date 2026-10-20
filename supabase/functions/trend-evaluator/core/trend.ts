@@ -494,6 +494,12 @@ export interface TrendRuntimeState {
   pendingAdd: { szNum: number; barTs: number; newStopPx: number; anchorPx: number } | null;
   /** Open time of the newest bar an evaluation has consumed; minutes without a new bar are no-ops. */
   lastEvalBarTs: number | null;
+  /**
+   * Whether the opening fill has been observed on the account. An acked open whose fill has
+   * not landed yet stays active but unverified: the next cycle adopts the fill, while add
+   * planning and stop drift-reconcile wait until verification.
+   */
+  openVerified: boolean;
   /** Comma-joined failed gate names from the last trigger check; used to log only real changes. */
   lastChecksKey: string | null;
   exitReason: string | null;
@@ -511,6 +517,7 @@ export const EMPTY_TREND_STATE: TrendRuntimeState = {
   lastAddBarTs: null,
   protectiveAlgoId: null,
   pendingAdd: null,
+  openVerified: true,
   lastEvalBarTs: null,
   lastChecksKey: null,
   exitReason: null,
@@ -552,6 +559,7 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
     lastAddBarTs: numOrNull(o.lastAddBarTs),
     protectiveAlgoId,
     pendingAdd,
+    openVerified: o.openVerified === false ? false : true,
     lastEvalBarTs: numOrNull(o.lastEvalBarTs),
     lastChecksKey: typeof o.lastChecksKey === "string" ? o.lastChecksKey : null,
     exitReason: typeof o.exitReason === "string" ? o.exitReason : null,

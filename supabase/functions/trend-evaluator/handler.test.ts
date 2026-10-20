@@ -616,3 +616,122 @@ Deno.test("open stays recoverable when post-open verification throws", async () 
   ok(patch.lastNote.includes("post_open_verify_threw"));
   ok(state.alerts.some((alert) => alert.kind === "trend_reconcile_failed"));
 });
+
+Deno.test("acked open with no visible fill stays active and verifies on the next cycle", async () => {
+  const bars = breakoutSeries();
+  const state1 = newFakeState();
+  const instance1 = { ...BASE_INSTANCE, runMode: "live" as const };
+  // Collision check is flat; the post-open read still shows no position (fill latency).
+  const empty: AccountState = { positions: [], algos: [] };
+  const handler1 = makeHandler(fakeStore([instance1], { NVDA: bars }, state1), state1, ACKED, [{ positions: [], algos: [] }, empty]);
+  await run(handler1);
+  const patch1 = state1.patches[0]!.patch;
+  strictEqual(patch1.status, "active");
+  strictEqual(patch1.state?.openVerified, false);
+  strictEqual(patch1.state?.lastAddAnchorPx, 109);
+  ok(state1.events.map((event) => event.kind).includes("open_unverified"));
+
+  // Next cycle the fill is visible: adopt it and verify.
+  const state2 = newFakeState();
+  const carried = { ...patch1.state, lastEvalBarTs: LAST_TS };
+  const bars2 = [...bars, bar(5, 108, 110, 107, 109)];
+  const instance2: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: carried as unknown as Record<string, unknown> };
+  const filled: AccountState = { positions: [positionRow(0.01, 109.2)], algos: [] };
+  const handler2 = makeHandler(fakeStore([instance2], { NVDA: bars2 }, state2), state2, ACKED, [filled]);
+  await run(handler2);
+  const patch2 = state2.patches[0]!.patch;
+  strictEqual(patch2.state?.openVerified, true);
+  strictEqual(patch2.state?.positionSz, 0.01);
+  strictEqual(patch2.state?.entryPx, 109.2);
+  strictEqual(patch2.state?.lastAddAnchorPx, 109.2);
+  ok(state2.events.map((event) => event.kind).includes("open_verified"));
+});
+
+Deno.test("open with an unknown placement outcome stays recoverable instead of failing", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  const unknown: SubmitOutcome = { httpStatus: 0, status: "exchange_error", reason: "outcome_unknown", ordId: null, algoId: null, detail: null };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, unknown);
+  await run(handler);
+  strictEqual(state.intents.length, 1);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "active");
+  strictEqual(patch.state?.openVerified, false);
+  ok(state.events.map((event) => event.kind).includes("open_unknown_outcome"));
+  ok(patch.lastNote.includes("open_unknown_outcome"));
+});
+
+Deno.test("verified live open initializes the add anchor from the fill price", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  const account: AccountState = { positions: [positionRow(0.01, 109.2)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    account,
+  ]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "active");
+  strictEqual(patch.state?.openVerified, true);
+  strictEqual(patch.state?.lastAddAnchorPx, 109.2);
+});
+
+Deno.test("strategy stands down instead of adopting the external remainder after its stop fires", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      adds: 0,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // Our unified stop fired (algo-1 gone) closing our 0.05; the 0.03 left is someone else's.
+  const account: AccountState = { positions: [positionRow(0.03, 110)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "done");
+  strictEqual(patch.state?.exitReason, "ownership_lost");
+  strictEqual(patch.state?.positionSz, 0);
+  ok(state.events.map((event) => event.kind).includes("ownership_lost"));
+  ok(state.alerts.some((alert) => alert.kind === "trend_ownership_lost"));
+  strictEqual(state.intents.length, 0);
+  deepStrictEqual(state.cancels, []);
+});
+
+Deno.test("manual partial close with our stop still in place keeps managing the remainder", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      adds: 0,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // User manually reduced our position; our stop algo is still there, so the rest is ours.
+  const account: AccountState = { positions: [positionRow(0.03, 109)], algos: [slAlgo("algo-1", 0.05, "99.25")] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, undefined);
+  strictEqual(patch.state?.positionSz, 0.03);
+  ok(!state.events.map((event) => event.kind).includes("ownership_lost"));
+});

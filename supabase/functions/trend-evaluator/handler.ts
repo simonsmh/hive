@@ -571,22 +571,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       }),
     );
 
-    if (outcome.status !== "acked") {
-      const placed = !isNothingPlaced(outcome);
-      emit("open_failed", { outcome: describeOutcome(outcome), placed });
-      await alert("trend_open_failed", { outcome: describeOutcome(outcome), close: trigger.close });
-      patch.status = "failed";
-      action = "failed";
-      notes.push(placed ? `open_unknown_outcome:${describeOutcome(outcome)}:check_okx` : `open_rejected:${describeOutcome(outcome)}`);
-      return conclude();
-    }
-
-    // Ownership is recorded BEFORE any fallible verification: if the account read or the
-    // protection converge below throws, the row is already active when conclude() persists it,
-    // so the next cycle adopts the position instead of the collision guard refusing it forever.
-    // Entry price/size are provisional (the trigger close and the submitted size) until the
-    // verification below confirms them; the active branch corrects them on the next cycle.
-    state = {
+    // The provisional active state is recorded BEFORE any fallible step: if the order was
+    // possibly placed (acked, or an unknown outcome), the row is already active when
+    // conclude() persists it, so the next cycle adopts the position from the account instead
+    // of the collision guard refusing it forever. Entry price/size/anchor are provisional
+    // (the trigger close and the submitted size) until verification confirms them;
+    // openVerified gates add planning and stop drift-reconcile until then.
+    const provisional = {
       ...state,
       entryPx: trigger.close,
       entryBarTs: trigger.barTs,
@@ -596,11 +587,36 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       positionSz: Number(sz),
       protectiveAlgoId: null,
       pendingAdd: null,
+      openVerified: false,
       adds: 0,
-      lastAddAnchorPx: null,
+      lastAddAnchorPx: trigger.close,
       lastAddBarTs: null,
       exitReason: null,
     };
+
+    if (outcome.status !== "acked") {
+      const placed = !isNothingPlaced(outcome);
+      emit("open_failed", { outcome: describeOutcome(outcome), placed });
+      await alert("trend_open_failed", { outcome: describeOutcome(outcome), close: trigger.close });
+      if (placed) {
+        // Possibly placed despite the lost response: stay recoverable and adopt the position
+        // from the account on the next cycle. The open is never resubmitted, so no
+        // double-fill risk; the deterministic idempotency key stays unused.
+        state = provisional;
+        patch.state = state;
+        patch.status = "active";
+        action = "opened";
+        emit("open_unknown_outcome", { outcome: describeOutcome(outcome) });
+        notes.push(`open_unknown_outcome:${describeOutcome(outcome)}:verify_next_cycle`);
+      } else {
+        patch.status = "failed";
+        action = "failed";
+        notes.push(`open_rejected:${describeOutcome(outcome)}`);
+      }
+      return conclude();
+    }
+
+    state = provisional;
     patch.state = state;
     patch.status = "active";
     action = "opened";
@@ -610,11 +626,12 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       const account = await deps.exchange.accountState(instance.instId);
       const position = findPosition(account, instance);
       if (!position) {
+        // Acked but the fill is not visible yet: NOT terminal. The provisional active state
+        // above stands, so the next cycle adopts the fill; if it never appears, the active
+        // branch closes the book as position_gone.
         emit("open_unverified", { ordId: outcome.ordId });
         await alert("trend_open_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId });
-        patch.status = "failed";
-        action = "failed";
-        notes.push("open_acked_but_no_position:check_okx");
+        notes.push("open_acked_but_no_position:verify_next_cycle");
       } else {
         const converge = await convergeProtection(
           instance,
@@ -631,6 +648,8 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
           entryPx: position.avgPx,
           positionSz: Math.abs(position.pos),
           protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
+          openVerified: true,
+          lastAddAnchorPx: position.avgPx,
         };
         patch.state = state;
         if (converge.externalAlgoIds.length > 0) {
@@ -688,22 +707,63 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         }
       }
       const lastKnownSz = state.positionSz;
-      state = { ...state, positionSz: 0, exitReason: state.exitReason ?? "position_gone" };
+      const neverFilled = !state.openVerified;
+      state = {
+        ...state,
+        positionSz: 0,
+        exitReason: state.exitReason ?? (neverFilled ? "open_never_filled" : "position_gone"),
+      };
       patch.state = state;
       patch.status = "done";
       action = "done";
       emit("position_gone", { lastKnownSz });
-      notes.push("position_gone");
+      notes.push(neverFilled ? "open_never_filled" : "position_gone");
       return conclude();
     }
     // Track only this instance's own size: the account row aggregates any same-instrument
     // exposure, so an outside add must not be adopted into this book (a later exit would close
     // it), and the account's blended average must not replace this instance's entry price while
     // the sizes disagree.
+    //
+    // The book only shrinks on this instance's own lifecycle: if the position fell below the
+    // tracked size while our protective algo is gone, our unified stop fired and any remainder
+    // is external exposure that must not be adopted — the strategy stands down instead. A
+    // shrink with our algo still in place was a manual reduction; the remainder is still ours.
     const observedSz = Math.abs(position.pos);
-    const ownSz = state.positionSz > 0 ? Math.min(state.positionSz, observedSz) : observedSz;
-    state = { ...state, positionSz: ownSz, ...(ownSz === observedSz ? { entryPx: position.avgPx } : {}) };
+    const prevOwn = state.positionSz;
+    let ownSz: number;
+    let ownershipLost = false;
+    if (prevOwn > 0 && observedSz < prevOwn) {
+      const ourAlgoGone =
+        state.protectiveAlgoId !== null && !account.algos.some((algo) => algo.algoId === state.protectiveAlgoId);
+      if (ourAlgoGone) {
+        ownSz = 0;
+        ownershipLost = true;
+      } else {
+        ownSz = observedSz;
+      }
+    } else {
+      ownSz = prevOwn > 0 ? Math.min(prevOwn, observedSz) : observedSz;
+    }
+    const justVerified = !state.openVerified;
+    state = {
+      ...state,
+      positionSz: ownSz,
+      ...(ownSz === observedSz ? { entryPx: position.avgPx } : {}),
+      ...(justVerified ? { openVerified: true, lastAddAnchorPx: position.avgPx } : {}),
+    };
     patch.state = state;
+    if (justVerified) emit("open_verified", { avgPx: position.avgPx, sz: ownSz });
+    if (ownershipLost) {
+      state = { ...state, exitReason: "ownership_lost" };
+      patch.state = state;
+      patch.status = "done";
+      action = "done";
+      emit("ownership_lost", { prevOwn, externalRemainder: observedSz });
+      await alert("trend_ownership_lost", { prev_own: prevOwn, external_remainder: observedSz });
+      notes.push(`ownership_lost:external_remainder=${observedSz}`);
+      return conclude();
+    }
   }
 
   const exitDecision = evaluateTrendExit(bars, state, params, instance.direction);
@@ -815,7 +875,9 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     notes.push(`added sz=${pending.szNum} stop=${pending.newStopPx} (fill settled)`);
     return conclude();
   }
-  if (exitDecision.atr !== null && state.stopPx !== null) {
+  // Add planning waits for the opening fill to be verified: with no confirmed position
+  // there is nothing to pyramid.
+  if (exitDecision.atr !== null && state.stopPx !== null && state.openVerified) {
     const plan = planTrendAdd(state, {
       direction: instance.direction,
       params,
@@ -958,7 +1020,9 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     }
   }
 
-  if (!shadow && state.stopPx !== null && state.positionSz > 0) {
+  // Stop drift-reconcile waits for the opening fill to be verified: with no confirmed
+  // position there is no protection to converge yet.
+  if (!shadow && state.stopPx !== null && state.positionSz > 0 && state.openVerified) {
     const account = await deps.exchange.accountState(instance.instId);
     const plan = planAlgoReconcile(
       { size: state.positionSz, stopPx: state.stopPx, lotSz: spec.lotSz, tickSz: spec.tickSz },
