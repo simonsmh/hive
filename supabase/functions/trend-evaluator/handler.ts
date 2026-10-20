@@ -21,6 +21,7 @@ import {
   planAlgoReconcile,
   planTrendAdd,
   protectiveAlgos,
+  recoverOwnedAlgo,
   revalidateAddStop,
   roundTrendStop,
   TREND_BAR_MS,
@@ -245,10 +246,10 @@ async function convergeProtection(
           .filter((algo) => !knownIds.has(algo.algoId))
           .map((algo) => algo.algoId)
       : [];
-  let account = await deps.exchange.accountState(instance.instId);
+  const account = await deps.exchange.accountState(instance.instId);
   const ignoredNow = externalIds(account.algos);
   if (ignoredNow.length > 0) notes.push(`external_algos_ignored:${ignoredNow.join(",")}`);
-  let plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide, ignoredNow);
+  const plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide, ignoredNow);
   let newAlgoId: string | null = null;
   if (plan.length === 0) return { converged: true, notes, algoId: newAlgoId, externalAlgoIds: ignoredNow };
 
@@ -297,34 +298,60 @@ async function convergeProtection(
       // The amend replaces algos recorded in the orders table. A leftover carrying the replaced
       // own algo id is cancelled directly (the position-manager precedent); anything else
       // protective is left alone — it may belong to external exposure.
-      const after = await deps.exchange.accountState(instance.instId);
-      const leftovers = protectiveAlgos(after.algos, instance.direction, instance.posSide).filter(
-        (algo) => algo.algoId !== outcome.algoId,
-      );
-      const ownedLeftovers = leftovers.filter((algo) => algo.algoId === ownedAlgoId);
-      const otherLeftovers = leftovers.filter((algo) => algo.algoId !== ownedAlgoId);
-      if (ownedLeftovers.length > 0) {
-        await deps.exchange.cancelAlgos(ownedLeftovers.map((algo) => ({ algoId: algo.algoId, instId: instance.instId })));
-        notes.push(`cancelled_leftovers:${ownedLeftovers.map((algo) => algo.algoId).join(",")}`);
-      }
-      if (otherLeftovers.length > 0) {
-        notes.push(
-          `${canDistinguish ? "external" : "untracked"}_algos_preserved:${otherLeftovers.map((algo) => algo.algoId).join(",")}`,
+      // These post-amend reads must not throw the replacement id away: if the read or the
+      // cancel fails, the caller still persists newAlgoId below (converged:false) so the next
+      // cycle adopts the live replacement instead of terminalizing on the stale id.
+      try {
+        const after = await deps.exchange.accountState(instance.instId);
+        const leftovers = protectiveAlgos(after.algos, instance.direction, instance.posSide).filter(
+          (algo) => algo.algoId !== outcome.algoId,
         );
+        const ownedLeftovers = leftovers.filter((algo) => algo.algoId === ownedAlgoId);
+        const otherLeftovers = leftovers.filter((algo) => algo.algoId !== ownedAlgoId);
+        if (ownedLeftovers.length > 0) {
+          await deps.exchange.cancelAlgos(ownedLeftovers.map((algo) => ({ algoId: algo.algoId, instId: instance.instId })));
+          notes.push(`cancelled_leftovers:${ownedLeftovers.map((algo) => algo.algoId).join(",")}`);
+        }
+        if (otherLeftovers.length > 0) {
+          notes.push(
+            `${canDistinguish ? "external" : "untracked"}_algos_preserved:${otherLeftovers.map((algo) => algo.algoId).join(",")}`,
+          );
+        }
+      } catch (error) {
+        notes.push(`reconcile_post_amend_threw:${describeError(error)}`);
+        events.push({
+          instanceId: instance.id,
+          kind: "reconcile_failed",
+          detail: { reason: "post_amend_read_failed" },
+        });
+        return { converged: false, notes, algoId: newAlgoId, externalAlgoIds: externalIds(account.algos) };
       }
     }
   }
 
-  account = await deps.exchange.accountState(instance.instId);
-  plan = planAlgoReconcile(desired, account.algos, instance.direction, instance.posSide, externalIds(account.algos));
-  const converged = plan.length === 0;
+  let finalAccount;
+  try {
+    finalAccount = await deps.exchange.accountState(instance.instId);
+  } catch (error) {
+    // Same as above: the replacement id is known-good, so persist it and retry next cycle
+    // instead of throwing it away and wedging the book on the stale id.
+    notes.push(`reconcile_final_read_threw:${describeError(error)}`);
+    events.push({
+      instanceId: instance.id,
+      kind: "reconcile_failed",
+      detail: { reason: "final_read_failed" },
+    });
+    return { converged: false, notes, algoId: newAlgoId, externalAlgoIds: externalIds(account.algos) };
+  }
+  const plan2 = planAlgoReconcile(desired, finalAccount.algos, instance.direction, instance.posSide, externalIds(finalAccount.algos));
+  const converged = plan2.length === 0;
   events.push({
     instanceId: instance.id,
     kind: converged ? "reconciled" : "reconcile_failed",
-    detail: { desiredSize: totalSize, desiredStop: stopPx, remainingPlan: plan },
+    detail: { desiredSize: totalSize, desiredStop: stopPx, remainingPlan: plan2 },
   });
   if (!converged) notes.push("reconcile_incomplete");
-  return { converged, notes, algoId: newAlgoId, externalAlgoIds: externalIds(account.algos) };
+  return { converged, notes, algoId: newAlgoId, externalAlgoIds: externalIds(finalAccount.algos) };
 }
 
 /**
@@ -930,8 +957,31 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     const prevOwn = state.positionSz;
     let ownSz: number;
     let ownershipLost = false;
-    const ourAlgoGone =
+    let ourAlgoGone =
       state.protectiveAlgoId !== null && !account.algos.some((algo) => algo.algoId === state.protectiveAlgoId);
+    if (ourAlgoGone && state.stopPx !== null) {
+      // The stored id can go stale when a reconcile amend replaced it but the new id was never
+      // persisted. Before treating the missing id as lost ownership, look for the live
+      // replacement: exactly one protective algo at this book's (size, stop) is the replacement
+      // and must be re-adopted, not dropped.
+      const specNow = await deps.exchange.instrumentSpec(instance.instId);
+      const recovered = recoverOwnedAlgo(
+        { size: prevOwn, stopPx: state.stopPx, lotSz: specNow.lotSz, tickSz: specNow.tickSz },
+        account.algos,
+        instance.direction,
+        instance.posSide,
+      );
+      if (recovered !== null) {
+        state = { ...state, protectiveAlgoId: recovered };
+        ourAlgoGone = false;
+        notes.push(`recovered_replacement_algo:${recovered}`);
+        events.push({
+          instanceId: instance.id,
+          kind: "algo_id_recovered",
+          detail: { algoId: recovered },
+        });
+      }
+    }
     if (prevOwn > 0 && ourAlgoGone) {
       ownSz = 0;
       ownershipLost = true;

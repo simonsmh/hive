@@ -17,6 +17,7 @@ import {
   parseTrendStrategyInput,
   planAlgoReconcile,
   planTrendAdd,
+  recoverOwnedAlgo,
   revalidateAddStop,
   roundTrendStop,
   trendBarsNeeded,
@@ -426,6 +427,53 @@ describe("planAlgoReconcile", () => {
     expect(planAlgoReconcile(desired, [algo({ algoId: "ext", sz: 0.02 })], "long", "net", ["ext"])).toEqual([
       { kind: "amend_tpsl", sz: "0.02", slTriggerPx: "100.00" },
     ]);
+  });
+});
+
+describe("recoverOwnedAlgo", () => {
+  const algo = (overrides: Partial<TrendAlgoView> = {}): TrendAlgoView => ({
+    algoId: "a1",
+    side: "sell",
+    posSide: "net",
+    reduceOnly: true,
+    sz: 0.02,
+    slTriggerPx: "100",
+    ...overrides,
+  });
+  const desired = { size: 0.02, stopPx: 100, lotSz: 0.01, tickSz: 0.01 };
+
+  it("adopts the single protective algo at the exact desired stop and size", () => {
+    expect(recoverOwnedAlgo(desired, [algo({ algoId: "replacement" })], "long", "net")).toBe("replacement");
+  });
+
+  it("returns null when nothing is at the desired stop", () => {
+    expect(recoverOwnedAlgo(desired, [algo({ slTriggerPx: "99" })], "long", "net")).toBeNull();
+    expect(recoverOwnedAlgo(desired, [], "long", "net")).toBeNull();
+  });
+
+  it("returns null when the size does not match the book", () => {
+    expect(recoverOwnedAlgo(desired, [algo({ sz: 0.03 })], "long", "net")).toBeNull();
+  });
+
+  it("returns null when several algos share the stop (ambiguous ownership)", () => {
+    expect(
+      recoverOwnedAlgo(desired, [algo({ sz: 0.01 }), algo({ algoId: "a2", sz: 0.01 })], "long", "net"),
+    ).toBeNull();
+  });
+
+  it("ignores non-protective and ignored algos", () => {
+    const noise = [
+      algo({ algoId: "ext", slTriggerPx: "100", sz: 0.02 }),
+      algo({ algoId: "tp", slTriggerPx: null, sz: 0.02 }),
+    ];
+    expect(recoverOwnedAlgo(desired, noise, "long", "net", ["ext"])).toBeNull();
+    expect(recoverOwnedAlgo(desired, [...noise, algo({ algoId: "replacement" })], "long", "net", ["ext"])).toBe(
+      "replacement",
+    );
+  });
+
+  it("returns null for a flat desired position", () => {
+    expect(recoverOwnedAlgo({ ...desired, size: 0 }, [algo()], "long", "net")).toBeNull();
   });
 });
 

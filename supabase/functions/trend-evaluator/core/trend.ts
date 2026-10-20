@@ -830,6 +830,32 @@ export function planAlgoReconcile(
   return [{ kind: "amend_tpsl", sz: formatStep(desired.size, desired.lotSz), slTriggerPx: formatStep(stopRounded, desired.tickSz) }];
 }
 
+/**
+ * Recovers the live replacement algo when the stored owned algo id went stale: a reconcile
+ * amend replaced it but the new id was never persisted (e.g. a post-amend account read threw).
+ * Returns the algo id only when exactly one protective algo sits at the desired (stop, size) —
+ * that is the replacement the amend placed and it must be re-adopted. Anything else (none,
+ * several, a size mismatch) stays unresolved: ownership is never guessed at.
+ */
+export function recoverOwnedAlgo(
+  desired: DesiredProtection,
+  algos: readonly TrendAlgoView[],
+  direction: TrendDirection,
+  posSide: "net" | "long" | "short",
+  ignoreAlgoIds: readonly string[] = [],
+): string | null {
+  if (desired.size <= 0) return null;
+  const ignored = new Set(ignoreAlgoIds);
+  const stopRounded = roundToStep(desired.stopPx, desired.tickSz);
+  const candidates = protectiveAlgos(algos, direction, posSide).filter(
+    (algo) => !ignored.has(algo.algoId) && roundToStep(Number(algo.slTriggerPx), desired.tickSz) === stopRounded,
+  );
+  const covered = candidates.reduce((sum, algo) => sum + algo.sz, 0);
+  const sole = candidates.length === 1 ? candidates[0] : undefined;
+  if (sole !== undefined && Math.abs(covered - desired.size) <= 1e-9) return sole.algoId;
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Instance parsing (web API shape), mirroring parseConditionalOrderInput.
 // ---------------------------------------------------------------------------

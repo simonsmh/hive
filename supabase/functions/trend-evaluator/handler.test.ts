@@ -913,6 +913,108 @@ Deno.test("ownership is lost when the remainder matches the tracked size but our
   deepStrictEqual(state.cancels, []);
 });
 
+Deno.test("a stale owned algo id is recovered from the live replacement instead of terminalizing", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      adds: 0,
+      // algo-old was replaced by a reconcile amend whose new id was never persisted; the
+      // replacement is live at exactly this book's (size, stop).
+      protectiveAlgoId: "algo-old",
+      openVerified: true,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const account: AccountState = {
+    positions: [positionRow(0.05, 110)],
+    algos: [slAlgo("algo-new", 0.05, "99.25")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  // The replacement is re-adopted: the book stays active, no ownership_lost terminalization.
+  strictEqual(patch.status, undefined);
+  strictEqual(patch.state?.protectiveAlgoId, "algo-new");
+  ok(!patch.state?.exitReason);
+  ok(state.events.map((event) => event.kind).includes("algo_id_recovered"));
+  ok(!state.events.map((event) => event.kind).includes("ownership_lost"));
+  strictEqual(state.intents.length, 0);
+});
+
+Deno.test("a post-amend account read failure keeps the replacement algo id for the next cycle", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      adds: 0,
+      protectiveAlgoId: "algo-old",
+      openVerified: true,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // algo-old sits at the wrong stop, so the drift reconcile amends to the unified stop; the
+  // post-amend account read then throws. The known-good replacement id must still be
+  // persisted so the next cycle adopts it instead of terminalizing on the stale id.
+  const drifted: AccountState = {
+    positions: [positionRow(0.05, 110)],
+    algos: [slAlgo("algo-old", 0.05, "95.00")],
+  };
+  let reads = 0;
+  const script: (AccountState | "throw")[] = [drifted, drifted, drifted, "throw"];
+  const exchange: TrendExchange = {
+    instrumentSpec: () => Promise.resolve({ ctVal: 1, lotSz: 0.01, minSz: 0.01, tickSz: 0.01 }),
+    accountState: () => {
+      const entry = script[Math.min(reads, script.length - 1)];
+      reads += 1;
+      return entry === "throw" ? Promise.reject(new Error("read boom")) : Promise.resolve(entry);
+    },
+    cancelAlgos: (items) => {
+      state.cancels.push(...items);
+      return Promise.resolve();
+    },
+  };
+  const submitter: OrderSubmitter = {
+    submit: (intent) => {
+      state.intents.push(intent);
+      return Promise.resolve({ ...ACKED, algoId: "algo-new" });
+    },
+  };
+  const handler = createTrendEvaluatorHandler({
+    cronSecret: CRON,
+    mode: "live",
+    liveEnabled: true,
+    dryRun: false,
+    store: fakeStore([instance], { NVDA: flatSeries() }, state),
+    exchange,
+    submitter,
+    now: () => NOW,
+    newIntentId: () => "tf-test-1",
+    log: () => {},
+  });
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, undefined);
+  strictEqual(patch.state?.protectiveAlgoId, "algo-new");
+  ok(state.events.map((event) => event.kind).includes("reconcile_failed"));
+  ok(state.alerts.some((alert) => alert.kind === "trend_reconcile_failed" && (alert.dedup_key ?? "").includes(":drift:")));
+  strictEqual(state.cancels.length, 0);
+});
+
 Deno.test("a partially filled add settles its observed delta at timeout instead of being dropped", async () => {
   const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
   const instance: TrendInstanceRow = {
