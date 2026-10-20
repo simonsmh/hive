@@ -3,6 +3,7 @@ import type { PendingAlgo, PositionRow } from "./core/position.ts";
 import type { Candle } from "./core/types.ts";
 import {
   createTrendEvaluatorHandler,
+  PENDING_ADD_TIMEOUT_MS,
   type AccountState,
   type AlertInsert,
   type OrderSubmitter,
@@ -1473,4 +1474,152 @@ Deno.test("close retries rotate the idempotency key after a confirmed-unplaced f
   const key2 = keyOf(state2.intents[0]!);
   ok(key1 !== key2, `idempotency key must rotate: ${key1} vs ${key2}`);
   strictEqual(state2.patches[0]!.patch.state?.closeAttempts, 2);
+});
+
+Deno.test("partially filled open stays unverified instead of locking the book at the partial size", async () => {
+  const state = newFakeState();
+  // Wide loss cap so risk sizing executes the full configured firstSz of 0.10.
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const, firstSz: "0.10", themeStopCapU: 100 };
+  // First read is the pre-open collision check (flat); the post-ack read shows only a
+  // 0.04 partial fill of the 0.10 submitted size.
+  const postAck: AccountState = {
+    positions: [positionRow(0.04, 109.2)],
+    algos: [slAlgo("algo-p", 0.04, "99.25")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    postAck,
+  ]);
+  await run(handler);
+  strictEqual(state.intents[0]!.sz, "0.10");
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "active");
+  // Protection converged on the partial size, but the open is NOT verified: the remainder
+  // typically fills seconds later, and recording the partial as the unit would strand it
+  // as external size (capped out of the unified stop and the eventual close).
+  strictEqual(patch.state?.openVerified, false);
+  strictEqual(patch.state?.positionSz, 0.04);
+  strictEqual(patch.state?.initialUnitSz, 0.1);
+  strictEqual(patch.state?.entryPx, 109.2);
+  strictEqual(patch.state?.stopPx, 99.25);
+  const kinds = state.events.map((event) => event.kind);
+  ok(kinds.includes("open_fill_pending"));
+  ok(!kinds.includes("opened"));
+  ok(!state.alerts.some((alert) => alert.kind === "trend_opened"));
+  ok(patch.lastNote.includes("open_fill_pending"));
+});
+
+Deno.test("pending open adopts the late remainder up to the submitted size on the next cycle", async () => {
+  const state1 = newFakeState();
+  const instance1 = { ...BASE_INSTANCE, runMode: "live" as const, firstSz: "0.10", themeStopCapU: 100 };
+  const postAck: AccountState = {
+    positions: [positionRow(0.04, 109.2)],
+    algos: [slAlgo("algo-p", 0.04, "99.25")],
+  };
+  const handler1 = makeHandler(fakeStore([instance1], { NVDA: breakoutSeries() }, state1), state1, ACKED, [
+    { positions: [], algos: [] },
+    postAck,
+  ]);
+  await run(handler1);
+  strictEqual(state1.patches[0]!.patch.state?.openVerified, false);
+
+  // Next cycle the remainder filled: the full 0.10 is visible. The book must adopt it as
+  // our own open (not cap ownership at the 0.04 partial) and verify.
+  const state2 = newFakeState();
+  const carried = { ...state1.patches[0]!.patch.state, lastEvalBarTs: LAST_TS - BAR_MS };
+  const instance2: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    firstSz: "0.10",
+    themeStopCapU: 100,
+    state: carried as unknown as Record<string, unknown>,
+  };
+  const filled: AccountState = {
+    positions: [positionRow(0.1, 109.3)],
+    algos: [slAlgo("algo-p", 0.1, "99.25")],
+  };
+  const handler2 = makeHandler(fakeStore([instance2], { NVDA: flatSeries() }, state2), state2, ACKED, [filled]);
+  await run(handler2);
+  const patch2 = state2.patches[0]!.patch;
+  strictEqual(patch2.state?.openVerified, true);
+  strictEqual(patch2.state?.positionSz, 0.1);
+  strictEqual(patch2.state?.initialUnitSz, 0.1);
+  strictEqual(patch2.state?.entryPx, 109.3);
+  strictEqual(patch2.state?.lastAddAnchorPx, 109.3);
+  ok(state2.events.map((event) => event.kind).includes("open_verified"));
+});
+
+Deno.test("verified open still caps an external top-up at the booked size", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      initialUnitSz: 0.05,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // Someone else added 0.03 on top of our verified 0.05: the book must not adopt it.
+  const account: AccountState = {
+    positions: [positionRow(0.08, 109.5)],
+    algos: [slAlgo("algo-1", 0.05, "99.25")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.positionSz, 0.05);
+  strictEqual(patch.state?.openVerified, true);
+  strictEqual(patch.state?.entryPx, 109);
+  const kinds = state.events.map((event) => event.kind);
+  ok(!kinds.includes("open_fill_pending"));
+  ok(!kinds.includes("open_verified"));
+});
+
+Deno.test("pending open settles at the observed size after the fill timeout", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryBarTs: LAST_TS - PENDING_ADD_TIMEOUT_MS - 60_000,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.02,
+      initialUnitSz: 0.05,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: null,
+      openVerified: false,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // The remainder never filled: settle the observed 0.02 into the book so the eventual
+  // exit closes what actually filled instead of leaving it open.
+  const account: AccountState = { positions: [positionRow(0.02, 109.2)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.openVerified, true);
+  strictEqual(patch.state?.positionSz, 0.02);
+  strictEqual(patch.state?.initialUnitSz, 0.02);
+  ok(patch.lastNote.includes("open_fill_timeout"));
+  ok(
+    state.alerts.some(
+      (alert) => alert.kind === "trend_open_failed" && (alert.payload as { outcome: string }).outcome === "open_fill_timeout",
+    ),
+  );
 });

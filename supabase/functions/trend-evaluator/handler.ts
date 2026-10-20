@@ -862,14 +862,24 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
           state.protectiveAlgoId,
         );
         notes.push(...converge.notes);
+        const plannedSz = Number(sz);
+        const fillTol = spec.lotSz / 2;
+        // A market open that only partially filled on this immediate read must not be
+        // recorded as the verified unit: the remainder typically fills seconds later, and
+        // locking the book at the partial size would strand it as external size — capped
+        // out of the unified stop and the eventual close. Keep the open pending; the
+        // active branch adopts the remainder up to the submitted size.
+        const fullyFilled = observedSz >= plannedSz - fillTol;
         state = {
           ...state,
           entryPx: position.avgPx,
           positionSz: observedSz,
-          initialUnitSz: observedSz,
+          // While pending, initialUnitSz keeps the submitted size: it anchors the active
+          // branch's adoption of the late remainder as our own open fill.
+          initialUnitSz: fullyFilled ? observedSz : plannedSz,
           stopPx: openStopPx,
           protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
-          openVerified: true,
+          openVerified: fullyFilled,
           lastAddAnchorPx: position.avgPx,
         };
         patch.state = state;
@@ -880,14 +890,19 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
             `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
           );
         }
-        emit("opened", {
-          ordId: outcome.ordId,
-          sz,
-          avgPx: position.avgPx,
-          stopPx: openStopPx,
-          protectionConverged: converge.converged,
-        });
-        await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: openStopPx });
+        if (fullyFilled) {
+          emit("opened", {
+            ordId: outcome.ordId,
+            sz,
+            avgPx: position.avgPx,
+            stopPx: openStopPx,
+            protectionConverged: converge.converged,
+          });
+          await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: openStopPx });
+        } else {
+          emit("open_fill_pending", { ordId: outcome.ordId, observed: observedSz, expected: plannedSz });
+          notes.push(`open_fill_pending:${observedSz}<${sz}`);
+        }
         if (!converge.converged) {
           await alert("trend_reconcile_failed", { stage: "open", stop_px: openStopPx }, `open:${trigger.barTs}`);
         }
@@ -955,6 +970,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     // A shrink with our algo still in place was a manual reduction; the remainder is ours.
     const observedSz = Math.abs(position.pos);
     const prevOwn = state.positionSz;
+    const justVerified = !state.openVerified;
+    // Submitted open size: instances opened before initialUnitSz existed fall back to the
+    // configured size (same fallback as add planning).
+    const openExpectedSz = state.initialUnitSz ?? Number(instance.firstSz);
+    // Fill tolerance for the pending-open settle check (same lotSz/2 rule as the add path).
+    // Only fetched while the open is still being adopted; verified books never pay for it.
+    const fillTol = justVerified ? (await deps.exchange.instrumentSpec(instance.instId)).lotSz / 2 : 0;
     let ownSz: number;
     let ownershipLost = false;
     let ourAlgoGone =
@@ -985,20 +1007,49 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     if (prevOwn > 0 && ourAlgoGone) {
       ownSz = 0;
       ownershipLost = true;
+    } else if (justVerified && prevOwn > 0 && observedSz >= prevOwn) {
+      // The open fill is still being adopted (never verified): observed growth toward the
+      // submitted size is our own open completing, not an external add — adopt it up to
+      // the submitted size. Capping at prevOwn here would lock a partial fill in as the
+      // verified unit and strand the late remainder as unprotected external size.
+      ownSz = Math.min(observedSz, openExpectedSz);
     } else if (prevOwn > 0 && observedSz < prevOwn) {
       ownSz = observedSz;
     } else {
       ownSz = prevOwn > 0 ? Math.min(prevOwn, observedSz) : observedSz;
     }
-    const justVerified = !state.openVerified;
+    // Only mark the open verified once the full submitted size is visible. A remainder
+    // that never lands is settled at the observed size after the fill timeout (same as the
+    // add path's partial-fill settle) so the eventual exit closes what actually filled.
+    const openFillComplete = justVerified && observedSz >= openExpectedSz - fillTol;
+    let openFillTimedOut = false;
+    if (
+      justVerified &&
+      !openFillComplete &&
+      state.entryBarTs !== null &&
+      lastBar.ts - state.entryBarTs > PENDING_ADD_TIMEOUT_MS
+    ) {
+      openFillTimedOut = true;
+      notes.push(`open_fill_timeout:settling_observed=${ownSz}`);
+      await alert(
+        "trend_open_failed",
+        { outcome: "open_fill_timeout", observed: ownSz, expected: openExpectedSz },
+        `open:${state.entryBarTs}`,
+      );
+    }
+    const verifying = openFillComplete || openFillTimedOut;
     state = {
       ...state,
       positionSz: ownSz,
       ...(ownSz === observedSz ? { entryPx: position.avgPx } : {}),
-      ...(justVerified ? { openVerified: true, lastAddAnchorPx: position.avgPx, initialUnitSz: ownSz } : {}),
+      ...(verifying ? { openVerified: true, lastAddAnchorPx: position.avgPx, initialUnitSz: ownSz } : {}),
     };
     patch.state = state;
-    if (justVerified) emit("open_verified", { avgPx: position.avgPx, sz: ownSz });
+    if (verifying) emit("open_verified", { avgPx: position.avgPx, sz: ownSz });
+    if (justVerified && !verifying) {
+      emit("open_fill_pending", { observed: observedSz, expected: openExpectedSz });
+      notes.push(`open_fill_pending:${observedSz}<${openExpectedSz}`);
+    }
     if (ownershipLost) {
       state = { ...state, exitReason: "ownership_lost" };
       patch.state = state;
