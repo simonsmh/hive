@@ -466,6 +466,15 @@ describe("state helpers", () => {
     expect(EMPTY_TREND_STATE.initialUnitSz).toBeNull();
   });
 
+  it("parseTrendState round-trips closeAttempts, defaulting to 0 for legacy rows", () => {
+    expect(parseTrendState({}).closeAttempts).toBe(0);
+    expect(parseTrendState({ closeAttempts: 2 }).closeAttempts).toBe(2);
+    expect(parseTrendState({ closeAttempts: -1 }).closeAttempts).toBe(0);
+    expect(parseTrendState({ closeAttempts: 1.5 }).closeAttempts).toBe(0);
+    expect(parseTrendState({ closeAttempts: "2" }).closeAttempts).toBe(0);
+    expect(EMPTY_TREND_STATE.closeAttempts).toBe(0);
+  });
+
   it("nextPeakAtr only grows", () => {
     expect(nextPeakAtr({ peakAtr: 5 }, 4)).toBe(5);
     expect(nextPeakAtr({ peakAtr: 5 }, 6)).toBe(6);

@@ -81,6 +81,7 @@ Deno.test("recordEval patches only live rows and serializes the state", async ()
       lastEvalBarTs: null,
       lastChecksKey: null,
       exitReason: null,
+      closeAttempts: 0,
     },
   });
   strictEqual(calls[0]!.method, "PATCH");

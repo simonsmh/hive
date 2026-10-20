@@ -549,7 +549,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         const spec = await deps.exchange.instrumentSpec(instance.instId);
         await settlePendingAdd(closeBar.ts, spec, { terminal: true });
       }
-      const closed = await closeOut(instance, ctx, {
+      const closeResult = await closeOut(instance, ctx, {
         shadow,
         state,
         lastBar: closeBar,
@@ -558,11 +558,18 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         notes,
         alert,
       });
-      if (!closed) {
+      if (closeResult.closeAttempts !== (state.closeAttempts ?? 0)) {
+        // The close attempt confirmed nothing was placed: the retry bucket advanced, so
+        // persist it — the next evaluation must retry with a fresh idempotency key.
+        state = { ...state, closeAttempts: closeResult.closeAttempts };
+        patch.state = state;
+        dirty = true;
+      }
+      if (!closeResult.closed) {
         notes.push("expiry_close_pending:stays_active");
         return conclude();
       }
-      state = closed;
+      state = closeResult.closed;
       patch.state = state;
     }
     patch.status = "expired";
@@ -785,12 +792,45 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         await alert("trend_open_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId });
         notes.push("open_acked_but_no_position:verify_next_cycle");
       } else {
+        // The fill can land away from the trigger close the plan was sized from (a market
+        // open on a volatile breakout bar): the gateway only checked the new order's own
+        // loss, so revalidate the whole-position loss at the planned stop against the
+        // observed average fill, tightening the stop if the theme cap would otherwise be
+        // breached. Same rule as the add path.
+        const observedSz = Math.abs(position.pos);
+        const revalidatedOpen = revalidateAddStop(
+          instance.direction,
+          observedSz,
+          position.avgPx,
+          stopPx,
+          state.stopPx ?? stopPx,
+          instance.themeStopCapU,
+          spec.ctVal,
+        );
+        const openStopPx = roundTrendStop(instance.direction, revalidatedOpen.stopPx, spec.tickSz);
+        if (revalidatedOpen.tightened) {
+          emit("open_stop_tightened", {
+            plannedStopPx: stopPx,
+            finalStopPx: openStopPx,
+            aggregateLossU: round4(revalidatedOpen.aggregateLossU),
+          });
+          await alert(
+            "trend_open_stop_tightened",
+            {
+              planned_stop_px: stopPx,
+              final_stop_px: openStopPx,
+              aggregate_loss_u: round4(revalidatedOpen.aggregateLossU),
+            },
+            `open:${trigger.barTs}`,
+          );
+          notes.push(`open_stop_tightened:${stopPx}->${openStopPx}`);
+        }
         const converge = await convergeProtection(
           instance,
           ctx,
           events,
-          Math.abs(position.pos),
-          stopPx,
+          observedSz,
+          openStopPx,
           spec,
           state.protectiveAlgoId,
         );
@@ -798,8 +838,9 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         state = {
           ...state,
           entryPx: position.avgPx,
-          positionSz: Math.abs(position.pos),
-          initialUnitSz: Math.abs(position.pos),
+          positionSz: observedSz,
+          initialUnitSz: observedSz,
+          stopPx: openStopPx,
           protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
           openVerified: true,
           lastAddAnchorPx: position.avgPx,
@@ -816,12 +857,12 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
           ordId: outcome.ordId,
           sz,
           avgPx: position.avgPx,
-          stopPx,
+          stopPx: openStopPx,
           protectionConverged: converge.converged,
         });
-        await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: stopPx });
+        await alert("trend_opened", { ord_id: outcome.ordId, sz, avg_px: position.avgPx, stop_px: openStopPx });
         if (!converge.converged) {
-          await alert("trend_reconcile_failed", { stage: "open", stop_px: stopPx }, `open:${trigger.barTs}`);
+          await alert("trend_reconcile_failed", { stage: "open", stop_px: openStopPx }, `open:${trigger.barTs}`);
         }
       }
     } catch (error) {
@@ -835,7 +876,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       });
       await alert("trend_reconcile_failed", { stage: "open_verify_threw" }, `open:${trigger.barTs}`);
     }
-    notes.push(`opened sz=${sz} avg=${state.entryPx} stop=${stopPx}`);
+    notes.push(`opened sz=${sz} avg=${state.entryPx} stop=${state.stopPx}`);
     return conclude();
   }
 
@@ -977,7 +1018,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         );
       }
     }
-    const closed = await closeOut(instance, ctx, {
+    const closeResult = await closeOut(instance, ctx, {
       shadow,
       state,
       lastBar,
@@ -986,8 +1027,13 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       notes,
       alert,
     });
-    if (closed) {
-      state = closed;
+    if (closeResult.closeAttempts !== (state.closeAttempts ?? 0)) {
+      state = { ...state, closeAttempts: closeResult.closeAttempts };
+      patch.state = state;
+      dirty = true;
+    }
+    if (closeResult.closed) {
+      state = closeResult.closed;
       patch.state = state;
       patch.status = "done";
       action = "exited";
@@ -1104,7 +1150,19 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       if (!position) {
         emit("add_unverified", { ordId: outcome.ordId });
         await alert("trend_add_failed", { outcome: "acked_but_no_position", ordId: outcome.ordId }, `${lastBar.ts}:${state.adds}`);
-        notes.push("add_acked_but_no_position:check_okx");
+        // OKX acknowledged the add, so a market fill is expected to land after this read:
+        // hang it as pending so the next cycle settles the fill from the account (committing
+        // the size and its revalidated stop) instead of the active branch capping the
+        // unexpected size as external exposure outside the tracked protection. Same rule as
+        // the unknown-outcome path; the add is never resubmitted.
+        state = {
+          ...state,
+          pendingAdd: { szNum: plan.szNum, barTs: lastBar.ts, newStopPx, anchorPx: lastBar.close },
+        };
+        patch.state = state;
+        action = "add_pending";
+        emit("add_fill_pending", { ordId: outcome.ordId, expected: state.positionSz + plan.szNum });
+        notes.push("add_acked_but_no_position:pending_next_cycle");
         return conclude();
       }
       // Only the size this instance owns goes on its book: its tracked size plus this add,
@@ -1264,14 +1322,21 @@ interface CloseOutArgs {
  * Closes the position and returns the terminal state, or null when a live close could not be
  * completed (the instance then stays active and retries on the next bar). Shadow closes are
  * simulated at the last close. A completed live close also sweeps orphan protective algos.
+ *
+ * The close idempotency key carries a retry bucket (state.closeAttempts): attempts confirmed
+ * to have placed nothing bump it, so a retry on a frozen bar (candle outage) issues a fresh
+ * key instead of replaying the stored failure or hitting order-submit's duplicate_key_expired
+ * forever. Outcomes that may have placed stay on the same key, so a possibly-placed close is
+ * never double-sent.
  */
 async function closeOut(
   instance: TrendInstanceRow,
   ctx: RunContext,
   args: CloseOutArgs,
-): Promise<TrendRuntimeState | null> {
+): Promise<{ closed: TrendRuntimeState | null; closeAttempts: number }> {
   const { deps, nowMs } = ctx;
   const { state, lastBar, reason, events, notes, alert } = args;
+  let closeAttempts = state.closeAttempts ?? 0;
   if (args.shadow) {
     events.push({
       instanceId: instance.id,
@@ -1279,7 +1344,7 @@ async function closeOut(
       detail: { reason, close: lastBar.close, sz: state.positionSz },
     });
     notes.push(`shadow_exit reason=${reason}`);
-    return { ...state, positionSz: 0, exitReason: reason };
+    return { closed: { ...state, positionSz: 0, exitReason: reason }, closeAttempts };
   }
 
   const spec = await deps.exchange.instrumentSpec(instance.instId);
@@ -1287,18 +1352,18 @@ async function closeOut(
   const position = findPosition(account, instance);
   if (!position) {
     events.push({ instanceId: instance.id, kind: "position_gone", detail: { during: reason } });
-    return { ...state, positionSz: 0, exitReason: reason };
+    return { closed: { ...state, positionSz: 0, exitReason: reason }, closeAttempts };
   }
 
   const claimed = await deps.store.claim(instance.id, ACTION_LEASE_SEC);
   if (!claimed) {
     notes.push("close_claimed_elsewhere");
-    return null;
+    return { closed: null, closeAttempts };
   }
   const liveRow = await deps.store.getInstance(instance.id);
   if (!liveRow || liveRow.status !== "active") {
     notes.push("close_aborted:instance_no_longer_active");
-    return null;
+    return { closed: null, closeAttempts };
   }
 
   // Close only this instance's own tracked size, never the account aggregate: in net mode the
@@ -1307,13 +1372,13 @@ async function closeOut(
   const ownSz = state.positionSz > 0 ? Math.min(state.positionSz, observedSz) : observedSz;
   if (!(ownSz > 0)) {
     events.push({ instanceId: instance.id, kind: "position_gone", detail: { during: reason } });
-    return { ...state, positionSz: 0, exitReason: reason };
+    return { closed: { ...state, positionSz: 0, exitReason: reason }, closeAttempts };
   }
   const sz = formatToStep(ownSz, spec.lotSz);
   const outcome = await deps.submitter.submit(
     closeIntent({
       intentId: ctx.newIntentId(),
-      idempotencyKey: managementKey(["trend-close", instance.id, lastBar.ts, reason]),
+      idempotencyKey: managementKey(["trend-close", instance.id, lastBar.ts, reason, closeAttempts]),
       createdAt: new Date(nowMs).toISOString(),
       source: SOURCE,
       instId: instance.instId,
@@ -1326,16 +1391,25 @@ async function closeOut(
     }),
   );
   if (outcome.status !== "acked") {
+    const nothingPlaced = isNothingPlaced(outcome);
+    if (nothingPlaced) {
+      // Confirmed nothing was placed: rotate the retry bucket so the next attempt (same
+      // bar, same reason — e.g. a candle outage freezing lastBar.ts) issues a fresh
+      // idempotency key instead of replaying this failure within order-submit's 10-minute
+      // window or hitting duplicate_key_expired forever after it.
+      closeAttempts += 1;
+      notes.push(`close_failed_unplaced:attempt=${closeAttempts}`);
+    }
     events.push({
       instanceId: instance.id,
       kind: "close_failed",
-      detail: { outcome: describeOutcome(outcome), placed: !isNothingPlaced(outcome), reason },
+      detail: { outcome: describeOutcome(outcome), placed: !nothingPlaced, reason, closeAttempts },
     });
-    if (!isNothingPlaced(outcome)) {
+    if (!nothingPlaced) {
       await alert("trend_close_failed", { outcome: describeOutcome(outcome), reason }, `${lastBar.ts}:${reason}`);
     }
     notes.push(`close_failed:${describeOutcome(outcome)}`);
-    return null;
+    return { closed: null, closeAttempts };
   }
 
   const after = await deps.exchange.accountState(instance.instId);
@@ -1348,7 +1422,7 @@ async function closeOut(
     events.push({ instanceId: instance.id, kind: "close_unverified", detail: { ordId: outcome.ordId } });
     await alert("trend_close_failed", { outcome: "acked_but_position_remains", ordId: outcome.ordId }, `${lastBar.ts}:${reason}`);
     notes.push("close_acked_but_position_remains:check_okx");
-    return null;
+    return { closed: null, closeAttempts };
   }
   // Sweep our protective algos. Flat account: every protective algo on this side is an orphan.
   // External size remains: only the algos at this instance's own stop are identifiably ours —
@@ -1375,7 +1449,7 @@ async function closeOut(
   events.push({ instanceId: instance.id, kind: "closed", detail: { reason, ordId: outcome.ordId, sz } });
   await alert("trend_exited", { reason, ord_id: outcome.ordId, sz });
   notes.push(`closed reason=${reason} sz=${sz}`);
-  return { ...state, positionSz: 0, exitReason: reason };
+  return { closed: { ...state, positionSz: 0, exitReason: reason }, closeAttempts };
 }
 
 /**

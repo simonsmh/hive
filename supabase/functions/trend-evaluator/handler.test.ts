@@ -1232,3 +1232,143 @@ Deno.test("add planning caps at the executed initial unit, not the configured fi
   ok((state.intents[0]!.reason as string).startsWith("trend_follow add"));
   strictEqual(state.intents[0]!.sz, "0.01");
 });
+
+Deno.test("live open tightens the stop when the fill lands worse than the trigger close", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  // Trigger close 109, planned stop 99.25, size 0.01: the planned whole-position loss is
+  // (109 - 99.25) * 0.01 = 0.0975 U <= 0.1 U cap. A 109.50 fill pushes it to 0.1025 U, so the
+  // stop must tighten to 109.50 - 0.1/0.01 = 99.50 before protection converges.
+  const account: AccountState = { positions: [positionRow(0.01, 109.5)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    account,
+  ]);
+  await run(handler);
+  strictEqual(state.intents[0]!.action, "open");
+  strictEqual(state.intents[0]!.slTriggerPx, "99.25");
+  // Protection converges with the tightened stop (99.50), not the planned one.
+  strictEqual(state.intents[1]!.action, "amend_tpsl");
+  strictEqual(state.intents[1]!.slTriggerPx, "99.50");
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.entryPx, 109.5);
+  strictEqual(patch.state?.stopPx, 99.5);
+  ok(state.events.map((event) => event.kind).includes("open_stop_tightened"));
+  ok(state.alerts.some((alert) => alert.kind === "trend_open_stop_tightened"));
+  ok(state.alerts.some((alert) => alert.kind === "trend_opened" && (alert.payload as { stop_px: number }).stop_px === 99.5));
+});
+
+Deno.test("live open keeps the planned stop when the fill lands inside the cap", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  // 109.20 fill: (109.20 - 99.25) * 0.01 = 0.0995 U <= 0.1 U cap — no tightening.
+  const account: AccountState = { positions: [positionRow(0.01, 109.2)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    account,
+  ]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.stopPx, 99.25);
+  ok(!state.events.map((event) => event.kind).includes("open_stop_tightened"));
+});
+
+Deno.test("acked add with no visible position hangs the add as pending and settles next cycle", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const activeState = {
+    entryPx: 109,
+    entryAtr: 5.5,
+    peakAtr: 5.5,
+    stopPx: 99.25,
+    positionSz: 0.01,
+    adds: 0,
+    lastAddAnchorPx: 109,
+    lastEvalBarTs: LAST_TS - BAR_MS,
+  };
+  const before: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  // Cycle 1: the add is acked but the position row is gone from the account read — the add
+  // must be recorded as pending, not dropped (dropping it would cap the landed fill as
+  // external exposure outside the tracked stop).
+  const state1 = newFakeState();
+  const instance1: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: activeState };
+  const handler1 = makeHandler(fakeStore([instance1], { NVDA: bars }, state1), state1, ACKED, [
+    before,
+    { positions: [], algos: [] },
+  ]);
+  await run(handler1);
+  strictEqual(state1.intents.length, 1);
+  strictEqual(state1.intents[0]!.action, "open");
+  const patch1 = state1.patches[0]!.patch;
+  deepStrictEqual(patch1.state?.pendingAdd, {
+    szNum: 0.01,
+    barTs: LAST_TS + BAR_MS,
+    newStopPx: 109.38,
+    anchorPx: 113,
+  });
+  strictEqual(patch1.state?.adds, 0);
+  strictEqual(patch1.state?.stopPx, 99.25);
+  ok(state1.events.map((event) => event.kind).includes("add_fill_pending"));
+
+  // Cycle 2: a new bar arrives and the fill is now visible — settle, don't resubmit.
+  const state2 = newFakeState();
+  const carried = { ...patch1.state, lastEvalBarTs: LAST_TS + BAR_MS };
+  const bars2 = [...bars, bar(6, 112, 115, 111, 114)];
+  const instance2: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: carried as unknown as Record<string, unknown> };
+  const filled: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+  const handler2 = makeHandler(fakeStore([instance2], { NVDA: bars2 }, state2), state2, ACKED, [filled]);
+  await run(handler2);
+  strictEqual(state2.intents.length, 0);
+  const patch2 = state2.patches[0]!.patch;
+  strictEqual(patch2.state?.pendingAdd, null);
+  strictEqual(patch2.state?.adds, 1);
+  strictEqual(patch2.state?.stopPx, 109.38);
+  strictEqual(patch2.state?.positionSz, 0.02);
+  ok(state2.events.map((event) => event.kind).includes("added"));
+});
+
+Deno.test("close retries rotate the idempotency key after a confirmed-unplaced failure", async () => {
+  const rejected: SubmitOutcome = { httpStatus: 422, status: "rejected_risk", reason: "loss_exceeds_theme_cap", ordId: null, algoId: null, detail: null };
+  const activeState = {
+    entryPx: 109,
+    entryAtr: 5.5,
+    peakAtr: 5.5,
+    stopPx: 99.25,
+    positionSz: 0.01,
+    adds: 0,
+    lastAddAnchorPx: 109,
+    lastEvalBarTs: LAST_TS - BAR_MS,
+  };
+  const account: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  const expired = (st: unknown): TrendInstanceRow => ({
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    expiresAtMs: NOW - MIN,
+    state: st as Record<string, unknown>,
+  });
+  const keyOf = (intent: Record<string, unknown>): string => intent.idempotencyKey as string;
+
+  // Cycle 1: expiry close is rejected before placing — the retry bucket advances to 1 and the
+  // instance stays active.
+  const state1 = newFakeState();
+  const handler1 = makeHandler(fakeStore([expired(activeState)], { NVDA: flatSeries() }, state1), state1, rejected, [account]);
+  await run(handler1);
+  strictEqual(state1.intents.length, 1);
+  strictEqual(state1.intents[0]!.action, "close");
+  const patch1 = state1.patches[0]!.patch;
+  strictEqual(patch1.state?.closeAttempts, 1);
+  strictEqual(patch1.status, undefined);
+  ok(state1.events.map((event) => event.kind).includes("close_failed"));
+  const key1 = keyOf(state1.intents[0]!);
+
+  // Cycle 2: same frozen bar, same reason — the retry must use a fresh key, not replay the
+  // stored failure or hit duplicate_key_expired.
+  const state2 = newFakeState();
+  const carried = { ...patch1.state, lastEvalBarTs: LAST_TS - BAR_MS };
+  const handler2 = makeHandler(fakeStore([expired(carried)], { NVDA: flatSeries() }, state2), state2, rejected, [account]);
+  await run(handler2);
+  strictEqual(state2.intents.length, 1);
+  const key2 = keyOf(state2.intents[0]!);
+  ok(key1 !== key2, `idempotency key must rotate: ${key1} vs ${key2}`);
+  strictEqual(state2.patches[0]!.patch.state?.closeAttempts, 2);
+});

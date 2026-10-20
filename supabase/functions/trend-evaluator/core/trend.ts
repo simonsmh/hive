@@ -554,6 +554,14 @@ export interface TrendRuntimeState {
   /** Comma-joined failed gate names from the last trigger check; used to log only real changes. */
   lastChecksKey: string | null;
   exitReason: string | null;
+  /**
+   * Retry bucket for close idempotency keys. Incremented only when a close attempt is
+   * confirmed to have placed nothing: during a candle outage the close key would otherwise
+   * stay frozen (bar ts constant), replaying the stored failure within order-submit's
+   * 10-minute window and returning duplicate_key_expired forever after. Attempts whose
+   * outcome is unknown keep the bucket so a possibly-placed close is never double-sent.
+   */
+  closeAttempts: number;
 }
 
 export const EMPTY_TREND_STATE: TrendRuntimeState = {
@@ -573,6 +581,7 @@ export const EMPTY_TREND_STATE: TrendRuntimeState = {
   lastEvalBarTs: null,
   lastChecksKey: null,
   exitReason: null,
+  closeAttempts: 0,
 };
 
 function numOrNull(value: unknown): number | null {
@@ -584,6 +593,7 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
   const o = raw as Record<string, unknown>;
   const positionSz = numOrNull(o.positionSz);
   const adds = numOrNull(o.adds);
+  const closeAttempts = numOrNull(o.closeAttempts);
   const protectiveAlgoId = typeof o.protectiveAlgoId === "string" && o.protectiveAlgoId !== "" ? o.protectiveAlgoId : null;
   const pendingRaw = o.pendingAdd;
   const pendingAdd =
@@ -616,6 +626,8 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
     lastEvalBarTs: numOrNull(o.lastEvalBarTs),
     lastChecksKey: typeof o.lastChecksKey === "string" ? o.lastChecksKey : null,
     exitReason: typeof o.exitReason === "string" ? o.exitReason : null,
+    closeAttempts:
+      closeAttempts !== null && Number.isInteger(closeAttempts) && closeAttempts >= 0 ? closeAttempts : 0,
   };
 }
 
