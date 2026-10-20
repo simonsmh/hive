@@ -499,6 +499,13 @@ export interface TrendRuntimeState {
    * planning and stop drift-reconcile wait until verification.
    */
   openVerified: boolean;
+  /**
+   * The executed size of the initial unit (post risk-sizing), persisted at open verification.
+   * Add sizing caps each add at this executed size rather than the configured firstSz, so a
+   * risk-sized-down open cannot be followed by an add many times larger than the real first
+   * unit. Null for instances opened before this field existed (they fall back to firstSz).
+   */
+  initialUnitSz: number | null;
   /** Comma-joined failed gate names from the last trigger check; used to log only real changes. */
   lastChecksKey: string | null;
   exitReason: string | null;
@@ -517,6 +524,7 @@ export const EMPTY_TREND_STATE: TrendRuntimeState = {
   protectiveAlgoId: null,
   pendingAdd: null,
   openVerified: true,
+  initialUnitSz: null,
   lastEvalBarTs: null,
   lastChecksKey: null,
   exitReason: null,
@@ -559,6 +567,7 @@ export function parseTrendState(raw: unknown): TrendRuntimeState {
     protectiveAlgoId,
     pendingAdd,
     openVerified: o.openVerified === false ? false : true,
+    initialUnitSz: numOrNull(o.initialUnitSz),
     lastEvalBarTs: numOrNull(o.lastEvalBarTs),
     lastChecksKey: typeof o.lastChecksKey === "string" ? o.lastChecksKey : null,
     exitReason: typeof o.exitReason === "string" ? o.exitReason : null,

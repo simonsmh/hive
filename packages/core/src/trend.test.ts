@@ -420,6 +420,13 @@ describe("state helpers", () => {
     expect(parseTrendState({ openVerified: "yes" }).openVerified).toBe(true);
   });
 
+  it("parseTrendState round-trips initialUnitSz, defaulting to null for legacy rows", () => {
+    expect(parseTrendState({}).initialUnitSz).toBeNull();
+    expect(parseTrendState({ initialUnitSz: 0.01 }).initialUnitSz).toBe(0.01);
+    expect(parseTrendState({ initialUnitSz: "0.01" }).initialUnitSz).toBeNull();
+    expect(EMPTY_TREND_STATE.initialUnitSz).toBeNull();
+  });
+
   it("nextPeakAtr only grows", () => {
     expect(nextPeakAtr({ peakAtr: 5 }, 4)).toBe(5);
     expect(nextPeakAtr({ peakAtr: 5 }, 6)).toBe(6);

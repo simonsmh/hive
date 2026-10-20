@@ -912,3 +912,135 @@ Deno.test("ownership is lost when the remainder matches the tracked size but our
   strictEqual(state.intents.length, 0);
   deepStrictEqual(state.cancels, []);
 });
+
+Deno.test("a partially filled add settles its observed delta at timeout instead of being dropped", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      // An accepted 0.02 add whose fill never completed: only 0.01 landed, the rest was
+      // canceled, and the fill has been invisible past the one-hour timeout.
+      pendingAdd: { szNum: 0.02, barTs: LAST_TS - 61 * MIN, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const partial: AccountState = {
+    positions: [positionRow(0.02, 110)],
+    algos: [slAlgo("algo-2", 0.02, "109.38")],
+  };
+  const state = newFakeState();
+  const handler = makeHandler(fakeStore([instance], { NVDA: bars }, state), state, ACKED, [partial]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  // The partial fill is adopted into the book (not cleared as dead): the next exit closes it.
+  strictEqual(patch.state?.pendingAdd, null);
+  strictEqual(patch.state?.adds, 1);
+  strictEqual(patch.state?.positionSz, 0.02);
+  strictEqual(patch.state?.entryPx, 110);
+  strictEqual(patch.state?.stopPx, 109.38);
+  ok(patch.lastNote.includes("add_partial_fill"));
+});
+
+Deno.test("a timed-out pending add with no fill is still cleared without touching the book", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      pendingAdd: { szNum: 0.01, barTs: LAST_TS - 61 * MIN, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // Nothing landed: the account still shows only the pre-add size.
+  const noFill: AccountState = {
+    positions: [positionRow(0.01, 109)],
+    algos: [slAlgo("algo-1", 0.01, "99.25")],
+  };
+  const state = newFakeState();
+  const handler = makeHandler(fakeStore([instance], { NVDA: bars }, state), state, ACKED, [noFill]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.state?.pendingAdd, null);
+  strictEqual(patch.state?.adds, 0);
+  strictEqual(patch.state?.positionSz, 0.01);
+  ok(patch.lastNote.includes("add_fill_timeout:pending_cleared"));
+});
+
+Deno.test("live open verification persists the executed initial unit size", async () => {
+  const state = newFakeState();
+  // Configured firstSz is 0.10 but risk sizing executes 0.01: the persisted unit is the
+  // executed size, not the configured one.
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const, firstSz: "0.10" };
+  const account: AccountState = {
+    positions: [positionRow(0.01, 109.2)],
+    algos: [slAlgo("algo-1", 0.01, "99.25")],
+  };
+  const handler = makeHandler(fakeStore([instance], { NVDA: breakoutSeries() }, state), state, ACKED, [
+    { positions: [], algos: [] },
+    account,
+  ]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(state.intents[0]!.sz, "0.01");
+  strictEqual(patch.state?.positionSz, 0.01);
+  strictEqual(patch.state?.initialUnitSz, 0.01);
+});
+
+Deno.test("add planning caps at the executed initial unit, not the configured firstSz", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  // Configured firstSz 0.10, but the open was risk-sized down to 0.01. The loss cap is wide
+  // open (100U) so it cannot bind: without the executed-unit cap the plan would take 0.10.
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    firstSz: "0.10",
+    themeStopCapU: 100,
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      initialUnitSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const preFill: AccountState = {
+    positions: [positionRow(0.01, 109)],
+    algos: [slAlgo("algo-1", 0.01, "99.25")],
+  };
+  const transport: SubmitOutcome = { httpStatus: 0, status: "transport_error", reason: null, ordId: null, algoId: null, detail: null };
+  const state = newFakeState();
+  const handler = makeHandler(fakeStore([instance], { NVDA: bars }, state), state, transport, [preFill]);
+  await run(handler);
+  strictEqual(state.intents.length, 1);
+  // Adds reuse the open intent shape; the reason distinguishes the add path.
+  ok((state.intents[0]!.reason as string).startsWith("trend_follow add"));
+  strictEqual(state.intents[0]!.sz, "0.01");
+});

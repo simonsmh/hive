@@ -396,21 +396,32 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     const observed = pendingPosition ? Math.abs(pendingPosition.pos) : 0;
     if (!pendingPosition || observed < expected - fillTol) {
       if (nowBarTs - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
-        // Market-order fills land within seconds; after this long the add is presumed dead.
-        // The order may still fill later — then the own-size cap treats it as external size.
-        state = { ...state, pendingAdd: null };
-        patch.state = state;
-        dirty = true;
-        notes.push("add_fill_timeout:pending_cleared");
-        await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
-        return "timeout_cleared";
+        const fillDelta = observed - state.positionSz;
+        if (pendingPosition !== null && fillDelta > fillTol) {
+          // A partial fill landed but the remainder never did (canceled or rejected after a
+          // partial execution): settle the observed delta instead of dropping it, so a later
+          // exit closes the partially filled size rather than leaving it open.
+          notes.push(`add_partial_fill:delta=${fillDelta}:settling_observed`);
+        } else {
+          // Market-order fills land within seconds; after this long the add is presumed dead.
+          // The order may still fill later — then the own-size cap treats it as external size.
+          state = { ...state, pendingAdd: null };
+          patch.state = state;
+          dirty = true;
+          notes.push("add_fill_timeout:pending_cleared");
+          await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
+          return "timeout_cleared";
+        }
+      } else {
+        action = "add_pending";
+        emit("add_fill_pending", { expected, observed });
+        notes.push(`add_fill_pending:expected=${expected}`);
+        return "waiting";
       }
-      action = "add_pending";
-      emit("add_fill_pending", { expected, observed });
-      notes.push(`add_fill_pending:expected=${expected}`);
-      return "waiting";
     }
     const ownTotal = Math.min(observed, expected);
+    // The settled size can be smaller than the requested add size on a partial fill.
+    const settledSz = ownTotal - state.positionSz;
     const converge = await convergeProtection(
       instance,
       ctx,
@@ -446,19 +457,19 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     action = "added";
     emit("added", {
       ordId: "pending_settled",
-      sz: String(pending.szNum),
+      sz: String(settledSz),
       newStopPx: pending.newStopPx,
       adds: state.adds,
       protectionConverged: converge.converged,
     });
     await alert(
       "trend_added",
-      { ord_id: "pending_settled", sz: String(pending.szNum), stop_px: pending.newStopPx, adds: state.adds },
+      { ord_id: "pending_settled", sz: String(settledSz), stop_px: pending.newStopPx, adds: state.adds },
       `${pending.barTs}:${state.adds}`,
     );
     if (!converge.converged)
       await alert("trend_reconcile_failed", { stage: "add", stop_px: pending.newStopPx }, `add:${pending.barTs}:${state.adds}`);
-    notes.push(`added sz=${pending.szNum} stop=${pending.newStopPx} (fill settled)`);
+    notes.push(`added sz=${settledSz} stop=${pending.newStopPx} (fill settled)`);
     return "settled";
   };
 
@@ -613,6 +624,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         peakAtr: trigger.atr,
         stopPx,
         positionSz: effSz,
+        initialUnitSz: effSz,
         adds: 0,
         lastAddAnchorPx: trigger.close,
         lastAddBarTs: null,
@@ -688,6 +700,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       peakAtr: trigger.atr,
       stopPx,
       positionSz: Number(sz),
+      initialUnitSz: Number(sz),
       protectiveAlgoId: null,
       pendingAdd: null,
       openVerified: false,
@@ -750,6 +763,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
           ...state,
           entryPx: position.avgPx,
           positionSz: Math.abs(position.pos),
+          initialUnitSz: Math.abs(position.pos),
           protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
           openVerified: true,
           lastAddAnchorPx: position.avgPx,
@@ -854,7 +868,7 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       ...state,
       positionSz: ownSz,
       ...(ownSz === observedSz ? { entryPx: position.avgPx } : {}),
-      ...(justVerified ? { openVerified: true, lastAddAnchorPx: position.avgPx } : {}),
+      ...(justVerified ? { openVerified: true, lastAddAnchorPx: position.avgPx, initialUnitSz: ownSz } : {}),
     };
     patch.state = state;
     if (justVerified) emit("open_verified", { avgPx: position.avgPx, sz: ownSz });
@@ -922,7 +936,10 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       ctVal: spec.ctVal,
       lotSz: spec.lotSz,
       minSz: spec.minSz,
-      firstSz: Number(instance.firstSz),
+      // Cap adds at the executed initial unit, not the configured firstSz: risk sizing may
+      // have opened smaller, and an add must never exceed the actual first unit. Instances
+      // opened before initialUnitSz existed fall back to the configured size.
+      firstSz: state.initialUnitSz ?? Number(instance.firstSz),
       themeStopCapU: instance.themeStopCapU,
     });
     if (plan.add) {
