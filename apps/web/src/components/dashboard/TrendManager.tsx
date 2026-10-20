@@ -61,6 +61,7 @@ export function TrendManager({ initialStrategies }: { initialStrategies: TrendSt
   const [notice, setNotice] = useState<string | null>(null);
 
   const [symbol, setSymbol] = useState("");
+  const [mode, setMode] = useState("live");
   const [runMode, setRunMode] = useState("shadow");
   const [direction, setDirection] = useState("long");
   const [lever, setLever] = useState("20");
@@ -113,6 +114,7 @@ export function TrendManager({ initialStrategies }: { initialStrategies: TrendSt
         method: "POST",
         body: JSON.stringify({
           instId,
+          mode,
           runMode,
           direction,
           lever: Number(lever),
@@ -137,7 +139,7 @@ export function TrendManager({ initialStrategies }: { initialStrategies: TrendSt
         ? `已创建 ${instId} 实盘趋势实例，评估器 3 分钟内开始盯盘，触发即真下单`
         : `已创建 ${instId} 影子实例，只模拟与记录事件，不会下单`;
     });
-  }, [symbol, runMode, direction, lever, firstSz, theme, themeStopCapU, expiresInDays, peers, peerMinCount, expansionMultiple, volumeMultiple, addStepAtr, maxAdds, atrDecayExitPct, note, run]);
+  }, [symbol, mode, runMode, direction, lever, firstSz, theme, themeStopCapU, expiresInDays, peers, peerMinCount, expansionMultiple, volumeMultiple, addStepAtr, maxAdds, atrDecayExitPct, note, run]);
 
   const cancel = useCallback(
     (strategy: TrendStrategyView) => {
@@ -261,6 +263,13 @@ export function TrendManager({ initialStrategies }: { initialStrategies: TrendSt
         <label>
           标的代码
           <input type="text" value={symbol} onChange={(event) => setSymbol(event.target.value)} placeholder="如 NVDA" required />
+        </label>
+        <label>
+          账户模式
+          <select value={mode} onChange={(event) => setMode(event.target.value)}>
+            <option value="live">实盘账户</option>
+            <option value="demo">模拟账户</option>
+          </select>
         </label>
         <label>
           运行模式

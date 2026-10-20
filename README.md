@@ -997,7 +997,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/position-manager" \
 - **加仓（金字塔）**：收盘顺向走出 0.5×ATR 步长触发；统一止损锚定触发 K 的基底且只向有利方向移动；加仓前验算风险不变量——全仓在统一止损下的最坏亏损 ≤ `themeStopCapU`，不满足则按手数递减或不加；加仓量 ≤ 首仓。
 - **退出**：ATR 自入场后峰值回落 ≥ 28%，或收盘反穿 5 分钟 MA60，先到先走，经 `close` 全平并清扫残留保护单。
 - **止损对账**：核心不变量是「任何时刻交易所保护单恰好覆盖全仓且触发价等于统一止损」。纯函数 `planAlgoReconcile` 比对期望与 order-sync 读到的实盘 algos，收敛动作只有一种：经 order-submit 发一条 `amend_tpsl`（新 algo 覆盖全仓@统一止损，网关随即撤销其记录在案的旧 algos），随后按 position-manager 的先例直接撤销 amend 未覆盖的残留保护单，再读一次验证计划为空；失败写事件并产生 critical 告警。
-- **影子模式**：`run_mode = 'shadow'` 的实例跑完整状态机（模拟成交、加仓、退出）并写事件，但绝不提交订单；`run_mode = 'live'` 才真下单。创建时必须显式传 runMode。看板「趋势策略」面板（`/trend`）与 API `/api/trend-strategies` 管理实例，每次状态转换、触发、跳过与对账都写入 `trend_strategy_events`。
+- **影子模式**：`run_mode = 'shadow'` 的实例跑完整状态机（模拟成交、加仓、退出）并写事件，但绝不提交订单；`run_mode = 'live'` 才真下单。创建时必须显式传 mode（账户模式，评估器只读自己账户的实例）与 runMode。看板「趋势策略」面板（`/trend`）与 API `/api/trend-strategies` 管理实例，每次状态转换、触发、跳过与对账都写入 `trend_strategy_events`。
 - **调度取舍**：每分钟调度会增加约 4.3 万次/月调用、突破免费额度，故与其它评估器一致取每 3 分钟；决策以 5 分钟 K 线为粒度，无新 K 线的轮次不写任何数据。
 
 ## 安全
