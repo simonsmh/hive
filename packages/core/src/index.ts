@@ -3,6 +3,8 @@ export * from "./okx.js";
 export * from "./symbols.js";
 export * from "./symbol-input.js";
 export * from "./atr.js";
+export * from "./indicators.js";
+export * from "./trend.js";
 export * from "./auth.js";
 export * from "./alerts.js";
 export * from "./strategy.js";

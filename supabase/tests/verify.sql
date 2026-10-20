@@ -64,6 +64,14 @@ begin
   perform 1 from cron.job where jobname = 'hive-health-check' and schedule = '* * * * *';
   if not found then raise exception 'pg_cron job hive-health-check (every minute) missing'; end if;
 
+  -- The per-minute hive-health-check cron may already have fired while migrations
+  -- were being applied, pre-creating stale-source alerts and making the health
+  -- check counts below nondeterministic. Freeze the job now that its schedule is
+  -- verified, and clear anything it already wrote so the assertions start clean.
+  -- (This whole file runs in a transaction that is rolled back.)
+  perform cron.unschedule('hive-health-check');
+  delete from public.alerts where kind in ('source_stale', 'source_recovered');
+
   -- Webhook secret goes to Vault, not into a plaintext column.
   v_webhook := public.hive_upsert_webhook('verify-hook', 'https://example.com/hook', 'hunter2-test-secret');
   select secret_id into v_secret_id from public.webhooks where id = v_webhook;
