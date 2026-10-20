@@ -926,10 +926,12 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
   // just-filled add open after the strategy is marked done. While the fill is not visible
   // yet ("waiting"), the exit is still evaluated against the visible exposure: a pending
   // add must not suppress a valid exit signal for up to the fill-timeout window. A
-  // triggered exit then drops the pending marker — a late fill, if any, becomes external
-  // size, same as the fill-timeout path. A timed-out add ("timeout_cleared") keeps the
-  // historical behavior of concluding immediately: the add is presumed dead and the next
-  // bar re-plans from a clean book.
+  // triggered exit then reconciles the add conclusively (terminal settle) before closeOut:
+  // an observed fill — including a partial one — is committed so the exit closes the true
+  // own size; a fill that never appeared drops the marker at once and a late remainder
+  // becomes external size, same as the fill-timeout path. A timed-out add
+  // ("timeout_cleared") keeps the historical behavior of concluding immediately: the add
+  // is presumed dead and the next bar re-plans from a clean book.
   let pendingAddWaiting = false;
   if (!shadow && state.pendingAdd) {
     const settled = await settlePendingAdd(lastBar.ts, spec);
@@ -950,21 +952,30 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       close: exitDecision.close,
     });
     if (pendingAddWaiting && state.pendingAdd) {
-      // The exit fires while the add's fill is still invisible: close the exposure that is
-      // visible and drop the pending marker. The add order itself cannot be cancelled from
-      // here (no order id is tracked and the exchange surface only cancels algos); a late
-      // fill, if any, becomes external size, same as the fill-timeout path.
+      // The exit fires while the add is still unsettled: reconcile it conclusively (terminal
+      // settle) BEFORE closeOut, so any observed fill — including a partial one — is
+      // committed to the book and closed with the exit. The pre-exit settle above only
+      // waits; dropping the marker here without settling would orphan a partially filled
+      // add: closeOut closes only state.positionSz and can mark the instance done while
+      // strategy-created exposure stays open. A fill that never appeared drops the marker
+      // at once (terminal settle never waits); a remainder that fills later becomes
+      // external size, same as the expiry path. Cancelling the add order is not an option:
+      // adds are market orders and the exchange surface only cancels algos.
       const dropped = state.pendingAdd;
-      state = { ...state, pendingAdd: null };
-      patch.state = state;
-      dirty = true;
-      emit("exit_with_pending_add", { pendingSz: dropped.szNum, pendingBarTs: dropped.barTs });
-      await alert(
-        "trend_add_failed",
-        { outcome: "exit_with_pending_add", pending_sz: dropped.szNum, pending_bar_ts: dropped.barTs },
-        `${dropped.barTs}:${state.adds}`,
-      );
-      notes.push(`exit_with_pending_add:sz=${dropped.szNum}:marker_dropped`);
+      const reconciled = await settlePendingAdd(lastBar.ts, spec, { terminal: true });
+      emit("exit_with_pending_add", {
+        pendingSz: dropped.szNum,
+        pendingBarTs: dropped.barTs,
+        outcome: reconciled,
+      });
+      notes.push(`exit_with_pending_add:${reconciled}`);
+      if (reconciled === "timeout_cleared") {
+        await alert(
+          "trend_add_failed",
+          { outcome: "exit_with_pending_add", pending_sz: dropped.szNum, pending_bar_ts: dropped.barTs },
+          `${dropped.barTs}:${state.adds}`,
+        );
+      }
     }
     const closed = await closeOut(instance, ctx, {
       shadow,

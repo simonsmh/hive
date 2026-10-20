@@ -1064,6 +1064,7 @@ Deno.test("an exit fires while an add is pending: the visible exposure is closed
     noFill,
     noFill,
     noFill,
+    noFill,
     flat,
   ]);
   await run(handler);
@@ -1079,6 +1080,61 @@ Deno.test("an exit fires while an add is pending: the visible exposure is closed
   strictEqual(patch.state?.pendingAdd, null);
   strictEqual(patch.state?.exitReason, "atr_decay");
   ok(state.alerts.some((a) => a.kind === "trend_add_failed" && a.payload.outcome === "exit_with_pending_add"));
+});
+
+Deno.test("an exit fires while an add is partially filled: the partial fill is settled and closed", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 10,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      // An accepted 0.02 add, only 0.01 landed, and the exit fires before the fill timeout.
+      // Without conclusive reconcile the exit would drop the marker and close only the
+      // visible 0.01, orphaning the partially filled 0.01 as unmanaged exposure.
+      pendingAdd: { szNum: 0.02, barTs: LAST_TS - BAR_MS, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const partial: AccountState = {
+    positions: [positionRow(0.02, 110)],
+    algos: [slAlgo("algo-2", 0.02, "109.38")],
+  };
+  const flat: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [
+    partial,
+    partial,
+    partial,
+    partial,
+    partial,
+    flat,
+  ]);
+  await run(handler);
+  // The partial delta is committed into the book before the exit: the close covers the
+  // reconciled 0.02, and the settled add is recorded — nothing is left unmanaged.
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.02");
+  const kinds = state.events.map((event) => event.kind);
+  ok(kinds.includes("exit_triggered"));
+  ok(kinds.includes("exit_with_pending_add"));
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "done");
+  strictEqual(patch.state?.pendingAdd, null);
+  strictEqual(patch.state?.adds, 1);
+  strictEqual(patch.state?.positionSz, 0);
+  strictEqual(patch.state?.exitReason, "atr_decay");
+  ok(patch.lastNote.includes("add_partial_fill"));
+  ok(patch.lastNote.includes("exit_with_pending_add:settled"));
 });
 
 Deno.test("an adverse add fill tightens the unified stop to respect the theme cap", async () => {
