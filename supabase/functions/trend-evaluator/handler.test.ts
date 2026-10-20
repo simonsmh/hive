@@ -735,3 +735,180 @@ Deno.test("manual partial close with our stop still in place keeps managing the 
   strictEqual(patch.state?.positionSz, 0.03);
   ok(!state.events.map((event) => event.kind).includes("ownership_lost"));
 });
+
+Deno.test("add with an unknown placement outcome is tracked as pending and settles next cycle", async () => {
+  const bars = [...breakoutSeries(), bar(5, 110, 114, 112, 113)];
+  const activeState = {
+    entryPx: 109,
+    entryAtr: 5.5,
+    peakAtr: 5.5,
+    stopPx: 99.25,
+    positionSz: 0.01,
+    adds: 0,
+    lastAddAnchorPx: 109,
+    lastEvalBarTs: LAST_TS - BAR_MS,
+  };
+  // Cycle 1: the add submission's response is lost in transport — it may have reached OKX.
+  const state1 = newFakeState();
+  const instance1: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: activeState };
+  const preFill: AccountState = { positions: [positionRow(0.01, 109)], algos: [slAlgo("algo-1", 0.01, "99.25")] };
+  const transport: SubmitOutcome = { httpStatus: 0, status: "transport_error", reason: null, ordId: null, algoId: null, detail: null };
+  const handler1 = makeHandler(fakeStore([instance1], { NVDA: bars }, state1), state1, transport, [preFill]);
+  await run(handler1);
+  strictEqual(state1.intents.length, 1);
+  const patch1 = state1.patches[0]!.patch;
+  strictEqual(patch1.status, undefined);
+  ok(patch1.state?.pendingAdd);
+  strictEqual(patch1.state?.pendingAdd?.szNum, 0.01);
+  strictEqual(patch1.state?.adds, 0);
+  strictEqual(patch1.state?.stopPx, 99.25);
+  ok(patch1.lastNote.includes("add_unknown_outcome"));
+  ok(state1.events.map((event) => event.kind).includes("add_fill_pending"));
+
+  // Cycle 2: the fill is visible — settle it from the account, never resubmit.
+  const state2 = newFakeState();
+  const carried = { ...patch1.state, lastEvalBarTs: LAST_TS + BAR_MS };
+  const bars2 = [...bars, bar(6, 112, 115, 111, 114)];
+  const instance2: TrendInstanceRow = { ...BASE_INSTANCE, runMode: "live", status: "active", state: carried as unknown as Record<string, unknown> };
+  const filled: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+  const handler2 = makeHandler(fakeStore([instance2], { NVDA: bars2 }, state2), state2, ACKED, [filled]);
+  await run(handler2);
+  strictEqual(state2.intents.length, 0);
+  const patch2 = state2.patches[0]!.patch;
+  strictEqual(patch2.state?.pendingAdd, null);
+  strictEqual(patch2.state?.adds, 1);
+  strictEqual(patch2.state?.positionSz, 0.02);
+});
+
+Deno.test("pending add settles before an exit close so the close covers the filled size", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 10,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      pendingAdd: { szNum: 0.01, barTs: LAST_TS - BAR_MS, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const filled: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+  const flat: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [
+    filled,
+    filled,
+    filled,
+    filled,
+    flat,
+  ]);
+  await run(handler);
+  // The only submission is the exit close, and it covers the settled 0.02 — not the stale 0.01.
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.02");
+  const kinds = state.events.map((event) => event.kind);
+  ok(kinds.includes("added"));
+  ok(kinds.includes("exit_triggered"));
+  ok(kinds.indexOf("added") < kinds.indexOf("exit_triggered"));
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "done");
+  strictEqual(patch.state?.adds, 1);
+  strictEqual(patch.state?.exitReason, "atr_decay");
+});
+
+Deno.test("expiry settles a pending add before closing out", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    expiresAtMs: NOW - 1_000,
+    state: {
+      entryPx: 109,
+      entryAtr: 5.5,
+      peakAtr: 5.5,
+      stopPx: 99.25,
+      positionSz: 0.01,
+      adds: 0,
+      lastAddAnchorPx: 109,
+      protectiveAlgoId: "algo-2",
+      openVerified: true,
+      pendingAdd: { szNum: 0.01, barTs: LAST_TS - BAR_MS, newStopPx: 109.38, anchorPx: 113 },
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  const filled: AccountState = { positions: [positionRow(0.02, 111)], algos: [slAlgo("algo-2", 0.02, "109.38")] };
+  const flat: AccountState = { positions: [], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [
+    filled,
+    filled,
+    filled,
+    flat,
+  ]);
+  await run(handler);
+  strictEqual(state.intents.length, 1);
+  strictEqual(state.intents[0]!.action, "close");
+  strictEqual(state.intents[0]!.sz, "0.02");
+  const kinds = state.events.map((event) => event.kind);
+  ok(kinds.includes("added"));
+  ok(kinds.includes("expired"));
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "expired");
+  strictEqual(patch.state?.adds, 1);
+});
+
+Deno.test("the loser of the open action claim persists no state", async () => {
+  const state = newFakeState();
+  const instance = { ...BASE_INSTANCE, runMode: "live" as const };
+  const store: TrendStore = {
+    ...fakeStore([instance], { NVDA: breakoutSeries() }, state),
+    claim: () => Promise.resolve(false),
+  };
+  const handler = makeHandler(store, state, ACKED, [{ positions: [], algos: [] }]);
+  await run(handler);
+  // No recordEval, no events, no submission: the winner's opened state must not be
+  // overwritten by this invocation's pre-open snapshot.
+  strictEqual(state.patches.length, 0);
+  strictEqual(state.events.length, 0);
+  strictEqual(state.intents.length, 0);
+});
+
+Deno.test("ownership is lost when the remainder matches the tracked size but our stop is gone", async () => {
+  const state = newFakeState();
+  const instance: TrendInstanceRow = {
+    ...BASE_INSTANCE,
+    runMode: "live",
+    status: "active",
+    state: {
+      entryPx: 109,
+      peakAtr: 0.5,
+      stopPx: 99.25,
+      positionSz: 0.05,
+      adds: 0,
+      protectiveAlgoId: "algo-1",
+      openVerified: true,
+      lastAddAnchorPx: 109,
+      lastEvalBarTs: LAST_TS - BAR_MS,
+    },
+  };
+  // Our stop fired and closed our 0.05; an equal-size external position opened in the same
+  // window. Size alone cannot tell it apart from ours — the missing algo can.
+  const account: AccountState = { positions: [positionRow(0.05, 110)], algos: [] };
+  const handler = makeHandler(fakeStore([instance], { NVDA: flatSeries() }, state), state, ACKED, [account]);
+  await run(handler);
+  const patch = state.patches[0]!.patch;
+  strictEqual(patch.status, "done");
+  strictEqual(patch.state?.exitReason, "ownership_lost");
+  strictEqual(patch.state?.positionSz, 0);
+  ok(state.events.map((event) => event.kind).includes("ownership_lost"));
+  strictEqual(state.intents.length, 0);
+  deepStrictEqual(state.cancels, []);
+});

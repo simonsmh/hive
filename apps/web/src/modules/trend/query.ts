@@ -19,20 +19,22 @@ export async function listTrendViews(): Promise<TrendStrategyView[]> {
   const rows = (data ?? []) as TrendStrategyRow[];
   if (rows.length === 0) return [];
 
-  const { data: eventData, error: eventError } = await db
-    .from("trend_strategy_events")
-    .select("id, instance_id, ts, kind, detail")
-    .in("instance_id", rows.map((row) => row.id))
-    .order("ts", { ascending: false })
-    .limit(rows.length * EVENTS_PER_INSTANCE);
-  assertNoError(eventError);
-  const counts = new Map<string, number>();
-  const events = ((eventData ?? []) as TrendEventRow[]).filter((event) => {
-    const seen = counts.get(event.instance_id) ?? 0;
-    if (seen >= EVENTS_PER_INSTANCE) return false;
-    counts.set(event.instance_id, seen + 1);
-    return true;
-  });
+  // Latest events are fetched per instance (the (instance_id, ts) index serves each
+  // lookup): a single query with a global limit ordered by recency lets one busy
+  // strategy's snapshots consume the whole budget and starve every other timeline.
+  const eventLists = await Promise.all(
+    rows.map(async (row) => {
+      const { data, error } = await db
+        .from("trend_strategy_events")
+        .select("id, instance_id, ts, kind, detail")
+        .eq("instance_id", row.id)
+        .order("ts", { ascending: false })
+        .limit(EVENTS_PER_INSTANCE);
+      assertNoError(error);
+      return (data ?? []) as TrendEventRow[];
+    }),
+  );
+  const events = eventLists.flat();
   return rows.map((row) => toTrendStrategyView(row, events));
 }
 

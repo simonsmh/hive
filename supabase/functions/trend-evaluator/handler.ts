@@ -377,6 +377,91 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       .catch((error: unknown) => ctx.log(`instance=${instance.id} alert insert failed: ${describeError(error)}`));
   };
 
+  /**
+   * Settles a pending add against the account: commits its fill (size, blended entry,
+   * unified stop) once the filled size is visible. Returns "settled" when the book now
+   * includes the add, "waiting" while the fill is not visible yet, and "timeout_cleared"
+   * when the add is presumed dead and dropped. Terminal paths (exit, expiry) call this
+   * BEFORE closing out, so a just-filled add is never left out of the closing size.
+   */
+  const settlePendingAdd = async (
+    nowBarTs: number,
+    spec: InstrumentSpec,
+  ): Promise<"settled" | "waiting" | "timeout_cleared"> => {
+    const pending = state.pendingAdd!;
+    const expected = state.positionSz + pending.szNum;
+    const fillTol = spec.lotSz / 2;
+    const pendingAccount = await deps.exchange.accountState(instance.instId);
+    const pendingPosition = findPosition(pendingAccount, instance);
+    const observed = pendingPosition ? Math.abs(pendingPosition.pos) : 0;
+    if (!pendingPosition || observed < expected - fillTol) {
+      if (nowBarTs - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
+        // Market-order fills land within seconds; after this long the add is presumed dead.
+        // The order may still fill later — then the own-size cap treats it as external size.
+        state = { ...state, pendingAdd: null };
+        patch.state = state;
+        dirty = true;
+        notes.push("add_fill_timeout:pending_cleared");
+        await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
+        return "timeout_cleared";
+      }
+      action = "add_pending";
+      emit("add_fill_pending", { expected, observed });
+      notes.push(`add_fill_pending:expected=${expected}`);
+      return "waiting";
+    }
+    const ownTotal = Math.min(observed, expected);
+    const converge = await convergeProtection(
+      instance,
+      ctx,
+      events,
+      ownTotal,
+      pending.newStopPx,
+      spec,
+      state.protectiveAlgoId,
+    );
+    notes.push(...converge.notes);
+    state = {
+      ...state,
+      entryPx:
+        ownTotal === observed
+          ? pendingPosition.avgPx
+          : (state.entryPx! * state.positionSz + pending.anchorPx * pending.szNum) / ownTotal,
+      positionSz: ownTotal,
+      protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
+      pendingAdd: null,
+      adds: state.adds + 1,
+      lastAddAnchorPx: pending.anchorPx,
+      lastAddBarTs: pending.barTs,
+      stopPx: pending.newStopPx,
+    };
+    patch.state = state;
+    if (converge.externalAlgoIds.length > 0) {
+      await alert(
+        "trend_external_algos",
+        { algo_ids: converge.externalAlgoIds },
+        `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
+      );
+    }
+    action = "added";
+    emit("added", {
+      ordId: "pending_settled",
+      sz: String(pending.szNum),
+      newStopPx: pending.newStopPx,
+      adds: state.adds,
+      protectionConverged: converge.converged,
+    });
+    await alert(
+      "trend_added",
+      { ord_id: "pending_settled", sz: String(pending.szNum), stop_px: pending.newStopPx, adds: state.adds },
+      `${pending.barTs}:${state.adds}`,
+    );
+    if (!converge.converged)
+      await alert("trend_reconcile_failed", { stage: "add", stop_px: pending.newStopPx }, `add:${pending.barTs}:${state.adds}`);
+    notes.push(`added sz=${pending.szNum} stop=${pending.newStopPx} (fill settled)`);
+    return "settled";
+  };
+
   let params: TrendParams;
   try {
     params = parseTrendParams(instance.params);
@@ -402,6 +487,21 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         return { ts: instance.expiresAtMs, open: px, high: px, low: px, close: px, volume: 0, volCcy: 0, confirmed: true };
       })();
     if (instance.status === "active" && (shadow ? state.positionSz > 0 : true)) {
+      if (!shadow && state.pendingAdd) {
+        // Settle a pending add before the terminal close, so a just-filled add is included
+        // in the closing size instead of being left open after the instance expires.
+        const pendingBarTs = state.pendingAdd.barTs;
+        const spec = await deps.exchange.instrumentSpec(instance.instId);
+        const settled = await settlePendingAdd(closeBar.ts, spec);
+        if (settled === "waiting") {
+          // Expiry cannot wait for the fill: drop the marker and close what is on the book.
+          state = { ...state, pendingAdd: null };
+          patch.state = state;
+          dirty = true;
+          notes.push("expiry_cleared_pending_add");
+          await alert("trend_add_failed", { outcome: "expiry_cleared_pending_add" }, `${pendingBarTs}:${state.adds}`);
+        }
+      }
       const closed = await closeOut(instance, ctx, {
         shadow,
         state,
@@ -528,8 +628,11 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
 
     const claimed = await deps.store.claim(instance.id, ACTION_LEASE_SEC);
     if (!claimed) {
+      // Lost the action claim: another invocation owns this cycle. Persisting our pre-open
+      // snapshot via conclude() could land after the winner persisted the opened state and
+      // clobber it, so the loser returns without any state write.
       notes.push("open_claimed_elsewhere");
-      return conclude();
+      return { id: instance.id, instId: instance.instId, action, notes };
     }
     const liveRow = await deps.store.getInstance(instance.id);
     if (!liveRow || liveRow.status !== "armed") {
@@ -725,23 +828,24 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     // it), and the account's blended average must not replace this instance's entry price while
     // the sizes disagree.
     //
-    // The book only shrinks on this instance's own lifecycle: if the position fell below the
-    // tracked size while our protective algo is gone, our unified stop fired and any remainder
-    // is external exposure that must not be adopted — the strategy stands down instead. A
-    // shrink with our algo still in place was a manual reduction; the remainder is still ours.
+    // Ownership is judged from this instance's own algo lifecycle, not from the aggregate
+    // size alone: once our protective algo is gone, either our unified stop fired — our
+    // tracked size is closed, so anything left on the row is external exposure — or the
+    // algo was cancelled, in which case re-arming protection the user removed is not ours
+    // to do either. Both ways the book no longer owns this row, whatever size it shows
+    // (an equal or larger remainder after the stop fired is external top-up, not ours).
+    // A shrink with our algo still in place was a manual reduction; the remainder is ours.
     const observedSz = Math.abs(position.pos);
     const prevOwn = state.positionSz;
     let ownSz: number;
     let ownershipLost = false;
-    if (prevOwn > 0 && observedSz < prevOwn) {
-      const ourAlgoGone =
-        state.protectiveAlgoId !== null && !account.algos.some((algo) => algo.algoId === state.protectiveAlgoId);
-      if (ourAlgoGone) {
-        ownSz = 0;
-        ownershipLost = true;
-      } else {
-        ownSz = observedSz;
-      }
+    const ourAlgoGone =
+      state.protectiveAlgoId !== null && !account.algos.some((algo) => algo.algoId === state.protectiveAlgoId);
+    if (prevOwn > 0 && ourAlgoGone) {
+      ownSz = 0;
+      ownershipLost = true;
+    } else if (prevOwn > 0 && observedSz < prevOwn) {
+      ownSz = observedSz;
     } else {
       ownSz = prevOwn > 0 ? Math.min(prevOwn, observedSz) : observedSz;
     }
@@ -764,6 +868,15 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
       notes.push(`ownership_lost:external_remainder=${observedSz}`);
       return conclude();
     }
+  }
+
+  const spec = await deps.exchange.instrumentSpec(instance.instId);
+  // A pending add settles BEFORE the exit decision: if its fill landed, the exit's closing
+  // size must include it — evaluating (or executing) the exit first would leave the
+  // just-filled add open after the strategy is marked done.
+  if (!shadow && state.pendingAdd) {
+    const settled = await settlePendingAdd(lastBar.ts, spec);
+    if (settled !== "settled") return conclude();
   }
 
   const exitDecision = evaluateTrendExit(bars, state, params, instance.direction);
@@ -798,83 +911,6 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
     return conclude();
   }
 
-  const spec = await deps.exchange.instrumentSpec(instance.instId);
-  if (!shadow && state.pendingAdd) {
-    // A previous add was accepted but its fill had not landed yet: settle it before planning
-    // anything new, so the same add is never submitted twice and the unified stop never
-    // advances ahead of the observed fill.
-    const pending = state.pendingAdd;
-    const expected = state.positionSz + pending.szNum;
-    const fillTol = spec.lotSz / 2;
-    const pendingAccount = await deps.exchange.accountState(instance.instId);
-    const pendingPosition = findPosition(pendingAccount, instance);
-    const observed = pendingPosition ? Math.abs(pendingPosition.pos) : 0;
-    if (!pendingPosition || observed < expected - fillTol) {
-      if (lastBar.ts - pending.barTs > PENDING_ADD_TIMEOUT_MS) {
-        // Market-order fills land within seconds; after this long the add is presumed dead.
-        // The order may still fill later — then the own-size cap treats it as external size.
-        state = { ...state, pendingAdd: null };
-        patch.state = state;
-        notes.push("add_fill_timeout:pending_cleared");
-        await alert("trend_add_failed", { outcome: "add_fill_timeout" }, `${pending.barTs}:${state.adds}`);
-      } else {
-        action = "add_pending";
-        emit("add_fill_pending", { expected, observed });
-        notes.push(`add_fill_pending:expected=${expected}`);
-      }
-      return conclude();
-    }
-    const ownTotal = Math.min(observed, expected);
-    const converge = await convergeProtection(
-      instance,
-      ctx,
-      events,
-      ownTotal,
-      pending.newStopPx,
-      spec,
-      state.protectiveAlgoId,
-    );
-    notes.push(...converge.notes);
-    state = {
-      ...state,
-      entryPx:
-        ownTotal === observed
-          ? pendingPosition.avgPx
-          : (state.entryPx! * state.positionSz + pending.anchorPx * pending.szNum) / ownTotal,
-      positionSz: ownTotal,
-      protectiveAlgoId: converge.algoId ?? state.protectiveAlgoId,
-      pendingAdd: null,
-      adds: state.adds + 1,
-      lastAddAnchorPx: pending.anchorPx,
-      lastAddBarTs: pending.barTs,
-      stopPx: pending.newStopPx,
-    };
-    patch.state = state;
-    if (converge.externalAlgoIds.length > 0) {
-      await alert(
-        "trend_external_algos",
-        { algo_ids: converge.externalAlgoIds },
-        `algos:${[...converge.externalAlgoIds].sort().join(",")}`,
-      );
-    }
-    action = "added";
-    emit("added", {
-      ordId: "pending_settled",
-      sz: String(pending.szNum),
-      newStopPx: pending.newStopPx,
-      adds: state.adds,
-      protectionConverged: converge.converged,
-    });
-    await alert(
-      "trend_added",
-      { ord_id: "pending_settled", sz: String(pending.szNum), stop_px: pending.newStopPx, adds: state.adds },
-      `${pending.barTs}:${state.adds}`,
-    );
-    if (!converge.converged)
-      await alert("trend_reconcile_failed", { stage: "add", stop_px: pending.newStopPx }, `add:${pending.barTs}:${state.adds}`);
-    notes.push(`added sz=${pending.szNum} stop=${pending.newStopPx} (fill settled)`);
-    return conclude();
-  }
   // Add planning waits for the opening fill to be verified: with no confirmed position
   // there is nothing to pyramid.
   if (exitDecision.atr !== null && state.stopPx !== null && state.openVerified) {
@@ -917,8 +953,10 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
 
       const claimed = await deps.store.claim(instance.id, ACTION_LEASE_SEC);
       if (!claimed) {
+        // Same rule as the open path: the claim loser must not persist its pre-add snapshot
+        // over the winner's committed add state.
         notes.push("add_claimed_elsewhere");
-        return conclude();
+        return { id: instance.id, instId: instance.instId, action, notes };
       }
       const liveRow = await deps.store.getInstance(instance.id);
       if (!liveRow || liveRow.status !== "active") {
@@ -950,11 +988,26 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         }),
       );
       if (outcome.status !== "acked") {
-        emit("add_failed", { outcome: describeOutcome(outcome), placed: !isNothingPlaced(outcome) });
-        if (!isNothingPlaced(outcome)) {
+        const placed = !isNothingPlaced(outcome);
+        emit("add_failed", { outcome: describeOutcome(outcome), placed });
+        if (placed) {
           await alert("trend_add_failed", { outcome: describeOutcome(outcome) }, `${lastBar.ts}:${state.adds}`);
+          // Possibly placed despite the lost response (same rule as the open path): hang the
+          // add as pending so the next cycle settles it from the account. Dropping it here
+          // would cap a filled add back to the old tracked size as "external" exposure and
+          // could plan a second add, leaving the first fill outside the tracked protection.
+          // The add is never resubmitted.
+          state = {
+            ...state,
+            pendingAdd: { szNum: plan.szNum, barTs: lastBar.ts, newStopPx, anchorPx: lastBar.close },
+          };
+          patch.state = state;
+          action = "add_pending";
+          emit("add_fill_pending", { outcome: describeOutcome(outcome), expected: state.positionSz + plan.szNum });
+          notes.push(`add_unknown_outcome:${describeOutcome(outcome)}:settle_next_cycle`);
+        } else {
+          notes.push(`add_not_completed:${describeOutcome(outcome)}`);
         }
-        notes.push(`add_not_completed:${describeOutcome(outcome)}`);
         return conclude();
       }
       const account = await deps.exchange.accountState(instance.instId);
@@ -1054,7 +1107,10 @@ async function evaluateInstance(instance: TrendInstanceRow, ctx: RunContext): Pr
         }
         if (!converge.converged) await alert("trend_reconcile_failed", { stage: "drift", stop_px: state.stopPx }, `drift:${state.stopPx}`);
       } else {
+        // Same rule as the open/add paths: the claim loser returns without persisting, so its
+        // snapshot (with the pre-converge protective algo id) cannot roll back the winner's.
         notes.push("reconcile_claimed_elsewhere");
+        return { id: instance.id, instId: instance.instId, action, notes };
       }
     }
   }
