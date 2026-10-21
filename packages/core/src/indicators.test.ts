@@ -4,8 +4,11 @@ import {
   closeLocationValue,
   donchianSeries,
   efficiencyRatioSeries,
+  linearRegression,
+  maSpread,
   rollingMaxSeries,
   rollingMinSeries,
+  rollingRegressionSlope,
   smaSeries,
   trailingMaxPrior,
   trailingMean,
@@ -51,6 +54,76 @@ describe("wilderAtrSeries", () => {
 describe("smaSeries", () => {
   it("is null until len values accumulate", () => {
     expect(smaSeries([1, 2, 3, 4], 2)).toEqual([null, 1.5, 2.5, 3.5]);
+  });
+});
+
+describe("maSpread", () => {
+  it("is positive while the fast average rides above the slow one in an uptrend", () => {
+    // sma2: [_, 1.5, 2.5, 3.5, 4.5]; sma3: [_, _, 2, 3, 4]; spread = sma2 − sma3.
+    expect(maSpread([1, 2, 3, 4, 5], 2, 3)).toEqual([null, null, 0.5, 0.5, 0.5]);
+  });
+
+  it("is negative in a downtrend and zero for a flat series", () => {
+    expect(maSpread([5, 4, 3, 2, 1], 2, 3)).toEqual([null, null, -0.5, -0.5, -0.5]);
+    expect(maSpread([3, 3, 3, 3], 2, 3)).toEqual([null, null, 0, 0]);
+  });
+});
+
+describe("linearRegression", () => {
+  it("fits a perfect line exactly, up, down and scaled", () => {
+    expect(linearRegression([1, 2, 3, 4])).toEqual({ slope: 1, r2: 1 });
+    expect(linearRegression([4, 3, 2, 1])).toEqual({ slope: -1, r2: 1 });
+    expect(linearRegression([2, 4, 6, 8])).toEqual({ slope: 2, r2: 1 });
+    expect(linearRegression([3, 7])).toEqual({ slope: 4, r2: 1 });
+  });
+
+  it("reads slope 0 and r2 0 for a constant series", () => {
+    expect(linearRegression([5, 5, 5, 5])).toEqual({ slope: 0, r2: 0 });
+  });
+
+  it("fits a noisy rise with a positive slope and an r2 strictly inside (0, 1)", () => {
+    // [1, 2, 2, 3]: slope = 3/5 = 0.6; residuals −0.1, 0.3, −0.3, 0.1 → ssRes 0.2, ssTot 2 → r2 = 0.9.
+    const fit = linearRegression([1, 2, 2, 3]);
+    expect(fit!.slope).toBeCloseTo(0.6, 10);
+    expect(fit!.r2).toBeCloseTo(0.9, 10);
+    expect(fit!.r2).toBeGreaterThan(0);
+    expect(fit!.r2).toBeLessThan(1);
+  });
+
+  it("is null when fewer than two values exist", () => {
+    expect(linearRegression([])).toBeNull();
+    expect(linearRegression([42])).toBeNull();
+  });
+});
+
+describe("rollingRegressionSlope", () => {
+  it("is null until the first full window, then tracks the window fit", () => {
+    const two = rollingRegressionSlope([1, 2, 3, 4], 2);
+    expect(two.slope).toEqual([null, 1, 1, 1]);
+    expect(two.r2).toEqual([null, 1, 1, 1]);
+    const three = rollingRegressionSlope([1, 2, 3, 4], 3);
+    expect(three.slope).toEqual([null, null, 1, 1]);
+    expect(three.r2).toEqual([null, null, 1, 1]);
+  });
+
+  it("carries the noisy window's slope and r2 at the final index", () => {
+    const { slope, r2 } = rollingRegressionSlope([1, 2, 2, 3], 4);
+    expect(slope.slice(0, 3)).toEqual([null, null, null]);
+    expect(slope[3]).toBeCloseTo(0.6, 10);
+    expect(r2[3]).toBeCloseTo(0.9, 10);
+  });
+
+  it("is all null when the window is longer than the series", () => {
+    const { slope, r2 } = rollingRegressionSlope([1, 2], 5);
+    expect(slope).toEqual([null, null]);
+    expect(r2).toEqual([null, null]);
+    expect(rollingRegressionSlope([], 3)).toEqual({ slope: [], r2: [] });
+  });
+
+  it("rejects a window that cannot hold a line", () => {
+    expect(() => rollingRegressionSlope([1, 2, 3], 1)).toThrow(RangeError);
+    expect(() => rollingRegressionSlope([1, 2, 3], 0)).toThrow(RangeError);
+    expect(() => rollingRegressionSlope([1, 2, 3], 2.5)).toThrow(RangeError);
   });
 });
 
