@@ -294,7 +294,17 @@ async function placeSetLeverage(
 /**
  * Add margin to an existing position. Like set_leverage it places no order and writes no orders row: the intent
  * row and its stored outcome are the audit trail. Only type="add" is supported, so exposure never grows.
+ *
+ * The margin-balance endpoint carries no exchange-side idempotency identifier, so a lost network response
+ * or a gateway 5xx after upstream processing leaves it genuinely unknown whether OKX added the margin.
+ * Report that as such rather than as a terminal failure: a same-key retry must not be mistaken for a safe
+ * skip, and a fresh retry must not blindly double-add. Definite 4xx rejections stay terminal via
+ * failedPlacement.
  */
+function isAmbiguousMarginError(error: OkxTradeError): boolean {
+  if (error.kind === "network") return true;
+  return error.kind === "http" && (error.httpStatus ?? 0) >= 500;
+}
 async function placeAdjustMargin(
   intent: OkxIntent,
   ids: ClientOrderIds,
@@ -305,11 +315,7 @@ async function placeAdjustMargin(
   try {
     row = await deps.trade.adjustMargin(adjustMarginBody(intent));
   } catch (error) {
-    if (error instanceof OkxTradeError && error.kind === "network") {
-      // The margin-balance endpoint carries no exchange-side idempotency identifier, so a
-      // lost response leaves it genuinely unknown whether OKX added the margin. Report it
-      // as such rather than as a terminal failure: a same-key retry must not be mistaken
-      // for a safe skip, and a fresh retry must not blindly double-add.
+    if (error instanceof OkxTradeError && isAmbiguousMarginError(error)) {
       return { ...terminal("exchange_error", "outcome_unknown", ids.clOrdId), detail: error.message };
     }
     return failedPlacement(error, ids.clOrdId);

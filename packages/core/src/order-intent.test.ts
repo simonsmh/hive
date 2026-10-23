@@ -210,6 +210,12 @@ describe("parseIntent", () => {
     expect(invalid({ ...base, slTriggerPx: "4125", slOrdPx: "-1" })).toMatch(/adjust_margin does not accept sl\/tp/);
     expect(invalid({ ...base, tdMode: "cross" })).toMatch(/adjust_margin only supports isolated positions/);
   });
+
+  it("rejects marginAmt on actions other than adjust_margin", () => {
+    expect(invalid({ action: "open", marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+    expect(invalid({ action: "close", reduceOnly: true, marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+    expect(invalid({ action: "set_leverage", lever: 20, slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null, marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+  });
 });
 
 describe("isExpired", () => {

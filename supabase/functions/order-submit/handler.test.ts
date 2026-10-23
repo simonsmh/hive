@@ -401,6 +401,32 @@ Deno.test("adjust_margin: a network error leaves the outcome unknown instead of 
   strictEqual(finished[0]?.outcome.reason, "outcome_unknown");
 });
 
+Deno.test("adjust_margin: an ambiguous HTTP 5xx leaves the outcome unknown instead of a terminal failure", async () => {
+  const { handler, finished } = setup({
+    trade: { adjustMargin: () => Promise.reject(new OkxTradeError("gateway timeout calling /api/v5/account/position/margin-balance", "http", undefined, undefined, 502)) },
+  });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 502);
+  const body = await json(response);
+  strictEqual(body.status, "exchange_error");
+  strictEqual(body.reason, "outcome_unknown");
+  strictEqual(finished[0]?.outcome.status, "exchange_error");
+  strictEqual(finished[0]?.outcome.reason, "outcome_unknown");
+});
+
+Deno.test("adjust_margin: a definite HTTP 4xx stays a terminal failure", async () => {
+  const { handler, finished } = setup({
+    trade: { adjustMargin: () => Promise.reject(new OkxTradeError("bad request calling /api/v5/account/position/margin-balance", "http", undefined, undefined, 400)) },
+  });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 502);
+  const body = await json(response);
+  strictEqual(body.status, "exchange_error");
+  strictEqual(body.reason, "okx_http:400");
+  strictEqual(finished[0]?.outcome.status, "exchange_error");
+  strictEqual(finished[0]?.outcome.reason, "okx_http:400");
+});
+
 Deno.test("adjust_margin: the kill switch rejects it before any OKX call", async () => {
   const { handler, calls, finished } = setup({ store: { killSwitch: true } });
   const response = await handler(post(ADJUST_MARGIN));

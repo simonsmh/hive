@@ -237,6 +237,11 @@ function buildIntent(input: unknown, nowMs: number): OkxIntent {
     // instead of forwarding an operation the exchange cannot perform.
     if (tdMode !== "isolated") fail("adjust_margin only supports isolated positions");
   }
+  if (action !== "adjust_margin" && marginAmt !== null) {
+    // A producer that mislabels a margin adjustment must not silently get its stated action
+    // executed while the margin operation is dropped: reject instead.
+    fail("marginAmt is only accepted for adjust_margin");
+  }
 
   return {
     schema: INTENT_SCHEMA,
