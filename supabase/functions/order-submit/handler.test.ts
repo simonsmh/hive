@@ -67,6 +67,7 @@ function fakeStore(options: StoreOptions, clock: Clock) {
   const finished: { key: string; outcome: IntentOutcome }[] = [];
   const orders: OrderRecord[] = [];
   const algoStates: Record<string, string> = {};
+  const recorded: IntentRecord[] = [];
   let liveAlgoRows: { algoId: string; clOrdId: string }[] = [];
   const store: OrderStore = {
     async killSwitchEngaged() {
@@ -92,6 +93,7 @@ function fakeStore(options: StoreOptions, clock: Clock) {
         detail: null,
         receivedAtMs: clock.now(),
       });
+      recorded.push(record);
       return { inserted: true };
     },
     async finishIntent(key, outcome) {
@@ -116,6 +118,7 @@ function fakeStore(options: StoreOptions, clock: Clock) {
     store,
     finished,
     orders,
+    recorded,
     algoStates,
     setLiveAlgos(rows: { algoId: string; clOrdId: string }[]) {
       liveAlgoRows = rows;
@@ -132,6 +135,7 @@ interface TradeOptions {
   setLeverage?: () => Promise<void>;
   cancelAlgos?: (items: { algoId: string; instId: string }[]) => Promise<void>;
   findOrderByClOrdId?: () => Promise<{ ordId: string; state: string } | null>;
+  adjustMargin?: (body: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 function fakeTrade(options: TradeOptions = {}) {
@@ -168,6 +172,10 @@ function fakeTrade(options: TradeOptions = {}) {
     async findOrderByClOrdId(instId, clOrdId) {
       calls.push({ method: "findOrderByClOrdId", args: { instId, clOrdId } });
       return options.findOrderByClOrdId ? options.findOrderByClOrdId() : null;
+    },
+    async adjustMargin(body) {
+      calls.push({ method: "adjustMargin", args: body });
+      return options.adjustMargin ? options.adjustMargin(body) : { posId: "3210987654", imr: "52.5", mmr: "4.2" };
     },
   };
   return { trade, calls, placed: () => calls.filter((c) => c.method === "placeOrder" || c.method === "placeAlgo") };
@@ -338,6 +346,103 @@ Deno.test("set_leverage: an OKX rejection surfaces as exchange_error", async () 
   strictEqual(finished[0]?.outcome.status, "exchange_error");
 });
 
+const ADJUST_MARGIN = {
+  ...SET_LEVERAGE,
+  intentId: "int-20261014-0003",
+  idempotencyKey: "manual-nvda-margin-0003",
+  action: "adjust_margin",
+  posSide: "long",
+  lever: null,
+  marginAmt: "25.5",
+  reason: "top up margin on the existing long",
+  source: "manual",
+};
+
+Deno.test("adjust_margin: adds margin at OKX only — no order placed, no order row recorded", async () => {
+  const { handler, calls, placed, orders, finished, recorded } = setup();
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 200);
+  const body = await json(response);
+  strictEqual(body.status, "acked");
+  strictEqual(body.state, "accepted");
+  strictEqual(body.ordId, null);
+  strictEqual(body.algoId, null);
+  strictEqual(body.detail, "margin_added=25.5,posId=3210987654,imr=52.5,mmr=4.2");
+
+  const adjusted = calls.filter((c) => c.method === "adjustMargin");
+  strictEqual(adjusted.length, 1);
+  deepStrictEqual(adjusted[0]?.args, { instId: "NVDA-USDT-SWAP", posSide: "long", type: "add", amt: "25.5" });
+  strictEqual(placed().length, 0);
+  strictEqual(calls.some((c) => c.method === "setLeverage"), false);
+  strictEqual(orders.length, 0);
+  strictEqual(recorded[0]?.marginAmt, "25.5");
+  strictEqual(finished[0]?.outcome.status, "acked");
+  strictEqual(finished[0]?.outcome.state, "accepted");
+});
+
+Deno.test("adjust_margin: keeps only the OKX fields the response actually carried", async () => {
+  const { handler } = setup({ trade: { adjustMargin: () => Promise.resolve({ posId: "3210987654", imr: "", mmr: "4.2" }) } });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 200);
+  strictEqual((await json(response)).detail, "margin_added=25.5,posId=3210987654,mmr=4.2");
+});
+
+Deno.test("adjust_margin: the kill switch rejects it before any OKX call", async () => {
+  const { handler, calls, finished } = setup({ store: { killSwitch: true } });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 423);
+  const body = await json(response);
+  strictEqual(body.status, "rejected_risk");
+  strictEqual(body.reason, "kill_switch_engaged");
+  strictEqual(calls.length, 0);
+  strictEqual(finished[0]?.outcome.reason, "kill_switch_engaged");
+});
+
+Deno.test("adjust_margin: a missing, zero, negative or non-numeric marginAmt is rejected_invalid", async () => {
+  for (const marginAmt of [undefined, null, "0", 0, "-5", -5, "abc", ""]) {
+    const { handler, calls, finished } = setup();
+    const response = await handler(post({ ...ADJUST_MARGIN, marginAmt }));
+    strictEqual(response.status, 400, `marginAmt=${String(marginAmt)}`);
+    const body = await json(response);
+    strictEqual(body.status, "rejected_invalid");
+    strictEqual(calls.length, 0);
+    strictEqual(finished.length, 0);
+  }
+});
+
+Deno.test("adjust_margin: an OKX rejection surfaces as exchange_error and is stored", async () => {
+  const { handler, finished } = setup({
+    trade: { adjustMargin: () => Promise.reject(new OkxTradeError("OKX rejected the margin change", "api", undefined, "51169")) },
+  });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 502);
+  const body = await json(response);
+  strictEqual(body.status, "exchange_error");
+  strictEqual(body.reason, "okx_rejected:51169");
+  strictEqual(finished[0]?.outcome.status, "exchange_error");
+  strictEqual(finished[0]?.outcome.reason, "okx_rejected:51169");
+});
+
+Deno.test("adjust_margin: a repeated idempotencyKey returns the first result without a second OKX call", async () => {
+  const { handler, calls, clock } = setup();
+  const first = await json(await handler(post(ADJUST_MARGIN)));
+  strictEqual(first.status, "acked");
+
+  clock.nowMs += 60_000;
+  const replay = await json(await handler(post(ADJUST_MARGIN)));
+  strictEqual(replay.status, "acked");
+  strictEqual(replay.duplicate, true);
+  strictEqual(replay.detail, first.detail);
+  strictEqual(calls.filter((c) => c.method === "adjustMargin").length, 1);
+});
+
+Deno.test("adjust_margin: no price gate — no ticker, contract or position lookup, and no leverage cap", async () => {
+  const { handler, calls } = setup();
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 200);
+  strictEqual(calls.filter((c) => c.method !== "adjustMargin").length, 0);
+});
+
 Deno.test("rejects an open without a stop loss before any OKX call", async () => {
   const { handler, calls, finished } = setup();
   const response = await handler(post({ ...GROK_SHORT, slTriggerPx: null, slOrdPx: null }));
@@ -483,6 +588,7 @@ Deno.test("a key still in flight returns 409 in_progress", async () => {
     side: "sell",
     posSide: "net",
     tdMode: "isolated",
+    marginAmt: null,
     lever: 15,
     sz: "1",
     ordType: "market",

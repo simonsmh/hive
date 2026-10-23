@@ -1,5 +1,6 @@
 import { isAuthorized } from "./core/auth.ts";
 import {
+  adjustMarginBody,
   algoOrderBody,
   clientOrderIds,
   type ClientOrderIds,
@@ -60,6 +61,7 @@ export interface IntentRecord {
   posSide: PosSide;
   tdMode: TdMode;
   lever: number | null;
+  marginAmt: string | null;
   sz: string;
   ordType: OrdType;
   px: string | null;
@@ -219,6 +221,7 @@ function toRecord(intent: OkxIntent, ids: ClientOrderIds, mode: TradeMode, reque
     posSide: intent.posSide,
     tdMode: intent.tdMode,
     lever: intent.lever,
+    marginAmt: intent.marginAmt,
     sz: intent.sz,
     ordType: intent.ordType,
     px: intent.px,
@@ -286,6 +289,43 @@ async function placeSetLeverage(
     state: "accepted",
     detail: `lever_set=${intent.lever}`,
   };
+}
+
+/**
+ * Add margin to an existing position. Like set_leverage it places no order and writes no orders row: the intent
+ * row and its stored outcome are the audit trail. Only type="add" is supported, so exposure never grows.
+ */
+async function placeAdjustMargin(
+  intent: OkxIntent,
+  ids: ClientOrderIds,
+  deps: OrderSubmitDeps,
+): Promise<IntentOutcome> {
+  if (intent.marginAmt === null) throw new Error("adjust_margin reached placement without a marginAmt");
+  let row: Record<string, unknown>;
+  try {
+    row = await deps.trade.adjustMargin(adjustMarginBody(intent));
+  } catch (error) {
+    return failedPlacement(error, ids.clOrdId);
+  }
+  return {
+    status: "acked",
+    reason: null,
+    ordId: null,
+    algoId: null,
+    clOrdId: ids.clOrdId,
+    state: "accepted",
+    detail: marginDetail(row, intent.marginAmt),
+  };
+}
+
+/** OKX echoes the adjusted position: keep the fields it actually returned and never invent the rest. */
+function marginDetail(row: Record<string, unknown>, marginAmt: string): string {
+  const parts = [`margin_added=${marginAmt}`];
+  for (const field of ["posId", "imr", "mmr"]) {
+    const value = row[field];
+    if (typeof value === "string" && value !== "") parts.push(`${field}=${value}`);
+  }
+  return parts.join(",");
 }
 
 async function placeOpenOrClose(
@@ -465,6 +505,7 @@ async function execute(intent: OkxIntent, ids: ClientOrderIds, deps: OrderSubmit
 
   if (intent.action === "amend_tpsl") return placeAmend(intent, ids, deps);
   if (intent.action === "set_leverage") return placeSetLeverage(intent, ids, deps);
+  if (intent.action === "adjust_margin") return placeAdjustMargin(intent, ids, deps);
   return placeOpenOrClose(intent, ids, deps);
 }
 

@@ -822,6 +822,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
 - `close` / `reduce`：`reduceOnly` 必须为 `true`，`sz` 为平仓张数。
 - `amend_tpsl`：至少一组 `slTriggerPx` / `tpTriggerPx`，并带对应的 `*OrdPx`（市价用 `"-1"`）。`side` 为**平仓方向**（平多为 `sell`，平空为 `buy`）。
 - `set_leverage`：调整已有持仓的杠杆，不下单。必须带 `lever`（不超过 `risk_limits.max_leverage`）；`side` / `posSide` / `sz` 照常填写以标明目标持仓，`px`、SL/TP、`reduceOnly` 不接受。kill switch 与限频照常生效；结果只记入 `order_intents`，不产生 `orders` 行，开仓时挂载的 SL/TP 不受影响。
+- `adjust_margin`：为已有持仓追加保证金，不下单，只支持追加（OKX `type=add`）。必须带 `marginAmt`（正十进制字符串，单位 USDT）；`side` / `posSide` / `tdMode` 标明目标持仓，`lever`、`px`、SL/TP、`reduceOnly` 不接受。调用 OKX `POST /api/v5/account/adjust-position-margin`，结果为 `acked` / `state=accepted`，`detail` 记录 `margin_added` 与 OKX 返回的 `posId` / `imr` / `mmr`（响应里有才记）；`ordId` / `algoId` 为 `null`。追加保证金不增加敞口，因此不走价格门、不做名义额 / 杠杆 / theme cap 校验；kill switch、限频与幂等照常生效。
 - `ordType` 默认 `market`；`limit` 必须带 `px`。`ttlSec` 默认 120，超过 `createdAt + ttlSec` 返回 `expired`。`createdAt` 比 Hive 当前时间晚超过 60 秒视为无效（`rejected_invalid`），用于拦截时钟错误。
 
 **风控门（按顺序执行，任一失败都不会下单）**
@@ -835,6 +836,7 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/order-submit" \
 | kill switch（`kill_switch.engaged`） | `423` `rejected_risk`（`kill_switch_engaged`）。engage 后 close 与 reduce 也会被拒绝，需要先关闭 kill switch 或直接在 OKX 平仓 |
 | `risk_limits`（单分钟提交数）；缺少启用的限额行时 fail closed。标的不做白名单检查，`risk_limits.symbol_allowlist` 已不再使用，其他风控照常生效 | `422` `rejected_risk` |
 | 开仓：杠杆上限、名义金额上限（`sz × ctVal × 价格`），止损方向，`themeStopCapU` / `maxLossU`（`名义 × |入场 − SL| / 入场`） | `422` `rejected_risk`（`notional_exceeds_limit`、`loss_exceeds_theme_cap` 等）。入场价取市价开仓的最新价（ticker `last`）或限价单的 `px` |
+| 账户动作（`set_leverage`、`adjust_margin`）：只受 kill switch、限频与 `risk_limits` 存在性约束，不走价格门 | 同上 |
 | OKX 下单 | 成功返回 `200` `acked` 与 `ordId` / `algoId`；OKX 明确拒绝返回 `502` `exchange_error`（`okx_rejected:<sCode>`）；鉴权被 OKX 拒绝返回 `401` `rejected_auth`（`okx_auth:<code>`） |
 
 **幂等**

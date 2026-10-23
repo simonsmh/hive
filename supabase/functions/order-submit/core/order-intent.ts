@@ -7,7 +7,7 @@ export const MAX_TTL_SEC = 3600;
 /** Tolerated clock skew for createdAt values that are slightly ahead of Hive's clock. */
 export const CLOCK_SKEW_MS = 60_000;
 
-const ACTIONS = ["open", "close", "amend_tpsl", "reduce", "set_leverage"] as const;
+const ACTIONS = ["open", "close", "amend_tpsl", "reduce", "set_leverage", "adjust_margin"] as const;
 const SIDES = ["buy", "sell"] as const;
 const POS_SIDES = ["net", "long", "short"] as const;
 const TD_MODES = ["isolated", "cross"] as const;
@@ -49,6 +49,8 @@ export interface OkxIntent {
   createdAt: string;
   createdAtMs: number;
   ttlSec: number;
+  /** Margin to add to the named position, in USDT. Only set for adjust_margin. */
+  marginAmt: string | null;
 }
 
 export type ParseResult = { ok: true; intent: OkxIntent } | { ok: false; error: string };
@@ -153,6 +155,7 @@ const KNOWN_FIELDS = new Set([
   "tdMode",
   "lever",
   "sz",
+  "marginAmt",
   "ordType",
   "px",
   "reduceOnly",
@@ -221,6 +224,17 @@ function buildIntent(input: unknown, nowMs: number): OkxIntent {
     if (slTriggerPx !== null || tpTriggerPx !== null) fail("set_leverage does not accept sl/tp fields");
   }
 
+  const marginAmt = optionalPositiveDecimal(o, "marginAmt");
+  if (action === "adjust_margin") {
+    // Margin can only be added to the position named by side/posSide/tdMode, so order-only fields are
+    // rejected exactly as they are for set_leverage.
+    if (marginAmt === null) fail("marginAmt is required for adjust_margin");
+    if (lever !== null) fail("adjust_margin does not accept lever");
+    if (reduceOnly) fail("adjust_margin cannot be reduceOnly");
+    if (px !== null) fail("adjust_margin does not accept px");
+    if (slTriggerPx !== null || tpTriggerPx !== null) fail("adjust_margin does not accept sl/tp fields");
+  }
+
   return {
     schema: INTENT_SCHEMA,
     intentId,
@@ -247,6 +261,7 @@ function buildIntent(input: unknown, nowMs: number): OkxIntent {
     createdAt,
     createdAtMs,
     ttlSec,
+    marginAmt,
   };
 }
 
@@ -292,6 +307,8 @@ export function preflightRisk(
     if (intent.lever > limits.maxLeverage) return "leverage_exceeds_limit";
     return null;
   }
+  // Adding margin increases the cushion, not the exposure: no notional, leverage or theme cap applies.
+  if (intent.action === "adjust_margin") return null;
   if (intent.action !== "open") return null;
 
   if (intent.lever === null) return "missing_lever";
@@ -392,4 +409,10 @@ export function algoOrderBody(intent: OkxIntent, algoClOrdId: string): Record<st
     body.tpTriggerPxType = "last";
   }
   return body;
+}
+
+/** OKX adjust-position-margin body. Only adding margin is supported, to the position named by posSide and tdMode. */
+export function adjustMarginBody(intent: OkxIntent): Record<string, unknown> {
+  if (intent.marginAmt === null) throw new Error("adjust_margin reached the OKX body without a marginAmt");
+  return { instId: intent.instId, posSide: intent.posSide, type: "add", amt: intent.marginAmt };
 }
