@@ -175,7 +175,8 @@ function fakeTrade(options: TradeOptions = {}) {
     },
     async adjustMargin(body) {
       calls.push({ method: "adjustMargin", args: body });
-      return options.adjustMargin ? options.adjustMargin(body) : { posId: "3210987654", imr: "52.5", mmr: "4.2" };
+      // Real shape of POST /api/v5/account/position/margin-balance data[0].
+      return options.adjustMargin ? options.adjustMargin(body) : { instId: "NVDA-USDT-SWAP", posSide: "long", amt: "25.5", type: "add", leverage: "20" };
     },
   };
   return { trade, calls, placed: () => calls.filter((c) => c.method === "placeOrder" || c.method === "placeAlgo") };
@@ -367,7 +368,7 @@ Deno.test("adjust_margin: adds margin at OKX only — no order placed, no order 
   strictEqual(body.state, "accepted");
   strictEqual(body.ordId, null);
   strictEqual(body.algoId, null);
-  strictEqual(body.detail, "margin_added=25.5,posId=3210987654,imr=52.5,mmr=4.2");
+  strictEqual(body.detail, "margin_added=25.5,instId=NVDA-USDT-SWAP,posSide=long,amt=25.5,type=add,leverage=20");
 
   const adjusted = calls.filter((c) => c.method === "adjustMargin");
   strictEqual(adjusted.length, 1);
@@ -381,10 +382,23 @@ Deno.test("adjust_margin: adds margin at OKX only — no order placed, no order 
 });
 
 Deno.test("adjust_margin: keeps only the OKX fields the response actually carried", async () => {
-  const { handler } = setup({ trade: { adjustMargin: () => Promise.resolve({ posId: "3210987654", imr: "", mmr: "4.2" }) } });
+  const { handler } = setup({ trade: { adjustMargin: () => Promise.resolve({ instId: "NVDA-USDT-SWAP", posSide: "", amt: "25.5", type: "add", leverage: "" }) } });
   const response = await handler(post(ADJUST_MARGIN));
   strictEqual(response.status, 200);
-  strictEqual((await json(response)).detail, "margin_added=25.5,posId=3210987654,mmr=4.2");
+  strictEqual((await json(response)).detail, "margin_added=25.5,instId=NVDA-USDT-SWAP,amt=25.5,type=add");
+});
+
+Deno.test("adjust_margin: a network error leaves the outcome unknown instead of a terminal failure", async () => {
+  const { handler, finished } = setup({
+    trade: { adjustMargin: () => Promise.reject(new OkxTradeError("network error calling /api/v5/account/position/margin-balance: timeout", "network")) },
+  });
+  const response = await handler(post(ADJUST_MARGIN));
+  strictEqual(response.status, 502);
+  const body = await json(response);
+  strictEqual(body.status, "exchange_error");
+  strictEqual(body.reason, "outcome_unknown");
+  strictEqual(finished[0]?.outcome.status, "exchange_error");
+  strictEqual(finished[0]?.outcome.reason, "outcome_unknown");
 });
 
 Deno.test("adjust_margin: the kill switch rejects it before any OKX call", async () => {

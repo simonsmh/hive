@@ -305,6 +305,13 @@ async function placeAdjustMargin(
   try {
     row = await deps.trade.adjustMargin(adjustMarginBody(intent));
   } catch (error) {
+    if (error instanceof OkxTradeError && error.kind === "network") {
+      // The margin-balance endpoint carries no exchange-side idempotency identifier, so a
+      // lost response leaves it genuinely unknown whether OKX added the margin. Report it
+      // as such rather than as a terminal failure: a same-key retry must not be mistaken
+      // for a safe skip, and a fresh retry must not blindly double-add.
+      return { ...terminal("exchange_error", "outcome_unknown", ids.clOrdId), detail: error.message };
+    }
     return failedPlacement(error, ids.clOrdId);
   }
   return {
@@ -321,7 +328,8 @@ async function placeAdjustMargin(
 /** OKX echoes the adjusted position: keep the fields it actually returned and never invent the rest. */
 function marginDetail(row: Record<string, unknown>, marginAmt: string): string {
   const parts = [`margin_added=${marginAmt}`];
-  for (const field of ["posId", "imr", "mmr"]) {
+  // POST /api/v5/account/position/margin-balance returns instId, posSide, amt, type, leverage.
+  for (const field of ["instId", "posSide", "amt", "type", "leverage"]) {
     const value = row[field];
     if (typeof value === "string" && value !== "") parts.push(`${field}=${value}`);
   }
