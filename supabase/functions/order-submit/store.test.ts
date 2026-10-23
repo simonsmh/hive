@@ -68,6 +68,7 @@ Deno.test("insert returns inserted true for a new intent and the stored row for 
     side: "sell" as const,
     posSide: "net" as const,
     tdMode: "isolated" as const,
+    marginAmt: null,
     lever: 15,
     sz: "1",
     ordType: "market" as const,

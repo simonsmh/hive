@@ -59,6 +59,7 @@ function intentColumns(record: IntentRecord): Record<string, unknown> {
     pos_side: record.posSide,
     td_mode: record.tdMode,
     lever: record.lever,
+    margin_amt: record.marginAmt,
     sz: record.sz,
     ord_type: record.ordType,
     px: record.px,

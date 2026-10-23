@@ -10,12 +10,13 @@
     "schema": { "const": "okx.intent.v1" },
     "intentId": { "type": "string", "minLength": 1, "maxLength": 64 },
     "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "action": { "enum": ["open", "close", "amend_tpsl", "reduce"] },
+    "action": { "enum": ["open", "close", "amend_tpsl", "reduce", "set_leverage", "adjust_margin"] },
     "instId": { "type": "string", "pattern": "^[A-Z0-9]+-USDT-SWAP$" },
     "side": { "enum": ["buy", "sell"] },
     "posSide": { "enum": ["net", "long", "short"] },
     "tdMode": { "enum": ["isolated", "cross"] },
     "lever": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+    "marginAmt": { "type": ["string", "number"], "description": "Required for adjust_margin: margin to add to the named position, positive decimal in USDT." },
     "sz": { "type": ["string", "number"], "description": "OKX contract count, positive decimal." },
     "ordType": { "enum": ["market", "limit"], "default": "market" },
     "px": { "type": ["string", "number", "null"], "description": "Required for limit orders." },
@@ -54,6 +55,15 @@
     {
       "if": { "properties": { "action": { "const": "amend_tpsl" } }, "required": ["action"] },
       "then": { "anyOf": [{ "required": ["slTriggerPx", "slOrdPx"] }, { "required": ["tpTriggerPx", "tpOrdPx"] }] }
+    },
+    {
+      "if": { "properties": { "action": { "const": "adjust_margin" } }, "required": ["action"] },
+      "then": {
+        "required": ["marginAmt"],
+        "properties": {
+          "marginAmt": { "type": ["string", "number"], "description": "Positive decimal in USDT; the server parses and rejects 0." }
+        }
+      }
     },
     {
       "if": {

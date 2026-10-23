@@ -71,6 +71,7 @@ export interface OrderTrade {
   contractValue(instId: string): Promise<number>;
   position(instId: string): Promise<{ avgPx: number } | null>;
   setLeverage(instId: string, lever: number, tdMode: TdMode): Promise<void>;
+  adjustMargin(body: Record<string, unknown>): Promise<Record<string, unknown>>;
   placeOrder(body: Record<string, unknown>): Promise<PlacedOrder>;
   placeAlgo(body: Record<string, unknown>): Promise<PlacedAlgo>;
   cancelAlgos(items: { algoId: string; instId: string }[]): Promise<void>;
@@ -245,6 +246,14 @@ export class OkxTradeClient implements OrderTrade {
       body: { instId, lever: String(lever), mgnMode: tdMode },
       signed: true,
     });
+  }
+
+  /** Adds margin to the position named in the body. OKX answers with the resulting position row. */
+  async adjustMargin(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const rows = await this.data("POST", "/api/v5/account/position/margin-balance", { body, signed: true });
+    const row = asRecord(rows[0]);
+    this.assertRowAccepted(row, "margin adjustment");
+    return row;
   }
 
   async placeOrder(body: Record<string, unknown>): Promise<PlacedOrder> {

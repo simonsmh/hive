@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type OkxIntent,
   type RiskLimitsView,
+  adjustMarginBody,
   algoOrderBody,
   clientOrderIds,
   isExpired,
@@ -173,6 +174,48 @@ describe("parseIntent", () => {
     expect(invalid({ ...base, lever: 20, px: "4100" })).toMatch(/does not accept px/);
     expect(invalid({ ...base, lever: 20, reduceOnly: true })).toMatch(/cannot be reduceOnly/);
   });
+
+  it("parses an adjust_margin that names the position and carries a positive margin amount", () => {
+    const intent = parsed({
+      action: "adjust_margin",
+      marginAmt: "25.5",
+      lever: null,
+      slTriggerPx: null,
+      slOrdPx: null,
+      tpTriggerPx: null,
+      tpOrdPx: null,
+      theme: null,
+      themeStopCapU: null,
+      maxLossU: null,
+    });
+    expect(intent.action).toBe("adjust_margin");
+    expect(intent.marginAmt).toBe("25.5");
+    expect(needsPriceGate(intent)).toBe(false);
+    expect(adjustMarginBody(intent)).toEqual({ instId: "XAU-USDT-SWAP", posSide: "net", type: "add", amt: "25.5" });
+  });
+
+  it("rejects an adjust_margin without a usable marginAmt", () => {
+    const base = { action: "adjust_margin", slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(invalid(base)).toMatch(/marginAmt is required for adjust_margin/);
+    expect(invalid({ ...base, marginAmt: "0" })).toMatch(/marginAmt must be a positive decimal/);
+    expect(invalid({ ...base, marginAmt: "-5" })).toMatch(/marginAmt must be a positive decimal/);
+    expect(invalid({ ...base, marginAmt: "abc" })).toMatch(/marginAmt must be a positive decimal/);
+  });
+
+  it("rejects an adjust_margin that carries fields only an order could consume", () => {
+    const base = { action: "adjust_margin", marginAmt: "10", lever: null, slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null };
+    expect(invalid({ ...base, lever: 20 })).toMatch(/adjust_margin does not accept lever/);
+    expect(invalid({ ...base, reduceOnly: true })).toMatch(/adjust_margin cannot be reduceOnly/);
+    expect(invalid({ ...base, px: "4100" })).toMatch(/adjust_margin does not accept px/);
+    expect(invalid({ ...base, slTriggerPx: "4125", slOrdPx: "-1" })).toMatch(/adjust_margin does not accept sl\/tp/);
+    expect(invalid({ ...base, tdMode: "cross" })).toMatch(/adjust_margin only supports isolated positions/);
+  });
+
+  it("rejects marginAmt on actions other than adjust_margin", () => {
+    expect(invalid({ action: "open", marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+    expect(invalid({ action: "close", reduceOnly: true, marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+    expect(invalid({ action: "set_leverage", lever: 20, slTriggerPx: null, slOrdPx: null, tpTriggerPx: null, tpOrdPx: null, marginAmt: "10" })).toMatch(/marginAmt is only accepted for adjust_margin/);
+  });
 });
 
 describe("isExpired", () => {
@@ -251,6 +294,25 @@ describe("preflightRisk", () => {
     expect(preflightRisk(parsed({ ...base, lever: 20 }), LIMITS, { killEngaged: true, submissionsLastMinute: 0 })).toBe(
       "kill_switch_engaged",
     );
+  });
+
+  it("gates adjust_margin on the risk-gate trio only: no notional, leverage or theme cap applies", () => {
+    const base = {
+      action: "adjust_margin",
+      lever: null,
+      marginAmt: "10",
+      theme: null,
+      themeStopCapU: null,
+      maxLossU: null,
+      slTriggerPx: null,
+      slOrdPx: null,
+      tpTriggerPx: null,
+      tpOrdPx: null,
+    };
+    expect(preflightRisk(parsed(base), LIMITS, CLEAR)).toBeNull();
+    expect(preflightRisk(parsed(base), LIMITS, { killEngaged: true, submissionsLastMinute: 0 })).toBe("kill_switch_engaged");
+    expect(preflightRisk(parsed(base), null, CLEAR)).toBe("no_risk_limits");
+    expect(preflightRisk(parsed(base), LIMITS, { killEngaged: false, submissionsLastMinute: 5 })).toBe("rate_limited");
   });
 });
 

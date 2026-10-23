@@ -294,4 +294,27 @@ describe("OkxTradeClient reads", () => {
     expect(calls[0]?.url.pathname).toBe("/api/v5/account/set-leverage");
     expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ instId: "XAU-USDT-SWAP", lever: "15", mgnMode: "isolated" });
   });
+
+  it("posts the margin adjustment signed to /account/adjust-position-margin and returns the echoed position", async () => {
+    const { calls, fetchImpl } = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ posId: "3210987654", imr: "52.5", mmr: "4.2", sCode: "0", sMsg: "" }] }),
+    );
+    const body = { instId: "NVDA-USDT-SWAP", posSide: "long", type: "add", amt: "25.5" };
+    const row = await client(fetchImpl).adjustMargin(body);
+
+    expect(row).toEqual({ posId: "3210987654", imr: "52.5", mmr: "4.2", sCode: "0", sMsg: "" });
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.url.pathname).toBe("/api/v5/account/position/margin-balance");
+    expect(calls[0]?.body).toBe(JSON.stringify(body));
+    expect(calls[0]?.headers["OK-ACCESS-KEY"]).toBe(CREDENTIALS.apiKey);
+  });
+
+  it("surfaces an element-level margin rejection as an api error with its sCode", async () => {
+    const { fetchImpl } = fakeFetch(() =>
+      json({ code: "0", msg: "", data: [{ sCode: "51169", sMsg: "Position does not exist" }] }),
+    );
+    await expect(
+      client(fetchImpl).adjustMargin({ instId: "NVDA-USDT-SWAP", posSide: "long", type: "add", amt: "25.5" }),
+    ).rejects.toMatchObject({ kind: "api", sCode: "51169" });
+  });
 });
