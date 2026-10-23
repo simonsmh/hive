@@ -304,7 +304,7 @@ describe("OkxTradeClient reads", () => {
 
     expect(row).toEqual({ posId: "3210987654", imr: "52.5", mmr: "4.2", sCode: "0", sMsg: "" });
     expect(calls[0]?.method).toBe("POST");
-    expect(calls[0]?.url.pathname).toBe("/api/v5/account/adjust-position-margin");
+    expect(calls[0]?.url.pathname).toBe("/api/v5/account/position/margin-balance");
     expect(calls[0]?.body).toBe(JSON.stringify(body));
     expect(calls[0]?.headers["OK-ACCESS-KEY"]).toBe(CREDENTIALS.apiKey);
   });

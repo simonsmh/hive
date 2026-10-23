@@ -249,7 +249,7 @@ export class OkxTradeClient implements OrderTrade {
 
   /** Adds margin to the position named in the body. OKX answers with the resulting position row. */
   async adjustMargin(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const rows = await this.data("POST", "/api/v5/account/adjust-position-margin", { body, signed: true });
+    const rows = await this.data("POST", "/api/v5/account/position/margin-balance", { body, signed: true });
     const row = asRecord(rows[0]);
     this.assertRowAccepted(row, "margin adjustment");
     return row;

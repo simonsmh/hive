@@ -208,6 +208,7 @@ describe("parseIntent", () => {
     expect(invalid({ ...base, reduceOnly: true })).toMatch(/adjust_margin cannot be reduceOnly/);
     expect(invalid({ ...base, px: "4100" })).toMatch(/adjust_margin does not accept px/);
     expect(invalid({ ...base, slTriggerPx: "4125", slOrdPx: "-1" })).toMatch(/adjust_margin does not accept sl\/tp/);
+    expect(invalid({ ...base, tdMode: "cross" })).toMatch(/adjust_margin only supports isolated positions/);
   });
 });
 

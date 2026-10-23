@@ -233,6 +233,9 @@ function buildIntent(input: unknown, nowMs: number): OkxIntent {
     if (reduceOnly) fail("adjust_margin cannot be reduceOnly");
     if (px !== null) fail("adjust_margin does not accept px");
     if (slTriggerPx !== null || tpTriggerPx !== null) fail("adjust_margin does not accept sl/tp fields");
+    // OKX increase/decrease margin applies to isolated-margin positions only; reject cross here
+    // instead of forwarding an operation the exchange cannot perform.
+    if (tdMode !== "isolated") fail("adjust_margin only supports isolated positions");
   }
 
   return {
@@ -411,7 +414,7 @@ export function algoOrderBody(intent: OkxIntent, algoClOrdId: string): Record<st
   return body;
 }
 
-/** OKX adjust-position-margin body. Only adding margin is supported, to the position named by posSide and tdMode. */
+/** OKX position/margin-balance body. Only adding margin is supported, to the position named by posSide and tdMode. */
 export function adjustMarginBody(intent: OkxIntent): Record<string, unknown> {
   if (intent.marginAmt === null) throw new Error("adjust_margin reached the OKX body without a marginAmt");
   return { instId: intent.instId, posSide: intent.posSide, type: "add", amt: intent.marginAmt };
