@@ -251,6 +251,12 @@ export function historyOf(payload: unknown): IndustryHistoryPoint[] {
   );
 }
 
+/** Minute of day in Beijing time (UTC+8) for an epoch-millisecond timestamp. */
+export function beijingMinuteOfDay(ms: number): number {
+  const shifted = new Date(ms + 8 * 60 * 60 * 1000);
+  return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+}
+
 /** Extract a validated breadth points array from a stored ths_breadth payload, tolerating the old counts-only shape. */
 export function breadthPointsOf(payload: unknown): BreadthPoint[] {
   if (typeof payload !== "object" || payload === null) return [];

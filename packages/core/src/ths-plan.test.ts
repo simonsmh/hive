@@ -65,4 +65,10 @@ describe("planTick", () => {
     expect(planTick(clock(10 * 60 + 2), { hasAuctionWatchlist: false })).not.toContain("breadth");
     expect(planTick(clock(10 * 60 + 30), { hasAuctionWatchlist: false })).toContain("breadth");
   });
+
+  it("retries breadth on every tick from 15:00 until the close", () => {
+    expect(planTick(clock(14 * 60 + 32), { hasAuctionWatchlist: false })).not.toContain("breadth");
+    expect(planTick(clock(15 * 60 + 2), { hasAuctionWatchlist: false })).toContain("breadth");
+    expect(planTick(clock(15 * 60 + 14), { hasAuctionWatchlist: false })).toContain("breadth");
+  });
 });

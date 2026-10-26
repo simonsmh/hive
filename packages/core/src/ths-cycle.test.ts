@@ -305,6 +305,35 @@ describe("runThsCycle payloads", () => {
     expect(result.rateLimited).toBe(true);
   });
 
+  it("skips closing breadth ticks once a closing point is stored", async () => {
+    const { client, calls } = fakeClient();
+    const { store, payloads } = fakeStore();
+    // A closing point captured at 15:02 Beijing time.
+    await store.upsertDailySnapshot("2026-10-14", "ths_breadth", {
+      fetched_at: "2026-10-14T07:02:00.000Z",
+      timestamp: Date.UTC(2026, 9, 14, 7, 2),
+      data: { points: [{ ts: Date.UTC(2026, 9, 14, 7, 2), bins: [], markets: {} }] },
+    });
+    const seeded = payloads.length;
+    const result = await run(["breadth"], client, store, { now: Date.UTC(2026, 9, 14, 7, 10) });
+    expect(result.tasks[0]?.status).toBe("ok");
+    expect(result.tasks[0]?.persisted).toBe(0);
+    expect(calls.filter((c) => c.startsWith("market:"))).toEqual([]);
+    expect(payloads).toHaveLength(seeded);
+  });
+
+  it("still retries the closing breadth point when only intraday points exist", async () => {
+    const { client, calls } = fakeClient();
+    const { store } = fakeStore();
+    await store.upsertDailySnapshot("2026-10-14", "ths_breadth", {
+      fetched_at: "2026-10-14T06:30:00.000Z",
+      timestamp: Date.UTC(2026, 9, 14, 6, 30),
+      data: { points: [{ ts: Date.UTC(2026, 9, 14, 6, 30), bins: [], markets: {} }] },
+    });
+    await run(["breadth"], client, store, { now: Date.UTC(2026, 9, 14, 7, 10) });
+    expect(calls.filter((c) => c.startsWith("market:"))).toEqual(["market:0:100", "market:100:100", "market:200:100"]);
+  });
+
   it("appends a second breadth point instead of overwriting the first", async () => {
     const first = fakeClient();
     const { store, payloads } = fakeStore();
@@ -315,7 +344,9 @@ describe("runThsCycle payloads", () => {
         return { ...page, timestamp: TS + 30 * 60_000 };
       },
     });
-    await run(["breadth"], second.client, store);
+    // The fixture TS falls in the closing window (16:13 Beijing), so the
+    // second run must use a non-closing tick time to exercise appending.
+    await run(["breadth"], second.client, store, { now: Date.UTC(2026, 6, 17, 2, 0) });
     const data = payloads[1]?.payload.data as { points: Array<{ ts: number }> };
     expect(data.points).toHaveLength(2);
     expect(data.points[1]?.ts).toBe(TS + 30 * 60_000);

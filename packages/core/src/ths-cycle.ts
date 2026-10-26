@@ -8,6 +8,7 @@ import {
   type ThsSnapshot,
 } from "./ths.js";
 import {
+  beijingMinuteOfDay,
   breadthPointsOf,
   buildBreadthPoint,
   buildIndustryEntries,
@@ -18,7 +19,7 @@ import {
   parseIndustryCatalog,
   pruneIndustryHistory,
 } from "./ths-market.js";
-import { type ThsTaskId } from "./ths-plan.js";
+import { BREADTH_CLOSING_MINUTE, type ThsTaskId } from "./ths-plan.js";
 import type { Source } from "./types.js";
 
 export interface ThsTarget {
@@ -242,6 +243,16 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
 
   const breadthTask = async (): Promise<number> => {
     const previous = await store.readDailySnapshot(date, "ths_breadth");
+    // Closing retry: the plan schedules breadth on every tick from 15:00,
+    // but once a closing point is stored the remaining ticks must not page
+    // the whole market again.
+    const closingCaptured = breadthPointsOf(previous).some(
+      (point) => beijingMinuteOfDay(point.ts) >= BREADTH_CLOSING_MINUTE,
+    );
+    if (beijingMinuteOfDay(options.now()) >= BREADTH_CLOSING_MINUTE && closingCaptured) {
+      log("closing breadth already captured, skipping");
+      return 0;
+    }
     let hs300 = new Set(hs300Of(previous));
     if (hs300.size === 0) {
       try {

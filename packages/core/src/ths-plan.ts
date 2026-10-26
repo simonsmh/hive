@@ -22,6 +22,8 @@ export function beijingClock(epochMs: number): BeijingClock {
   };
 }
 
+/** From 15:00 Beijing time the closing breadth point is retried every tick until captured (see ths-cycle). */
+export const BREADTH_CLOSING_MINUTE = 15 * 60;
 export const SESSION_START_MINUTE = 9 * 60 + 15;
 /** Exclusive. The last poll is at 15:14 Beijing time. */
 export const SESSION_END_MINUTE = 15 * 60 + 15;
@@ -58,6 +60,9 @@ export type ThsTaskId =
  * boundaries (the tick is aligned to even minutes). Auction tasks need an
  * opt-in watchlist. Breadth pages the whole market (~56 requests), so it runs
  * on 30-minute boundaries and appends one point per run to today's row.
+ * From 15:00 it is scheduled on every tick so a skipped or failed closing
+ * run is retried before the 15:15 session end; the task itself skips once
+ * a closing point is stored, so a captured close costs no extra requests.
  */
 export function planTick(clock: BeijingClock, options: { hasAuctionWatchlist: boolean }): ThsTaskId[] {
   if (!inSession(clock)) return [];
@@ -78,6 +83,6 @@ export function planTick(clock: BeijingClock, options: { hasAuctionWatchlist: bo
     if (clock.minute < AUCTION_LIVE_END_MINUTE) tasks.push("auction_live");
     else if (clock.minute < AUCTION_FINAL_END_MINUTE) tasks.push("auction_final");
   }
-  if (clock.minute % 30 === 0) tasks.push("breadth");
+  if (clock.minute % 30 === 0 || clock.minute >= BREADTH_CLOSING_MINUTE) tasks.push("breadth");
   return tasks;
 }
