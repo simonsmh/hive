@@ -2,12 +2,22 @@ import {
   THS_BATCH_SIZE,
   THS_MARKET_PAGE_SIZE,
   ThsError,
-  directionOf,
   itemsOf,
   quoteOf,
   type ThsMarketData,
   type ThsSnapshot,
 } from "./ths.js";
+import {
+  breadthPointsOf,
+  buildBreadthPoint,
+  buildIndustryEntries,
+  computeIndustrySpeed,
+  historyOf,
+  hs300Of,
+  parseConstituents,
+  parseIndustryCatalog,
+  pruneIndustryHistory,
+} from "./ths-market.js";
 import { type ThsTaskId } from "./ths-plan.js";
 import type { Source } from "./types.js";
 
@@ -22,6 +32,8 @@ export interface ThsTarget {
 export interface ThsCycleStore {
   upsertQuote(symbol: string, source: Source, quote: { symbol: string; price: number; ts: number }): Promise<void>;
   upsertDailySnapshot(date: string, kind: string, payload: Record<string, unknown>): Promise<void>;
+  /** Full stored payload for a daily row, or null when the row does not exist yet. */
+  readDailySnapshot(date: string, kind: string): Promise<Record<string, unknown> | null>;
   snapshotExists(date: string, kind: string): Promise<boolean>;
   recordSourceSuccess(source: Source): Promise<void>;
   recordSourceFailure(source: Source, error: string): Promise<void>;
@@ -111,7 +123,9 @@ function taskKind(task: ThsTaskId): string | null {
       return "ths_dragon_tiger";
     case "auction_benchmark":
       return "ths_auction_benchmark";
-    case "breadth_close":
+    case "industry_board":
+      return "ths_industry";
+    case "breadth":
       return "ths_breadth";
     default:
       return null;
@@ -195,7 +209,50 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
     return { data: { item, pages }, timestamp };
   };
 
+  const industryTask = async (): Promise<number> => {
+    const catalog = parseIndustryCatalog(await client.indexCatalog());
+    if (catalog.length === 0) throw new ThsError("industry catalog returned no indices", "not_ready");
+    const entries: ReturnType<typeof buildIndustryEntries> = [];
+    let timestamp: number | null = null;
+    for (let i = 0; i < catalog.length; i += THS_BATCH_SIZE) {
+      const batch = catalog.slice(i, i + THS_BATCH_SIZE);
+      const snapshot = await client.indexSnapshot(batch.map((row) => row.thscode));
+      if (snapshot.timestamp === null) throw new ThsError("industry snapshot returned no valid data", "not_ready");
+      if (timestamp === null) timestamp = snapshot.timestamp;
+      entries.push(...buildIndustryEntries(catalog, snapshot.items));
+    }
+    if (entries.length === 0) throw new ThsError("industry snapshot returned no valid data", "not_ready");
+    const previous = await store.readDailySnapshot(date, "ths_industry");
+    const history = historyOf(previous);
+    const current = new Map(
+      entries.filter((entry) => entry.price !== null).map((entry) => [entry.thscode, entry.price as number]),
+    );
+    const speed = computeIndustrySpeed(history, current, options.now());
+    const pointTs = timestamp ?? options.now();
+    const newHistory = pruneIndustryHistory(
+      [...history, { ts: pointTs, prices: Object.fromEntries(current) }],
+      options.now(),
+    );
+    return storePayload(
+      "ths_industry",
+      { entries, speed, history: newHistory, count: entries.length },
+      timestamp,
+    );
+  };
+
   const breadthTask = async (): Promise<number> => {
+    const previous = await store.readDailySnapshot(date, "ths_breadth");
+    let hs300 = new Set(hs300Of(previous));
+    if (hs300.size === 0) {
+      try {
+        const codes = parseConstituents(await client.indexConstituents("000300.SH"));
+        if (codes.length > 0) hs300 = new Set(codes);
+      } catch (error) {
+        // HS300 is one tab of the board, not the board itself: degrade to the
+        // other markets instead of failing the whole breadth point.
+        log(`hs300 constituents unavailable, breadth without hs300: ${messageOf(error)}`);
+      }
+    }
     const first = await client.marketSnapshotPage(0, THS_MARKET_PAGE_SIZE);
     if (first.timestamp === null) throw new ThsError("market snapshot returned no valid data", "not_ready");
     if (first.total === null) throw new ThsError("market snapshot has no total", "malformed");
@@ -208,11 +265,25 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
       client.marketSnapshotPage(offset, THS_MARKET_PAGE_SIZE),
     );
     const rows = [first, ...rest].flatMap((page) => page.items);
-    const counts = { up: 0, down: 0, flat: 0, unknown: 0 };
-    for (const row of rows) counts[directionOf(row)] += 1;
+    const point = buildBreadthPoint(rows, first.timestamp, hs300);
+    const points = breadthPointsOf(previous);
+    if (points.length > 0 && points[points.length - 1]?.ts === point.ts) points[points.length - 1] = point;
+    else points.push(point);
     return storePayload(
       "ths_breadth",
-      { total, sampled: rows.length, pages: 1 + offsets.length, ...counts },
+      {
+        total: point.total,
+        sampled: point.sampled,
+        pages: 1 + offsets.length,
+        up: point.up,
+        down: point.down,
+        flat: point.flat,
+        unknown: point.unknown,
+        bins: point.bins,
+        markets: point.markets,
+        points: points.slice(-100),
+        hs300: [...hs300],
+      },
       first.timestamp,
     );
   };
@@ -250,7 +321,9 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
         const codes = targetsFor(task).map((t) => t.thscode).slice(0, THS_BATCH_SIZE);
         return storePayload(`ths_auction_${stage}`, await client.auctionSnapshot(codes, stage), null);
       }
-      case "breadth_close":
+      case "industry_board":
+        return industryTask();
+      case "breadth":
         return breadthTask();
     }
   };
@@ -262,10 +335,6 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
       return { task, status: "skipped", persisted: 0, error: "no targets" };
     }
     try {
-      const kind = taskKind(task);
-      if (task === "breadth_close" && kind !== null && (await store.snapshotExists(date, kind))) {
-        return { task, status: "skipped", persisted: 0, error: "already collected today" };
-      }
       return { task, status: "ok", persisted: await execute(task) };
     } catch (error) {
       if (error instanceof ThsError) {

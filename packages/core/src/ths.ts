@@ -178,6 +178,8 @@ export function parseTradingDays(data: unknown): Set<string> {
 }
 
 export interface ThsMarketData {
+  indexCatalog(): Promise<unknown>;
+  indexConstituents(thscode: string): Promise<unknown>;
   indexSnapshot(thscodes: readonly string[]): Promise<ThsSnapshot>;
   stockSnapshot(thscodes: readonly string[]): Promise<ThsSnapshot>;
   marketSnapshotPage(offset: number, limit: number): Promise<ThsSnapshot>;
@@ -223,6 +225,14 @@ export class ThsClient implements ThsMarketData {
     this.sleep = options.sleep ?? defaultSleep;
     this.maxRetries = options.maxRetries ?? 3;
     this.maxBackoffMs = options.maxBackoffMs ?? 8_000;
+  }
+
+  indexCatalog(): Promise<unknown> {
+    return this.get("/api/a-share-index/catalog/ths-index-list", { tag: "industry" });
+  }
+
+  indexConstituents(thscode: string): Promise<unknown> {
+    return this.get("/api/a-share-index/constituents/ths-stock-list", { thscode });
   }
 
   indexSnapshot(thscodes: readonly string[]): Promise<ThsSnapshot> {

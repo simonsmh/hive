@@ -46,6 +46,7 @@ describe("planTick", () => {
       "limit_break_pool",
       "limit_up_ladder",
       "hot_stock_hour",
+      "industry_board",
     ]);
     const boundary = planTick(clock(10 * 60), { hasAuctionWatchlist: false });
     expect(boundary).toContain("dragon_tiger");
@@ -60,8 +61,8 @@ describe("planTick", () => {
     expect(planTick(clock(9 * 60 + 16), { hasAuctionWatchlist: false })).not.toContain("auction_live");
   });
 
-  it("schedules breadth from 15:00 onwards", () => {
-    expect(planTick(clock(14 * 60 + 58), { hasAuctionWatchlist: false })).not.toContain("breadth_close");
-    expect(planTick(clock(15 * 60), { hasAuctionWatchlist: false })).toContain("breadth_close");
+  it("schedules breadth on 30-minute boundaries", () => {
+    expect(planTick(clock(10 * 60 + 2), { hasAuctionWatchlist: false })).not.toContain("breadth");
+    expect(planTick(clock(10 * 60 + 30), { hasAuctionWatchlist: false })).toContain("breadth");
   });
 });
