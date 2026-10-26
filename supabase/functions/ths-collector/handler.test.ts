@@ -9,7 +9,6 @@ const API_KEY = "test-hithink-key";
 const HOLDER = "holder-1";
 const WEDNESDAY_10_00_BJ = Date.parse("2026-10-14T02:00:00Z");
 const WEDNESDAY_09_20_BJ = Date.parse("2026-10-14T01:20:00Z");
-const WEDNESDAY_15_05_BJ = Date.parse("2026-10-14T07:05:00Z");
 const WEDNESDAY_15_00_BJ = Date.parse("2026-10-14T07:00:00Z");
 const WEDNESDAY_18_00_BJ = Date.parse("2026-10-14T10:00:00Z");
 const SATURDAY_10_00_BJ = Date.parse("2026-10-17T02:00:00Z");
