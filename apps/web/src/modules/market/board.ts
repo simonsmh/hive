@@ -48,6 +48,15 @@ export interface MarketBoard {
   speedUp: SpeedRow[];
   speedDown: SpeedRow[];
   breadth: BreadthBoard | null;
+  /** Snapshot date of the breadth row, so the panel can label its session. */
+  breadthDate: string | null;
+  /** Snapshot date of the limit-pool rows, so a cross-session mix is visible. */
+  limitsDate: string | null;
+  /**
+   * Limit counts are only combined with breadth when both come from the same
+   * session; pool rows from another date are reported via limitsDate but
+   * never mixed into today's totals.
+   */
   limitUp: number | null;
   limitDown: number | null;
 }
@@ -152,10 +161,15 @@ const byPctAsc = (a: IndustryRow, b: IndustryRow) => (a.pct ?? Number.POSITIVE_I
 export function buildMarketBoard(rows: readonly SnapshotRow[]): MarketBoard {
   const industryRow = latest(rows, "ths_industry");
   const breadthRow = latest(rows, "ths_breadth");
+  const limitUpRow = latest(rows, "ths_limit_up_pool");
+  const limitDownRow = latest(rows, "ths_limit_down_pool");
   const { entries, speed } = parseIndustry(dataOf(industryRow));
   const withPct = entries.filter((entry) => entry.pct !== null);
+  const breadthDate = breadthRow?.snapshot_date ?? null;
+  const limitsDate = limitUpRow?.snapshot_date ?? limitDownRow?.snapshot_date ?? null;
+  const sameSession = breadthDate !== null && limitsDate === breadthDate;
   return {
-    date: breadthRow?.snapshot_date ?? industryRow?.snapshot_date ?? null,
+    date: breadthDate ?? industryRow?.snapshot_date ?? null,
     industryUpdatedAt: industryRow && isRecord(industryRow.payload) && typeof industryRow.payload.fetched_at === "string"
       ? (industryRow.payload.fetched_at as string)
       : null,
@@ -164,7 +178,9 @@ export function buildMarketBoard(rows: readonly SnapshotRow[]): MarketBoard {
     speedUp: [...speed].sort((a, b) => b.speedPct - a.speedPct).slice(0, 10),
     speedDown: [...speed].sort((a, b) => a.speedPct - b.speedPct).slice(0, 10),
     breadth: parseBreadth(dataOf(breadthRow)),
-    limitUp: poolCount(dataOf(latest(rows, "ths_limit_up_pool"))),
-    limitDown: poolCount(dataOf(latest(rows, "ths_limit_down_pool"))),
+    breadthDate,
+    limitsDate,
+    limitUp: sameSession ? poolCount(dataOf(limitUpRow)) : null,
+    limitDown: sameSession ? poolCount(dataOf(limitDownRow)) : null,
   };
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { formatBeijingTime } from "@/src/modules/format";
 import type { MarketBoard } from "@/src/modules/market/board";
 
 const REFRESH_MS = 60_000;
@@ -113,6 +114,7 @@ export function MarketBoard({ initialBoard }: { initialBoard: MarketBoard }) {
     <div>
       <section aria-label="行业涨幅榜">
         <h2>行业涨幅榜</h2>
+        {board.industryUpdatedAt ? <p className="muted">行业数据更新于 {formatBeijingTime(board.industryUpdatedAt)}</p> : null}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
           <RankTable title="涨幅前十" rows={board.industryUp} valueOf={(row) => row.pct} />
           <RankTable title="跌幅前十" rows={board.industryDown} valueOf={(row) => row.pct} />
@@ -132,6 +134,12 @@ export function MarketBoard({ initialBoard }: { initialBoard: MarketBoard }) {
         <h2>涨跌分布</h2>
         {breadth ? (
           <>
+            <p className="muted">
+              宽度快照：{breadth.ts ? formatBeijingTime(new Date(breadth.ts).toISOString()) : (board.breadthDate ?? "—")}
+            </p>
+            {board.limitsDate && board.limitsDate !== board.breadthDate ? (
+              <p className="muted">涨停/跌停为 {board.limitsDate} 数据，与本节宽度非同一交易日，未计入。</p>
+            ) : null}
             <p>
               涨 <span className="up">{breadth.up}</span> 平 <span className="muted">{breadth.flat}</span> 跌{" "}
               <span className="down">{breadth.down}</span>

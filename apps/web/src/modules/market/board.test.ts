@@ -74,6 +74,28 @@ describe("buildMarketBoard", () => {
     expect(board.breadth).toBeNull();
   });
 
+  it("does not mix limit counts from another session into today's breadth", () => {
+    const board = buildMarketBoard([
+      breadthRow,
+      { snapshot_date: "2026-10-26", kind: "ths_limit_up_pool", payload: { data: { item: [1, 2, 3] } } },
+      { snapshot_date: "2026-10-26", kind: "ths_limit_down_pool", payload: { data: { item: [1] } } },
+    ]);
+    expect(board.breadthDate).toBe("2026-10-27");
+    expect(board.limitsDate).toBe("2026-10-26");
+    expect(board.limitUp).toBeNull();
+    expect(board.limitDown).toBeNull();
+  });
+
+  it("combines limit counts when they share the breadth session", () => {
+    const board = buildMarketBoard([
+      breadthRow,
+      { snapshot_date: "2026-10-27", kind: "ths_limit_up_pool", payload: { data: { item: [1, 2, 3] } } },
+      { snapshot_date: "2026-10-27", kind: "ths_limit_down_pool", payload: { data: { item: [1] } } },
+    ]);
+    expect(board.limitUp).toBe(3);
+    expect(board.limitDown).toBe(1);
+  });
+
   it("tolerates the old counts-only breadth shape", () => {
     const board = buildMarketBoard([
       { snapshot_date: "2026-10-26", kind: "ths_breadth", payload: { data: { total: 10, up: 4, down: 5, flat: 1, unknown: 0 } } },
