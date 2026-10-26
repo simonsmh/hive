@@ -21,6 +21,14 @@ function snapshotOf(rows: Array<{ thscode: string; last_price: number; price_cha
 function fakeClient(overrides: Partial<ThsMarketData> = {}): { client: ThsMarketData; calls: string[] } {
   const calls: string[] = [];
   const base: ThsMarketData = {
+    async indexCatalog() {
+      calls.push("catalog");
+      return { item: [] };
+    },
+    async indexConstituents(thscode) {
+      calls.push(`constituents:${thscode}`);
+      return { item: [] };
+    },
     async indexSnapshot(codes) {
       calls.push(`index:${codes.join(",")}`);
       return snapshotOf([{ thscode: "000001.SH", last_price: 3388.06 }]);
@@ -82,6 +90,7 @@ function fakeClient(overrides: Partial<ThsMarketData> = {}): { client: ThsMarket
 function fakeStore(existing: string[] = []) {
   const quotes: Array<{ symbol: string; price: number; ts: number }> = [];
   const payloads: Array<{ date: string; kind: string; payload: Record<string, unknown> }> = [];
+  const snapshots = new Map<string, Record<string, unknown>>();
   const health: string[] = [];
   const store: ThsCycleStore = {
     async upsertQuote(_symbol, _source, quote) {
@@ -89,9 +98,13 @@ function fakeStore(existing: string[] = []) {
     },
     async upsertDailySnapshot(date, kind, payload) {
       payloads.push({ date, kind, payload });
+      snapshots.set(kind, payload);
+    },
+    async readDailySnapshot(_date, kind) {
+      return snapshots.get(kind) ?? null;
     },
     async snapshotExists(_date, kind) {
-      return existing.includes(kind);
+      return existing.includes(kind) || snapshots.has(kind);
     },
     async recordSourceSuccess() {
       health.push("success");
@@ -107,7 +120,7 @@ function run(
   tasks: ThsTaskId[],
   client: ThsMarketData,
   store: ThsCycleStore,
-  overrides: { targets?: ThsTarget[]; deadlineMs?: number; concurrency?: number } = {},
+  overrides: { targets?: ThsTarget[]; deadlineMs?: number; concurrency?: number; now?: number } = {},
 ) {
   return runThsCycle({
     client,
@@ -115,7 +128,7 @@ function run(
     tasks,
     targets: overrides.targets ?? TARGETS,
     date: "2026-10-14",
-    now: () => TS,
+    now: () => overrides.now ?? TS,
     deadlineMs: overrides.deadlineMs ?? Number.MAX_SAFE_INTEGER,
     concurrency: overrides.concurrency ?? 4,
     log: () => {},
@@ -256,24 +269,132 @@ describe("runThsCycle payloads", () => {
     expect(payloads[0]?.kind).toBe("ths_dragon_tiger");
   });
 
-  it("aggregates breadth from paged market snapshots into one daily row", async () => {
+  it("aggregates breadth from paged market snapshots into histogram points", async () => {
     const { client, calls } = fakeClient();
     const { store, payloads } = fakeStore();
-    await run(["breadth_close"], client, store);
+    await run(["breadth"], client, store);
     expect(calls.filter((c) => c.startsWith("market:"))).toEqual(["market:0:100", "market:100:100", "market:200:100"]);
-    const data = payloads[0]?.payload.data as { total: number; sampled: number; up: number; down: number; flat: number; unknown: number };
+    const data = payloads[0]?.payload.data as {
+      total: number;
+      sampled: number;
+      up: number;
+      down: number;
+      flat: number;
+      unknown: number;
+      bins: number[];
+      points: Array<{ ts: number; bins: number[] }>;
+    };
     expect(payloads[0]?.kind).toBe("ths_breadth");
     expect(data.total).toBe(250);
     expect(data.sampled).toBe(250);
     expect(data.up + data.down + data.flat + data.unknown).toBe(250);
+    expect(data.bins.reduce((sum, count) => sum + count, 0)).toBe(250);
+    expect(data.points).toHaveLength(1);
   });
 
-  it("skips breadth when today's row already exists", async () => {
+  it("propagates a rate limit from the HS300 constituents request", async () => {
+    const { client } = fakeClient({
+      async indexConstituents() {
+        throw new ThsError("constituents returned HTTP 429", "rate_limited");
+      },
+    });
+    const { store } = fakeStore();
+    const result = await run(["breadth"], client, store);
+    expect(result.tasks[0]?.status).toBe("rate_limited");
+    expect(result.outcome).toBe("rate_limited");
+    expect(result.rateLimited).toBe(true);
+  });
+
+  it("skips closing breadth ticks once a closing point is stored", async () => {
     const { client, calls } = fakeClient();
-    const { store } = fakeStore(["ths_breadth"]);
-    const result = await run(["breadth_close"], client, store);
-    expect(result.tasks[0]?.status).toBe("skipped");
-    expect(calls.some((c) => c.startsWith("market:"))).toBe(false);
+    const { store, payloads } = fakeStore();
+    // A closing point captured at 15:02 Beijing time.
+    await store.upsertDailySnapshot("2026-10-14", "ths_breadth", {
+      fetched_at: "2026-10-14T07:02:00.000Z",
+      timestamp: Date.UTC(2026, 9, 14, 7, 2),
+      data: { points: [{ ts: Date.UTC(2026, 9, 14, 7, 2), bins: [], markets: {} }] },
+    });
+    const seeded = payloads.length;
+    const result = await run(["breadth"], client, store, { now: Date.UTC(2026, 9, 14, 7, 10) });
+    expect(result.tasks[0]?.status).toBe("ok");
+    expect(result.tasks[0]?.persisted).toBe(0);
+    expect(calls.filter((c) => c.startsWith("market:"))).toEqual([]);
+    expect(payloads).toHaveLength(seeded);
+  });
+
+  it("still retries the closing breadth point when only intraday points exist", async () => {
+    const { client, calls } = fakeClient();
+    const { store } = fakeStore();
+    await store.upsertDailySnapshot("2026-10-14", "ths_breadth", {
+      fetched_at: "2026-10-14T06:30:00.000Z",
+      timestamp: Date.UTC(2026, 9, 14, 6, 30),
+      data: { points: [{ ts: Date.UTC(2026, 9, 14, 6, 30), bins: [], markets: {} }] },
+    });
+    await run(["breadth"], client, store, { now: Date.UTC(2026, 9, 14, 7, 10) });
+    expect(calls.filter((c) => c.startsWith("market:"))).toEqual(["market:0:100", "market:100:100", "market:200:100"]);
+  });
+
+  it("appends a second breadth point instead of overwriting the first", async () => {
+    const first = fakeClient();
+    const { store, payloads } = fakeStore();
+    await run(["breadth"], first.client, store);
+    const second = fakeClient({
+      async marketSnapshotPage(offset, limit) {
+        const page = await first.client.marketSnapshotPage(offset, limit);
+        return { ...page, timestamp: TS + 30 * 60_000 };
+      },
+    });
+    // The fixture TS falls in the closing window (16:13 Beijing), so the
+    // second run must use a non-closing tick time to exercise appending.
+    await run(["breadth"], second.client, store, { now: Date.UTC(2026, 6, 17, 2, 0) });
+    const data = payloads[1]?.payload.data as { points: Array<{ ts: number }> };
+    expect(data.points).toHaveLength(2);
+    expect(data.points[1]?.ts).toBe(TS + 30 * 60_000);
+  });
+
+  it("builds the industry board and derives 5-minute speed from history", async () => {
+    const catalog = { item: [
+      { thscode: "880001.TI", name: "石油化工" },
+      { thscode: "880002.TI", name: "券商" },
+    ] };
+    const industryClient = (prices: Record<string, number>) =>
+      fakeClient({
+        async indexCatalog() {
+          return catalog;
+        },
+        async indexSnapshot(codes) {
+          return snapshotOf(
+            codes.map((code) => ({
+              thscode: code,
+              last_price: prices[code] ?? 0,
+              price_change_ratio_pct: code === "880001.TI" ? 2.5 : -1.2,
+            })),
+          );
+        },
+      });
+    const { store, payloads } = fakeStore();
+    const first = industryClient({ "880001.TI": 100, "880002.TI": 200 });
+    await run(["industry_board"], first.client, store);
+    const firstData = payloads[0]?.payload.data as {
+      count: number;
+      entries: Array<{ thscode: string; name: string }>;
+      speed: unknown[];
+    };
+    expect(payloads[0]?.kind).toBe("ths_industry");
+    expect(firstData.count).toBe(2);
+    expect(firstData.entries[0]).toMatchObject({ thscode: "880001.TI", name: "石油化工" });
+    expect(firstData.speed).toEqual([]);
+    const second = industryClient({ "880001.TI": 102, "880002.TI": 198 });
+    await run(["industry_board"], second.client, store, { now: TS + 5 * 60_000 });
+    const secondData = payloads[1]?.payload.data as {
+      speed: Array<{ thscode: string; speedPct: number; refTs: number }>;
+    };
+    expect(secondData.speed).toHaveLength(2);
+    expect(secondData.speed[0]?.thscode).toBe("880001.TI");
+    expect(secondData.speed[0]?.speedPct).toBeCloseTo(2);
+    expect(secondData.speed[0]?.refTs).toBe(TS);
+    expect(secondData.speed[1]?.thscode).toBe("880002.TI");
+    expect(secondData.speed[1]?.speedPct).toBeCloseTo(-1);
   });
 
   it("sends only opted-in stock codes to auction-snapshot, with the stage from the task", async () => {

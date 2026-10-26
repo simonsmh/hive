@@ -84,6 +84,12 @@ export function createRestThsStore(options: RestStoreOptions): ThsCollectorStore
       await rpc("hive_collector_upsert_daily_snapshot", { p_date: date, p_kind: kind, p_payload: payload });
     },
 
+    async readDailySnapshot(date: string, kind: string) {
+      const query = new URLSearchParams({ select: "payload", snapshot_date: `eq.${date}`, kind: `eq.${kind}`, limit: "1" });
+      const rows = (await request("GET", `/rest/v1/daily_snapshot?${query.toString()}`)) as Array<{ payload: Record<string, unknown> }>;
+      return rows[0]?.payload ?? null;
+    },
+
     async snapshotExists(date: string, kind: string) {
       const query = new URLSearchParams({ select: "kind", snapshot_date: `eq.${date}`, kind: `eq.${kind}`, limit: "1" });
       const rows = (await request("GET", `/rest/v1/daily_snapshot?${query.toString()}`)) as unknown[];

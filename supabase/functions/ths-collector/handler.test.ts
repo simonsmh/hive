@@ -9,7 +9,7 @@ const API_KEY = "test-hithink-key";
 const HOLDER = "holder-1";
 const WEDNESDAY_10_00_BJ = Date.parse("2026-10-14T02:00:00Z");
 const WEDNESDAY_09_20_BJ = Date.parse("2026-10-14T01:20:00Z");
-const WEDNESDAY_15_05_BJ = Date.parse("2026-10-14T07:05:00Z");
+const WEDNESDAY_15_00_BJ = Date.parse("2026-10-14T07:00:00Z");
 const WEDNESDAY_18_00_BJ = Date.parse("2026-10-14T10:00:00Z");
 const SATURDAY_10_00_BJ = Date.parse("2026-10-17T02:00:00Z");
 const TODAY = "2026-10-14";
@@ -37,6 +37,8 @@ function fakeClient(options: FakeClientOptions = {}) {
   };
   const client: ThsMarketData & { calls: string[] } = {
     calls,
+    indexCatalog: () => respond("indexCatalog", { item: [] }),
+    indexConstituents: () => respond("indexConstituents", { item: [] }),
     indexSnapshot: () => respond("indexSnapshot", snapshotOf([{ thscode: "000001.SH", last_price: 3200 }])),
     stockSnapshot: () => respond("stockSnapshot", snapshotOf([{ thscode: "600519.SH", last_price: 1500 }])),
     marketSnapshotPage: () =>
@@ -100,6 +102,9 @@ function fakeStore(options: FakeStoreOptions = {}) {
     },
     async upsertDailySnapshot(date, kind, payload) {
       snapshots.push({ date, kind, payload });
+    },
+    async readDailySnapshot(date, kind) {
+      return snapshots.find((row) => row.date === date && row.kind === kind)?.payload ?? null;
     },
     async snapshotExists(date, kind) {
       if (options.existingKinds?.includes(kind)) return true;
@@ -287,8 +292,8 @@ Deno.test("sends only opted-in stock codes to the live auction snapshot before 0
   ok(snapshots.some((row) => row.kind === "ths_auction_live"));
 });
 
-Deno.test("collects the closing breadth once per day after 15:00", async () => {
-  const { handler, client, snapshots } = build({ now: WEDNESDAY_15_05_BJ });
+Deno.test("collects breadth on a 30-minute boundary", async () => {
+  const { handler, client, snapshots } = build({ now: WEDNESDAY_15_00_BJ });
   strictEqual((await (await handler(tick())).json()).status, "ok");
   const breadth = snapshots.find((row) => row.kind === "ths_breadth");
   const data = breadth?.payload.data as { total: number; up: number; down: number; flat: number; unknown: number };
@@ -299,10 +304,11 @@ Deno.test("collects the closing breadth once per day after 15:00", async () => {
   ok(client.calls.includes("marketSnapshotPage"));
 });
 
-Deno.test("does not repeat the closing breadth once it is stored for the day", async () => {
-  const { handler, client } = build({ now: WEDNESDAY_15_05_BJ, existingKinds: ["ths_breadth"] });
+Deno.test("appends a new breadth point on the next boundary instead of skipping", async () => {
+  const { handler, client, snapshots } = build({ now: WEDNESDAY_15_00_BJ, existingKinds: ["ths_breadth"] });
   await handler(tick());
-  ok(!client.calls.includes("marketSnapshotPage"));
+  ok(client.calls.includes("marketSnapshotPage"));
+  ok(snapshots.some((row) => row.kind === "ths_breadth"));
 });
 
 Deno.test("backs off for the rate-limit window and reports rate_limited", async () => {

@@ -23,12 +23,13 @@ export function beijingClock(epochMs: number): BeijingClock {
   };
 }
 
+/** From 15:00 Beijing time the closing breadth point is retried every tick until captured (see ths-cycle). */
+export const BREADTH_CLOSING_MINUTE = 15 * 60;
 export const SESSION_START_MINUTE = 9 * 60 + 15;
 /** Exclusive. The last poll is at 15:14 Beijing time. */
 export const SESSION_END_MINUTE = 15 * 60 + 15;
 export const AUCTION_LIVE_END_MINUTE = 9 * 60 + 25;
 export const AUCTION_FINAL_END_MINUTE = 9 * 60 + 40;
-export const BREADTH_START_MINUTE = 15 * 60;
 
 /** Weekday window only. Exchange holidays are handled by the trading calendar, not here. */
 export function inSession(clock: BeijingClock): boolean {
@@ -50,12 +51,19 @@ export type ThsTaskId =
   | "auction_benchmark"
   | "auction_live"
   | "auction_final"
-  | "breadth_close";
+  | "industry_board"
+  | "breadth";
 
 /**
- * Tasks for one tick. Every tick runs the cheap every-2-minute group. Slower lists run on
- * 10-minute boundaries (the tick is aligned to even minutes). Auction tasks need an opt-in watchlist.
- * Breadth runs once per day near the close; the cycle skips it when today's row already exists.
+ * Tasks for one tick. Every tick runs the cheap every-2-minute group, including
+ * the industry board (its 2-minute cadence is what makes the 5-minute speed
+ * computable from the stored history points). Slower lists run on 10-minute
+ * boundaries (the tick is aligned to even minutes). Auction tasks need an
+ * opt-in watchlist. Breadth pages the whole market (~56 requests), so it runs
+ * on 30-minute boundaries and appends one point per run to today's row.
+ * From 15:00 it is scheduled on every tick so a skipped or failed closing
+ * run is retried before the 15:15 session end; the task itself skips once
+ * a closing point is stored, so a captured close costs no extra requests.
  */
 export function planTick(clock: BeijingClock, options: { hasAuctionWatchlist: boolean }): ThsTaskId[] {
   if (!inSession(clock)) return [];
@@ -67,6 +75,7 @@ export function planTick(clock: BeijingClock, options: { hasAuctionWatchlist: bo
     "limit_break_pool",
     "limit_up_ladder",
     "hot_stock_hour",
+    "industry_board",
   ];
   if (clock.minute % 10 === 0) {
     tasks.push("hot_stock_day", "skyrocket_day", "anomaly_list", "dragon_tiger", "auction_benchmark");
@@ -75,6 +84,6 @@ export function planTick(clock: BeijingClock, options: { hasAuctionWatchlist: bo
     if (clock.minute < AUCTION_LIVE_END_MINUTE) tasks.push("auction_live");
     else if (clock.minute < AUCTION_FINAL_END_MINUTE) tasks.push("auction_final");
   }
-  if (clock.minute >= BREADTH_START_MINUTE) tasks.push("breadth_close");
+  if (clock.minute % 30 === 0 || clock.minute >= BREADTH_CLOSING_MINUTE) tasks.push("breadth");
   return tasks;
 }

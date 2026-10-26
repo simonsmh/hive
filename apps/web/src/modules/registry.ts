@@ -15,6 +15,7 @@ export interface PanelRegistration {
 export const PANELS: readonly PanelRegistration[] = [
   { id: "health", title: "数据源健康", icon: "pulse", href: "/health", order: 10 },
   { id: "quotes", title: "行情", icon: "chart", href: "/quotes", order: 20 },
+  { id: "market", title: "市场", icon: "chart", href: "/market", order: 25 },
   { id: "news", title: "新闻", icon: "news", href: "/news", order: 30 },
   { id: "alerts", title: "告警", icon: "bell", href: "/alerts", order: 40 },
   { id: "symbols", title: "标的管理", icon: "list", href: "/symbols", order: 45 },
