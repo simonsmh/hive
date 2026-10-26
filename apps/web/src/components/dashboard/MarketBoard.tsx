@@ -1,7 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { MarketBoard } from "@/src/modules/market/board";
+
+const REFRESH_MS = 60_000;
+
+function isEmptyBoard(board: MarketBoard): boolean {
+  return board.industryUp.length === 0 && board.industryDown.length === 0 && board.breadth === null;
+}
 
 const MARKET_TABS = [
   { id: "all", label: "全部A股" },
@@ -57,8 +63,46 @@ function RankTable<T extends { thscode: string; name: string }>({
   );
 }
 
-export function MarketBoard({ board }: { board: MarketBoard }) {
+export function MarketBoard({ initialBoard }: { initialBoard: MarketBoard }) {
+  const [board, setBoard] = useState(initialBoard);
   const [market, setMarket] = useState<string>("all");
+
+  // The collector writes during trading hours, so the board refreshes itself
+  // while the page stays open; an initially empty board (before the first
+  // write of the day) also transitions to data without a manual reload.
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const response = await fetch("/api/market");
+        if (!response.ok) return;
+        const data: unknown = await response.json();
+        if (
+          typeof data === "object" &&
+          data !== null &&
+          "board" in data &&
+          typeof (data as { board: unknown }).board === "object" &&
+          (data as { board: unknown }).board !== null &&
+          Array.isArray(((data as { board: { industryUp: unknown } }).board).industryUp)
+        ) {
+          setBoard((data as { board: MarketBoard }).board);
+        }
+      } catch {
+        // Keep the last good board; the next tick retries.
+      }
+    };
+    if (isEmptyBoard(initialBoard)) void load();
+    const timer = setInterval(load, REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [initialBoard]);
+
+  if (isEmptyBoard(board)) {
+    return (
+      <div className="empty">
+        <strong>暂无市场数据</strong>
+        <span>采集器会在下一个交易日盘中写入行业榜与宽度数据；本页每 60 秒自动刷新。</span>
+      </div>
+    );
+  }
   const breadth = board.breadth;
   const counts = breadth?.markets?.[market] ?? null;
   const bins = counts?.bins ?? (market === "all" ? breadth?.bins ?? null : null);

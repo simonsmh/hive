@@ -32,7 +32,7 @@ export function marketsOf(thscode: string, hs300: ReadonlySet<string>): BreadthM
     if (digits.startsWith("688")) markets.push("star");
   } else if (suffix === "SZ") {
     markets.push("sz");
-    if (digits.startsWith("300")) markets.push("gem");
+    if (digits.startsWith("300") || digits.startsWith("301")) markets.push("gem");
   } else if (suffix === "BJ") {
     markets.push("bj");
   }
@@ -59,7 +59,12 @@ export interface BreadthPoint {
   flat: number;
   unknown: number;
   bins: number[];
-  markets: Record<BreadthMarket, BreadthMarketCounts>;
+  /**
+   * HS300 is omitted entirely until its constituents have been obtained: an
+   * empty constituent set means "unknown", never "zero stocks", so a
+   * zero-filled HS300 tab must not be rendered as valid data.
+   */
+  markets: Partial<Record<BreadthMarket, BreadthMarketCounts>>;
 }
 
 function emptyMarketCounts(): BreadthMarketCounts {
@@ -77,9 +82,9 @@ function codeOf(row: Record<string, unknown>): string {
 
 /** One breadth point from a full-market snapshot page set. */
 export function buildBreadthPoint(rows: readonly Record<string, unknown>[], ts: number, hs300: ReadonlySet<string>): BreadthPoint {
-  const markets = Object.fromEntries(BREADTH_MARKETS.map((market) => [market, emptyMarketCounts()])) as Record<
-    BreadthMarket,
-    BreadthMarketCounts
+  const included = BREADTH_MARKETS.filter((market) => market !== "hs300" || hs300.size > 0);
+  const markets = Object.fromEntries(included.map((market) => [market, emptyMarketCounts()])) as Partial<
+    Record<BreadthMarket, BreadthMarketCounts>
   >;
   const point: BreadthPoint = {
     ts,
@@ -102,7 +107,8 @@ export function buildBreadthPoint(rows: readonly Record<string, unknown>[], ts: 
       point.bins[index] = (point.bins[index] ?? 0) + 1;
     }
     for (const market of marketsOf(codeOf(row), hs300)) {
-      const counts = markets[market] as BreadthMarketCounts;
+      const counts = markets[market];
+      if (!counts) continue;
       counts.total += 1;
       counts[direction] += 1;
       if (bin !== null) {

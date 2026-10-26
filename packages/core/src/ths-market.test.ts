@@ -33,6 +33,7 @@ describe("marketsOf", () => {
     expect(marketsOf("600519.SH", hs300)).toEqual(["all", "sh", "hs300"]);
     expect(marketsOf("688256.SH", new Set())).toEqual(["all", "sh", "star"]);
     expect(marketsOf("300750.SZ", new Set())).toEqual(["all", "sz", "gem"]);
+    expect(marketsOf("301001.SZ", new Set())).toEqual(["all", "sz", "gem"]);
     expect(marketsOf("920000.BJ", new Set())).toEqual(["all", "bj"]);
   });
 });
@@ -52,10 +53,16 @@ describe("buildBreadthPoint", () => {
     expect(point.bins).toHaveLength(BREADTH_BIN_COUNT);
     expect(point.bins[12]).toBe(1); // +2 bin
     expect(point.bins[7]).toBe(1); // -3 bin
-    expect(point.markets.gem.total).toBe(1);
-    expect(point.markets.star.total).toBe(1);
-    expect(point.markets.hs300.total).toBe(1);
-    expect(point.markets.all.bins.reduce((sum, count) => sum + count, 0)).toBe(3);
+    expect(point.markets.gem?.total).toBe(1);
+    expect(point.markets.star?.total).toBe(1);
+    expect(point.markets.hs300?.total).toBe(1);
+    expect(point.markets.all?.bins.reduce((sum, count) => sum + count, 0)).toBe(3);
+  });
+
+  it("omits the HS300 market until constituents are known", () => {
+    const point = buildBreadthPoint([row("600519.SH", 2.7)], 1000, new Set());
+    expect(point.markets.hs300).toBeUndefined();
+    expect(point.markets.sh?.total).toBe(1);
   });
 });
 
