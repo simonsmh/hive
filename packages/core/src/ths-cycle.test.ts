@@ -292,6 +292,19 @@ describe("runThsCycle payloads", () => {
     expect(data.points).toHaveLength(1);
   });
 
+  it("propagates a rate limit from the HS300 constituents request", async () => {
+    const { client } = fakeClient({
+      async indexConstituents() {
+        throw new ThsError("constituents returned HTTP 429", "rate_limited");
+      },
+    });
+    const { store } = fakeStore();
+    const result = await run(["breadth"], client, store);
+    expect(result.tasks[0]?.status).toBe("rate_limited");
+    expect(result.outcome).toBe("rate_limited");
+    expect(result.rateLimited).toBe(true);
+  });
+
   it("appends a second breadth point instead of overwriting the first", async () => {
     const first = fakeClient();
     const { store, payloads } = fakeStore();

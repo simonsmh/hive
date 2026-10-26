@@ -248,6 +248,10 @@ export async function runThsCycle(options: ThsCycleOptions): Promise<ThsCycleRes
         const codes = parseConstituents(await client.indexConstituents("000300.SH"));
         if (codes.length > 0) hs300 = new Set(codes);
       } catch (error) {
+        // A rate limit must still stop the cycle and trigger its backoff:
+        // swallowing it here would let the ~56 market-page requests below
+        // run anyway while the cycle reports success.
+        if (error instanceof ThsError && error.kind === "rate_limited") throw error;
         // HS300 is one tab of the board, not the board itself: degrade to the
         // other markets instead of failing the whole breadth point.
         log(`hs300 constituents unavailable, breadth without hs300: ${messageOf(error)}`);
