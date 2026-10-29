@@ -75,6 +75,11 @@ describe("parseRealhead", () => {
   it("rejects payloads missing a verified field", () => {
     expect(() => parseRealhead("513310", { items: { "10": "3.838" } })).toThrow();
   });
+  it("rejects empty or whitespace numeric fields instead of parsing them as 0", () => {
+    const base = { "10": "3.838", "6": "3.908", "7": "3.845", "8": "3.917", "9": "3.784", "13": "100", "19": "100", time: "2026-10-29 14:18:29", name: "x" };
+    expect(() => parseRealhead("513310", { items: { ...base, "10": "" } })).toThrow();
+    expect(() => parseRealhead("513310", { items: { ...base, "6": " " } })).toThrow();
+  });
 });
 
 describe("parseMinute", () => {

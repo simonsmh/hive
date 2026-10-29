@@ -117,6 +117,9 @@ export function parseJsonp(text: string): unknown {
 }
 
 function toNumber(value: unknown, field: string): number {
+  // Reject empty/whitespace strings first: Number("") and Number(" ") are 0,
+  // which would silently turn a missing upstream field into a price of 0.
+  if (typeof value === "string" && value.trim() === "") throw new JqkaUpstreamError(`upstream field ${field} is not numeric`);
   const num = typeof value === "string" ? Number(value) : typeof value === "number" ? value : Number.NaN;
   if (!Number.isFinite(num)) throw new JqkaUpstreamError(`upstream field ${field} is not numeric`);
   return num;
@@ -168,6 +171,7 @@ export function parseMinute(code: string, payload: unknown): { date: string; poi
     if (parts.length < 2) continue;
     const hhmm = parts[0] ?? "";
     if (!/^\d{4}$/.test(hhmm)) continue;
+    if (parts[1] === undefined || parts[1].trim() === "") continue;
     const price = Number(parts[1]);
     if (!Number.isFinite(price)) continue;
     let volume: number | null = null;
