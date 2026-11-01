@@ -1217,8 +1217,8 @@ begin
 
   perform 1 from public.collector_state where source = 'sina';
   if not found then raise exception 'collector_state has no sina row'; end if;
-  perform 1 from public.source_health where source = 'sina' and max_staleness_minutes = 10080 and enabled = true;
-  if not found then raise exception 'source_health sina should be enabled with 7-day staleness'; end if;
+  perform 1 from public.source_health where source = 'sina' and max_staleness_minutes = 10080 and enabled = false;
+  if not found then raise exception 'source_health sina should be disabled with 7-day staleness until its first run'; end if;
 
   -- Lease is per source: the okx lease taken earlier does not block sina, and sina's own lease is exclusive.
   if not public.hive_collector_begin('sina', v_holder, 120) then raise exception 'sina lease should be granted while okx holds its lease'; end if;

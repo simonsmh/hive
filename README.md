@@ -420,8 +420,15 @@ sina-daily-collector 只写 A 股日线，不写实时价。`EDGE_CRON_SECRET` �
 
    `last_outcome` 为 `ok` 表示正常；`degraded` 表示个别符号失败但其余已写。`candles` 里应出现每个带 `ths_code` 的已启用符号（生产当前为 HTGD、DML、HDGF、MOUTAI、WULIANGYE、SH000001、SH000300、SZ399001），当日 bar 在收盘后应为 `confirmed = true`。
 3. 用 `/api/atr?symbol=HTGD&source=sina&period=14` 与 `/api/candles?symbol=HTGD&source=sina&interval=1D` 核对：`as_of` 应为最近收盘日，ATR 由已确认 bar 算出，与新浪日线手工口径一致。
+4. 第 2、3 步确认无误后启用健康告警：
 
-**健康阈值说明**：`source_health.sina` 启用且 `max_staleness_minutes = 10080`（7 天），不是 30 分钟。日频收盘后采集无法用分钟级阈值判断：30 分钟阈值会在夜间、周末天天误告警；ths 的 `session_only` 门控也不适用，因为它只在交易时段内判断，周一 09:15 就会把周五 15:35 的成功判为过期。7 天覆盖了周五到周一（3 天）与节假日周末，代价是真正中断时最长 7 天才告警，期间以 `collector_state.last_outcome` 与 pg_cron 历史为准。需要更紧的判断时，再加交易日历门控，不要把阈值悄悄改回分钟级。
+   ```sql
+   update public.source_health set enabled = true where source = 'sina';
+   ```
+
+   启用前不要改：从未成功过的源不论阈值多宽都会被判过期，提前启用会在首跑前就产生一条误告警。
+
+**健康阈值说明**：启用后 `source_health.sina` 的 `max_staleness_minutes = 10080`（7 天），不是 30 分钟。日频收盘后采集无法用分钟级阈值判断：30 分钟阈值会在夜间、周末天天误告警；ths 的 `session_only` 门控也不适用，因为它只在交易时段内判断，周一 09:15 就会把周五 15:35 的成功判为过期。7 天覆盖了周五到周一（3 天）与节假日周末，代价是真正中断时最长 7 天才告警，期间以 `collector_state.last_outcome` 与 pg_cron 历史为准。需要更紧的判断时，再加交易日历门控，不要把阈值悄悄改回分钟级。
 
 **已知限制**：
 

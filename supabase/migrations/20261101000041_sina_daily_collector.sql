@@ -22,9 +22,13 @@ insert into public.collector_state (source) values ('sina') on conflict (source)
 -- week by this alert, and sooner from collector_state.last_outcome and the
 -- pg_cron job history. A trading-calendar-aware gate is the follow-up if
 -- tighter detection is ever needed; it is not smuggled in here.
-insert into public.source_health (source, enabled, max_staleness_minutes) values ('sina', true, 10080)
+-- enabled stays false here, following the yahoo precedent: a source that
+-- has never succeeded counts as stale no matter how wide the threshold is,
+-- so enabling before the first successful run would open a false alert.
+-- Enable it only after the first run is confirmed (see README, "新浪日线").
+insert into public.source_health (source, enabled, max_staleness_minutes) values ('sina', false, 10080)
 on conflict (source) do update
-  set enabled = true, max_staleness_minutes = 10080, updated_at = now();
+  set enabled = false, max_staleness_minutes = 10080, updated_at = now();
 
 -- Schedules. pg_cron runs in UTC. 07:35 UTC on weekdays is 15:35 Beijing
 -- time, after the 15:00 A-share close, so the day's bar is final and is
