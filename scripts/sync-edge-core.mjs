@@ -21,6 +21,7 @@ const FUNCTIONS = {
   "webhook-dispatcher": ["auth", "webhook"],
   "alert-evaluator": ["types", "alerts", "auth"],
   "yahoo-collector": ["types", "okx", "symbols", "auth", "collector", "yahoo", "yahoo-cycle"],
+  "sina-daily-collector": ["types", "okx", "symbols", "auth", "collector", "sina", "sina-cycle"],
   "ths-collector": ["types", "auth", "ths-plan", "ths", "ths-market", "ths-cycle"],
   "google-finance-collector": ["auth", "google-finance"],
   "order-submit": ["auth", "okx-signing", "okx-trade", "order-intent", "position"],

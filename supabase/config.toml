@@ -28,6 +28,10 @@ verify_jwt = false
 [functions.ths-collector]
 verify_jwt = false
 
+# sina-daily-collector is invoked by pg_cron (EDGE_CRON_SECRET), not by a Supabase JWT.
+[functions.sina-daily-collector]
+verify_jwt = false
+
 [functions.google-finance-collector]
 verify_jwt = false
 
