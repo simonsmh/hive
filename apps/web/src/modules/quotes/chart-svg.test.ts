@@ -82,7 +82,7 @@ describe("buildChartSvg", () => {
     expect(svg.match(/<polyline/g)?.length).toBe(3);
     expect(svg).toContain("A +10.00%");
     expect(svg).toContain("B -1.00%");
-    expect(svg).toContain('stroke-dasharray="5 3"');
+    expect(svg).toContain('stroke-dasharray="6 3"');
   });
 
   it("keeps series on a shared union timeline instead of stretching each one", () => {
@@ -110,6 +110,51 @@ describe("buildChartSvg", () => {
   it("returns a placeholder with no polylines when every series is missing", () => {
     const svg = buildChartSvg({ series: [], interval: "1D", normalize: false });
     expect(svg).toContain("No data");
+    expect(svg).not.toContain("<polyline");
+  });
+
+  it("distinguishes MA periods with different dashes and legend entries", () => {
+    const a = [bar(1, 10, 10, 10, 10), bar(2, 20, 20, 20, 20), bar(3, 30, 30, 30, 30)];
+    const svg = buildChartSvg({
+      series: [
+        {
+          symbol: "A",
+          bars: a,
+          ma: [
+            { period: 2, values: smaSeries(a, 2) },
+            { period: 3, values: smaSeries(a, 3) },
+          ],
+        },
+      ],
+      interval: "1D",
+      normalize: false,
+    });
+    expect(svg).toContain("A MA2");
+    expect(svg).toContain("A MA3");
+    const dashes = [...svg.matchAll(/stroke-dasharray="([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(dashes).size).toBeGreaterThan(1);
+  });
+
+  it("keeps y labels distinct for tiny low-priced series", () => {
+    const a = [bar(1, 0.00001, 0.00001, 0.00001, 0.00001), bar(2, 0.000012, 0.000012, 0.000012, 0.000012)];
+    const svg = buildChartSvg({
+      series: [{ symbol: "A", bars: a, ma: [] }],
+      interval: "1D",
+      normalize: false,
+    });
+    const labels = [...svg.matchAll(/text-anchor="end"[^>]*>([^<]+)<\/text>/g)].map((m) => m[1]!);
+    expect(labels.length).toBe(5);
+    expect(new Set(labels).size).toBe(5);
+  });
+
+  it("marks a single-point series with a circle, not an invisible polyline", () => {
+    const a = [bar(1, 10, 10, 10, 10)];
+    const svg = buildChartSvg({
+      series: [{ symbol: "A", bars: a, ma: [{ period: 2, values: smaSeries(a, 2) }] }],
+      interval: "1D",
+      normalize: false,
+    });
+    expect(svg).toContain("<circle");
     expect(svg).not.toContain("<polyline");
   });
 

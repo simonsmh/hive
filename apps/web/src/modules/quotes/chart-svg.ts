@@ -112,8 +112,21 @@ function escapeXml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** Dash patterns keyed by the MA period's position, so MA5 vs MA60 stay distinct. */
+export const MA_DASH_PATTERNS = ["6 3", "2 2", "10 4 2 4", "1 4", "12 3 3 3", "4 4", "8 2 2 2", "3 1"] as const;
+
+/**
+ * Tick precision derived from the tick spacing (span / 4), not from the price
+ * level: a low-priced series such as 0.000010–0.000012 still gets distinct
+ * labels instead of five copies of "0.000".
+ */
 function formatTick(value: number, span: number): string {
-  const decimals = span >= 1000 ? 0 : span >= 100 ? 1 : span >= 10 ? 2 : 3;
+  const spacing = span / 4;
+  if (!(spacing > 0)) return value.toFixed(2);
+  if (spacing >= 100) return value.toFixed(0);
+  if (spacing >= 10) return value.toFixed(1);
+  if (spacing >= 1) return value.toFixed(2);
+  const decimals = Math.min(12, Math.ceil(-Math.log10(spacing)) + 1);
   return value.toFixed(decimals);
 }
 
@@ -122,6 +135,12 @@ function formatDateLabel(time: number, interval: string): string {
   return interval === "1D" ? iso.slice(0, 10) : iso.slice(0, 16).replace("T", " ");
 }
 
+/**
+ * SVG elements for one series: polylines per contiguous non-null run, plus a
+ * circle marker when a run is a single point (limit=1, or exactly one MA value
+ * surviving warm-up) — a zero-length polyline with a butt cap is invisible,
+ * so a lone point would otherwise vanish from the chart.
+ */
 function pointsFor(
   bars: readonly CandleBar[],
   values: readonly (number | null)[],
@@ -129,13 +148,19 @@ function pointsFor(
   timeCount: number,
   plot: { left: number; top: number; width: number; height: number },
   range: { min: number; max: number },
+  strokeAttrs: string,
+  pointFill: string,
 ): string[] {
   // Split on nulls so a moving average never draws a line across its warm-up gap.
-  const segments: string[] = [];
+  const elements: string[] = [];
   let current: string[] = [];
   const flush = () => {
-    if (current.length >= 2) segments.push(current.join(" "));
-    else if (current.length === 1) segments.push(`${current[0]} ${current[0]}`);
+    if (current.length >= 2) {
+      elements.push(`<polyline points="${current.join(" ")}" ${strokeAttrs}/>`);
+    } else if (current.length === 1) {
+      const [x, y] = current[0]!.split(",");
+      elements.push(`<circle cx="${x}" cy="${y}" r="3.5" fill="${pointFill}"/>`);
+    }
     current = [];
   };
   for (let i = 0; i < bars.length; i++) {
@@ -150,7 +175,7 @@ function pointsFor(
     current.push(`${x.toFixed(2)},${y.toFixed(2)}`);
   }
   flush();
-  return segments;
+  return elements;
 }
 
 export interface BuildChartSvgInput {
@@ -171,9 +196,13 @@ export interface BuildChartSvgInput {
 export function buildChartSvg(input: BuildChartSvgInput): string {
   const width = input.width ?? 800;
   const height = input.height ?? 420;
-  // Legend wraps to extra rows instead of running off the right edge.
+  // Legend wraps to extra rows instead of running off the right edge. It
+  // covers one entry per series plus one entry per MA overlay, so MA periods
+  // are identifiable in the standalone SVG, not just in the JSON.
+  const legendItems =
+    input.series.length + input.series.reduce((n, s) => n + s.ma.length, 0);
   const perRow = Math.max(1, Math.floor((width - 64 - 16) / 130));
-  const legendRows = Math.max(1, Math.ceil(input.series.length / perRow));
+  const legendRows = Math.max(1, Math.ceil(legendItems / perRow));
   const margin = { left: 64, right: 16, top: 20 + legendRows * 16 + 8, bottom: 28 };
   const plot = {
     left: margin.left,
@@ -228,33 +257,74 @@ export function buildChartSvg(input: BuildChartSvgInput): string {
     );
   }
 
+  // Legend entries are collected while drawing, then rendered in final order:
+  // all symbols first, then all MA overlays, each in its own grid slot.
+  interface LegendEntry {
+    sample: (x: number, y: number) => string;
+    label: string;
+  }
+  const symbolLegend: LegendEntry[] = [];
+  const maLegend: LegendEntry[] = [];
+
   input.series.forEach((s, i) => {
     const color = CHART_COLORS[i % CHART_COLORS.length]!;
     const closes = s.bars.map((b) => b.close);
-    for (const segment of pointsFor(s.bars, closes, timeIndex, times.length, plot, range)) {
+    parts.push(
+      ...pointsFor(
+        s.bars,
+        closes,
+        timeIndex,
+        times.length,
+        plot,
+        range,
+        `fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"`,
+        color,
+      ),
+    );
+    s.ma.forEach((m, j) => {
+      const dash = MA_DASH_PATTERNS[j % MA_DASH_PATTERNS.length]!;
       parts.push(
-        `<polyline points="${segment}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>`,
+        ...pointsFor(
+          s.bars,
+          m.values,
+          timeIndex,
+          times.length,
+          plot,
+          range,
+          `fill="none" stroke="${color}" stroke-width="1" stroke-dasharray="${dash}" opacity="0.75"`,
+          color,
+        ),
       );
-    }
-    for (const m of s.ma) {
-      for (const segment of pointsFor(s.bars, m.values, timeIndex, times.length, plot, range)) {
-        parts.push(
-          `<polyline points="${segment}" fill="none" stroke="${color}" stroke-width="1" stroke-dasharray="5 3" opacity="0.75"/>`,
-        );
-      }
-    }
+      maLegend.push({
+        sample: (x, y) =>
+          `<line x1="${x}" y1="${y + 6}" x2="${x + 12}" y2="${y + 6}" stroke="${color}" stroke-width="1" stroke-dasharray="${dash}"/>`,
+        label: `${s.symbol} MA${m.period}`,
+      });
+    });
     const first = s.bars[0]!;
     const last = s.bars[s.bars.length - 1]!;
     const change = first.close > 0 ? ((last.close - first.close) / first.close) * 100 : 0;
-    const col = i % perRow;
-    const row = Math.floor(i / perRow);
-    const legendX = plot.left + col * 130;
-    const legendY = 10 + row * 16;
-    parts.push(
-      `<rect x="${legendX}" y="${legendY}" width="12" height="12" fill="${color}"/>`,
-      `<text x="${legendX + 16}" y="${legendY + 10}" font-family="sans-serif" font-size="12" fill="#222">${escapeXml(s.symbol)} ${change >= 0 ? "+" : ""}${change.toFixed(2)}%</text>`,
-    );
+    symbolLegend.push({
+      sample: (x, y) => `<rect x="${x}" y="${y}" width="12" height="12" fill="${color}"/>`,
+      label: `${s.symbol} ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`,
+    });
   });
+  const renderLegend = (entries: LegendEntry[], startSlot: number) => {
+    const out: string[] = [];
+    entries.forEach((entry, k) => {
+      const slot = startSlot + k;
+      const col = slot % perRow;
+      const row = Math.floor(slot / perRow);
+      const x = plot.left + col * 130;
+      const y = 10 + row * 16;
+      out.push(
+        entry.sample(x, y),
+        `<text x="${x + 16}" y="${y + 10}" font-family="sans-serif" font-size="12" fill="#222">${escapeXml(entry.label)}</text>`,
+      );
+    });
+    return out;
+  };
+  parts.push(...renderLegend(symbolLegend, 0), ...renderLegend(maLegend, symbolLegend.length));
 
   if (input.normalize) {
     parts.push(
