@@ -172,11 +172,12 @@ describe("buildChartSvg", () => {
     expect(height).toBeGreaterThan(420);
     // The higher close (20) must sit above the lower close (10), not below it.
     const polylines = [...svg.matchAll(/<polyline points="([^"]+)"/g)].map((m) => m[1]!);
-    const [first] = polylines[0]!.split(" ").map((p) => p.split(",").map(Number));
-    const [, second] = polylines[0]!.split(" ").map((p) => p.split(",").map(Number));
-    expect(second![1]).toBeLessThan(first![1]);
-    expect(second![1]).toBeGreaterThanOrEqual(0);
-    expect(second![1]).toBeLessThanOrEqual(height);
+    const points = polylines[0]!.split(" ").map((p) => p.split(",").map(Number));
+    const firstY = points[0]![1]!;
+    const secondY = points[1]![1]!;
+    expect(secondY).toBeLessThan(firstY);
+    expect(secondY).toBeGreaterThanOrEqual(0);
+    expect(secondY).toBeLessThanOrEqual(height);
   });
 
   it("escapes legend text and labels normalized output", () => {
