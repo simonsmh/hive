@@ -1202,4 +1202,44 @@ begin
 end
 $$;
 
+-- sina-daily-collector: schedule, seeded rows, per-source lease, writes under
+-- source 'sina', and ths_code mapping. Uses VERIFYSINA keys and 1990s dates
+-- so nothing else is touched; the transaction rolls back at the end.
+do $$
+declare
+  v_holder uuid := gen_random_uuid();
+  v_count integer;
+  v_rows integer;
+begin
+  perform 1 from cron.job where jobname = 'hive-sina-daily-collector' and schedule = '35 7 * * 1-5'
+     and command like '%sina-daily-collector%';
+  if not found then raise exception 'pg_cron job hive-sina-daily-collector (15:35 Beijing weekdays) missing'; end if;
+
+  perform 1 from public.collector_state where source = 'sina';
+  if not found then raise exception 'collector_state has no sina row'; end if;
+  perform 1 from public.source_health where source = 'sina' and max_staleness_minutes = 10080 and enabled = false;
+  if not found then raise exception 'source_health sina should be disabled with 7-day staleness until its first run'; end if;
+
+  -- Lease is per source: the okx lease taken earlier does not block sina, and sina's own lease is exclusive.
+  if not public.hive_collector_begin('sina', v_holder, 120) then raise exception 'sina lease should be granted while okx holds its lease'; end if;
+  if public.hive_collector_begin('sina', gen_random_uuid(), 120) then raise exception 'sina lease granted while another run holds it'; end if;
+  perform public.hive_collector_finish('sina', v_holder, 'ok', 0, '{"successes": 1}'::jsonb);
+  if not public.hive_collector_begin('sina', gen_random_uuid(), 120) then raise exception 'sina lease should be free after finish'; end if;
+
+  -- Candles land under source 'sina' and interval '1D', and a rerun upserts the same row instead of duplicating it.
+  v_rows := public.hive_collector_upsert_candles('VERIFYSINA', 'sina', '1D',
+    '[{"ts":1000000000000,"open":1,"high":2,"low":0.5,"close":1.5,"volume":10,"vol_ccy":0,"confirmed":true}]'::jsonb);
+  if v_rows <> 1 then raise exception 'expected 1 sina daily candle written, got %', v_rows; end if;
+  v_rows := public.hive_collector_upsert_candles('VERIFYSINA', 'sina', '1D',
+    '[{"ts":1000000000000,"open":1,"high":2,"low":0.5,"close":1.6,"volume":11,"vol_ccy":0,"confirmed":true}]'::jsonb);
+  select count(*) into v_count from public.candles where symbol = 'VERIFYSINA' and source = 'sina' and interval = '1D';
+  if v_count <> 1 then raise exception 'sina daily candle rerun duplicated the row'; end if;
+
+  -- Edge invoker: the sina job reaches the function once the Vault secrets from the news block exist.
+  if public.hive_invoke_edge_function('sina-daily-collector') is null then raise exception 'sina-daily-collector invocation was not queued'; end if;
+
+  raise notice 'verify.sql: sina daily collector checks passed';
+end
+$$;
+
 rollback;

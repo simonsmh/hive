@@ -49,6 +49,7 @@ Hive 是一个共享的市场数据服务：由 Supabase 上的 **Edge Function 
 - **告警规则评估（supabase/functions/alert-evaluator）**：pg_cron 每分钟调用一次。函数读取启用中的 `alert_rules`，从 `candles` 取各符号已确认的 K 线，用 `packages/core/src/alerts.ts` 评估规则（价格穿越、K 线收盘突破、放量、长影线、回调、区间涨跌幅 `pct_move`），匹配的结果写入 `alerts`。它不直接调用 webhook：`alerts` 插入后由既有触发器 `alerts_fanout` 写入 `webhook_deliveries`，再由 webhook-dispatcher 投递。冷却时间由 `cooldown_seconds` 控制；同一根 K 线对同一规则只写入一次（`dedup_key = rule:<id>:<bar_ts>`）。规则见下文「告警规则」。
 - **Yahoo 行情（supabase/functions/yahoo-collector）**：pg_cron 每 2 分钟调用一次（`hive-yahoo-collector`，每天 720 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `yahoo_symbol` 非空的符号，请求 Yahoo 公开图表接口 `/v8/finance/chart/{yahoo_symbol}`，无需密钥。每个符号每次运行发起一次 `interval=1m&range=1d&includePrePost=true` 请求，同时得到最新报价（最新 1m 收盘价）与最近 60 根 1m K 线；日线（`interval=1d&range=3mo`）每个符号每小时至多请求一次。数据经 `hive_collector_*` 写入，`source = 'yahoo'`。租约使用 `collector_state` 中的 `yahoo` 行，与 OKX 互不影响。遇到 429 或 403 时本次运行不再发起新请求，并退避 10 分钟。`source_health.yahoo` 默认禁用，见「部署 > Yahoo 行情」。
 - **同花顺行情（supabase/functions/ths-collector，可选）**：pg_cron 每 2 分钟调用一次，只在北京时间工作日 09:15–15:15 请求上游。指数与个股报价写入 `quotes_latest`（`source = 'ths'`），涨跌停池、热门股、龙虎榜、竞价、涨跌家数等写入 `daily_snapshot`。默认关闭，部署步骤与调用预算见下文「部署 > ths 行情」。
+- **新浪日线（supabase/functions/sina-daily-collector）**：pg_cron 在北京时间工作日 15:35（收盘后）调用一次（`hive-sina-daily-collector`，每月约 22 次）。函数读取 `symbol_map` 中 `enabled = true` 且 `ths_code` 非空的行，由 `ths_code` 通用推导新浪代码（`600487.SH` → `sh600487`），请求新浪日线接口（`scale=240`，`datalen=120`，带 `Referer`），只写 1D K 线（`source = 'sina'`）。收盘日之前的 bar 为 `confirmed = true`，当日 bar 在 15:00 收盘前为 `false`、收盘后为 `true`，`/api/atr` 只认 confirmed bar 的口径不受影响。没有 `ths_code` 的行跳过不报错；新符号只需在标的管理里加 `ths_code` 映射，无需改代码。见下文「部署 > 新浪日线」。
 - **Google Finance 财报（supabase/functions/google-finance-collector，可选）**：只在财报电话会议窗口内运行。读取 Google Finance 财报页的 FinHub 接口，写入财报指引卡片与电话会议文字稿（增量），指引数值变化以 `critical` 告警推送。没有常驻 cron，默认不调度，见下文「部署 > Google Finance 财报」。
 - **保留（hive_run_retention）**：每天 UTC 03:17 清理历史数据，使数据库保持在 500MB 以内，见下文「数据约定」。
 - **API（apps/web）**：Next.js Route Handlers，部署到 Vercel。没有配置任何 Vercel Cron（Hobby 计划仅支持每日一次），所有分钟级调度都在 pg_cron 中。
@@ -122,6 +123,7 @@ supabase/
   functions/alert-evaluator/   Edge Function（Deno）：告警规则评估，写入 alerts
   functions/yahoo-collector/   Edge Function（Deno）：Yahoo Finance 行情采集（source = yahoo）
   functions/ths-collector/     Edge Function（Deno）：同花顺（HiThink）行情、盘口池与交易日历
+  functions/sina-daily-collector/ Edge Function（Deno）：新浪 A 股日线采集（source = sina，仅 1D）
   functions/google-finance-collector/ Edge Function（Deno）：Google Finance 财报指引与电话会议文字稿（仅财报窗口内）
     core/     由 scripts/sync-edge-core.mjs 从 packages/core 生成的副本，请勿手改（每个函数各一份）
   functions/order-submit/      Edge Function（Deno）：okx.intent.v1 下单、风控与幂等（P0b，demo 默认，live 需显式开启）
@@ -314,6 +316,7 @@ done
    supabase functions deploy alert-evaluator --no-verify-jwt
    supabase functions deploy yahoo-collector --no-verify-jwt
    supabase functions deploy ths-collector --no-verify-jwt
+   supabase functions deploy sina-daily-collector --no-verify-jwt
    supabase functions deploy google-finance-collector --no-verify-jwt
    supabase functions deploy order-submit --no-verify-jwt
    supabase functions deploy position-manager --no-verify-jwt
@@ -400,6 +403,38 @@ yahoo-collector 写入 `source = 'yahoo'` 的报价与 K 线，不需要任何 A
 - 接口为非官方接口，字段或路径随时可能变化。格式不符时请求会记为失败，并在 `last_error` 中给出 Yahoo 返回的错误信息。
 - 若接口返回空数据（既无报价也无 K 线），本次运行既不写入也不记录失败，`source_health.yahoo` 不会更新。日线请求通常仍有数据，因此正常情况下不会误报；若长时间没有任何写入，启用后可能产生 `source_stale` 告警，确认后可暂时禁用。
 - `BZ=F`、`XAUUSD=X` 等代码含 `=`，请求时会做 URL 编码。Yahoo 是否接受编码后的代码，以第 2 步的实际写入结果为准。
+
+### 新浪日线（sina-daily-collector）
+
+sina-daily-collector 只写 A 股日线，不写实时价。`EDGE_CRON_SECRET` 与 Vault 中的 `edge_cron_secret`、`edge_base_url` 沿用既有配置，无需新增密钥。
+
+1. 应用迁移 `…000041_sina_daily_collector.sql`，并部署 `sina-daily-collector`（见上文第 2、3 步）。迁移同时注册 pg_cron `hive-sina-daily-collector`（UTC 表达式 `35 7 * * 1-5`，即北京时间工作日 15:35），以及 `collector_state` 与 `source_health` 的 `sina` 行。
+2. 手动触发一次（或等到下一个工作日 15:35），确认数据写入：
+
+   ```sql
+   select source, last_outcome, last_finished_at, last_summary from public.collector_state where source = 'sina';
+   select source, enabled, consecutive_failures, last_error, last_success_at from public.source_health where source = 'sina';
+   select symbol, count(*) as bars, max(ts) as last_bar, bool_and(confirmed) as all_confirmed
+     from public.candles where source = 'sina' and interval = '1D' group by symbol order by symbol;
+   ```
+
+   `last_outcome` 为 `ok` 表示正常；`degraded` 表示个别符号失败但其余已写。`candles` 里应出现每个带 `ths_code` 的已启用符号（生产当前为 HTGD、DML、HDGF、MOUTAI、WULIANGYE、SH000001、SH000300、SZ399001），当日 bar 在收盘后应为 `confirmed = true`。
+3. 用 `/api/atr?symbol=HTGD&source=sina&period=14` 与 `/api/candles?symbol=HTGD&source=sina&interval=1D` 核对：`as_of` 应为最近收盘日，ATR 由已确认 bar 算出，与新浪日线手工口径一致。
+4. 第 2、3 步确认无误后启用健康告警：
+
+   ```sql
+   update public.source_health set enabled = true where source = 'sina';
+   ```
+
+   启用前不要改：从未成功过的源不论阈值多宽都会被判过期，提前启用会在首跑前就产生一条误告警。
+
+**健康阈值说明**：启用后 `source_health.sina` 的 `max_staleness_minutes = 10080`（7 天），不是 30 分钟。日频收盘后采集无法用分钟级阈值判断：30 分钟阈值会在夜间、周末天天误告警；ths 的 `session_only` 门控也不适用，因为它只在交易时段内判断，周一 09:15 就会把周五 15:35 的成功判为过期。7 天覆盖了周五到周一（3 天）与节假日周末，代价是真正中断时最长 7 天才告警，期间以 `collector_state.last_outcome` 与 pg_cron 历史为准。需要更紧的判断时，再加交易日历门控，不要把阈值悄悄改回分钟级。
+
+**已知限制**：
+
+- 新浪接口为非官方接口，字段或路径随时可能变化。格式不符时请求记为失败，`source_health.sina.last_error` 记录最后一个错误。
+- 没有 `ths_code` 的符号（包括 588170、513310 这类尚未在标的管理里加映射的 ETF，以及全部非 A 股符号）会被跳过，不报错、不补表。加映射后下一次运行自动开始采集，无需改代码。
+- 本接口不返回成交额，`vol_ccy` 恒为 0；`volume` 按新浪返回原值写入，不做单位换算。
 
 ### ths 行情（supabase/functions/ths-collector，可选）
 
