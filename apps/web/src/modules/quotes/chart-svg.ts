@@ -195,7 +195,7 @@ export interface BuildChartSvgInput {
  */
 export function buildChartSvg(input: BuildChartSvgInput): string {
   const width = input.width ?? 800;
-  const height = input.height ?? 420;
+  const requestedHeight = input.height ?? 420;
   // Legend wraps to extra rows instead of running off the right edge. It
   // covers one entry per series plus one entry per MA overlay, so MA periods
   // are identifiable in the standalone SVG, not just in the JSON.
@@ -204,6 +204,12 @@ export function buildChartSvg(input: BuildChartSvgInput): string {
   const perRow = Math.max(1, Math.floor((width - 64 - 16) / 130));
   const legendRows = Math.max(1, Math.ceil(legendItems / perRow));
   const margin = { left: 64, right: 16, top: 20 + legendRows * 16 + 8, bottom: 28 };
+  // The canvas grows with the legend instead of letting a tall legend eat the
+  // plot: with a fixed 420px height, 14 symbols x 8 MAs (126 entries) pushed
+  // the plot top past the bottom, made plot height negative, and rendered
+  // rising prices downward, clipped outside the viewport.
+  const MIN_PLOT_HEIGHT = 200;
+  const height = Math.max(requestedHeight, margin.top + MIN_PLOT_HEIGHT + margin.bottom);
   const plot = {
     left: margin.left,
     top: margin.top,

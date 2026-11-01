@@ -158,6 +158,27 @@ describe("buildChartSvg", () => {
     expect(svg).not.toContain("<polyline");
   });
 
+  it("grows the canvas instead of inverting the plot under a tall legend", () => {
+    const series = Array.from({ length: 14 }, (_, s) => ({
+      symbol: `S${s}`,
+      bars: [bar(1, 10, 10, 10, 10), bar(2, 20, 20, 20, 20)],
+      ma: Array.from({ length: 8 }, (_, j) => ({
+        period: j + 1,
+        values: smaSeries([bar(1, 10, 10, 10, 10), bar(2, 20, 20, 20, 20)], j + 1),
+      })),
+    }));
+    const svg = buildChartSvg({ series, interval: "1D", normalize: false });
+    const height = Number(svg.match(/height="(\d+)"/)?.[1]);
+    expect(height).toBeGreaterThan(420);
+    // The higher close (20) must sit above the lower close (10), not below it.
+    const polylines = [...svg.matchAll(/<polyline points="([^"]+)"/g)].map((m) => m[1]!);
+    const [first] = polylines[0]!.split(" ").map((p) => p.split(",").map(Number));
+    const [, second] = polylines[0]!.split(" ").map((p) => p.split(",").map(Number));
+    expect(second![1]).toBeLessThan(first![1]);
+    expect(second![1]).toBeGreaterThanOrEqual(0);
+    expect(second![1]).toBeLessThanOrEqual(height);
+  });
+
   it("escapes legend text and labels normalized output", () => {
     const a = [bar(1, 10, 10, 10, 10), bar(2, 10, 10, 10, 20)];
     const svg = buildChartSvg({
