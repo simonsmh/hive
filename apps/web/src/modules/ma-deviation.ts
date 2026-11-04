@@ -40,7 +40,8 @@ export const MA_DEVIATION_SYMBOLS = [
 export interface MaDeviationRow {
   symbol: string;
   instId: string;
-  lastClose: number;
+  /** Null when the instrument fetch failed; never NaN, so JSON round-trips safely. */
+  lastClose: number | null;
   lastTs: number;
   devLatest: number | null;
   w: number | null;
@@ -90,7 +91,7 @@ export function buildRow(
   return {
     symbol,
     instId,
-    lastClose: last?.close ?? NaN,
+    lastClose: last?.close ?? null,
     lastTs: last?.ts ?? 0,
     devLatest: deviations[deviations.length - 1] ?? null,
     w,
@@ -133,7 +134,7 @@ export async function loadMaDeviationBoard(
         return {
           symbol,
           instId,
-          lastClose: NaN,
+          lastClose: null,
           lastTs: 0,
           devLatest: null,
           w: null,

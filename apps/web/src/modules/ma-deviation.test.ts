@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { computeDeviations, weightedDeviation, buildRow } from "./ma-deviation";
+import { computeDeviations, weightedDeviation, buildRow, loadMaDeviationBoard } from "./ma-deviation";
+
+describe("loadMaDeviationBoard", () => {
+  it("uses null (not NaN) for failed instruments, so JSON round-trips without crashing the panel", async () => {
+    const failingFetch = (async () => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+    const board = await loadMaDeviationBoard(failingFetch);
+    expect(board.rows.length).toBeGreaterThan(0);
+    expect(board.rows.every((row) => row.lastClose === null)).toBe(true);
+    const roundTripped = JSON.parse(JSON.stringify(board)) as typeof board;
+    expect(roundTripped.rows.every((row) => row.lastClose === null)).toBe(true);
+  });
+});
 
 describe("computeDeviations", () => {
   it("returns null until 20 closes, then (close - MA20) / MA20 in percent", () => {
@@ -25,8 +38,7 @@ describe("weightedDeviation", () => {
   });
 });
 
-describe("buildRow", () => {
-  it("computes W and W_prev from consecutive 5-bar windows", () => {
+describe("buildRow", () => {  it("computes W and W_prev from consecutive 5-bar windows", () => {
     // Flat 100 for 25 bars, then a jump to 110: the last window's
     // deviations are positive and rising, the previous window is ~0.
     const bars = [
