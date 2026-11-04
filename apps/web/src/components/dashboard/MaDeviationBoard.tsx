@@ -100,7 +100,7 @@ export function MaDeviationBoard({ initialBoard }: { initialBoard: MaDeviationBo
               {rows.map((row) => (
                 <tr key={row.symbol}>
                   <td>{row.symbol}</td>
-                  <td>{Number.isNaN(row.lastClose) ? "—" : row.lastClose.toFixed(2)}</td>
+                  <td>{row.lastClose === null ? "—" : row.lastClose.toFixed(2)}</td>
                   <td className={pctClass(row.devLatest)}>{pct(row.devLatest)}</td>
                   <td className={pctClass(row.w)}>{pct(row.w)}</td>
                   <td className={pctClass(row.wPrev)}>{pct(row.wPrev)}</td>
