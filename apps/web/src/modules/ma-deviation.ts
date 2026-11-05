@@ -48,16 +48,6 @@ export const MA_DEVIATION_SYMBOLS = [
 ] as const;
 
 /**
- * Yahoo-sourced rows shown in the OKX group. VIX is an index, not an OKX
- * product, so its 1-minute bars come from Yahoo Finance's public v8 chart
- * endpoint (^VIX) — the same source the yahoo-collector already uses.
- * Same W caliber as the OKX rows; VIX only moves during US trading hours,
- * so outside those hours the row is frozen at the last session close, like
- * the A-share rows after hours.
- */
-export const MA_DEVIATION_YAHOO_SYMBOLS = [{ symbol: "VIX", yahooSymbol: "^VIX" }] as const;
-
-/**
  * A-share symbols (1-minute Sina candles). `symbol` is the 6-digit code
  * shown on the panel; `instId` is the Sina code. Note 513000 is a
  * Shanghai-listed ETF (sh513000); sz513000 returns empty from Sina.
@@ -81,9 +71,6 @@ export const MA_DEVIATION_ASHARE_SYMBOLS = [
 ] as const;
 
 export const SINA_REFERER = "https://finance.sina.com.cn";
-export const YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com";
-export const YAHOO_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 /**
  * W only needs the newest 29 closes (MA20 seed + current 5-bar window +
  * previous 5-bar window); 40 leaves headroom for suspended/delayed bars.
@@ -274,57 +261,6 @@ async function fetchSinaCandles(
   return parseSinaMinuteJsonp(await response.text());
 }
 
-/**
- * Parse a Yahoo v8 chart payload into ascending 1-minute bars. Only the
- * timestamp and close columns are needed here; bars with a missing or
- * non-finite close are dropped, and bars are deduplicated by ts. The
- * newest bar is the forming bar during market hours.
- */
-export function parseYahooMinuteChart(payload: unknown): { ts: number; close: number }[] {
-  const chart = (payload as Record<string, unknown> | null)?.chart as
-    | Record<string, unknown>
-    | undefined;
-  const result = Array.isArray(chart?.result) ? (chart.result[0] as Record<string, unknown>) : null;
-  if (result === null || result === undefined) throw new Error("Yahoo chart response has no result");
-  const timestamps = Array.isArray(result.timestamp) ? result.timestamp : [];
-  const indicators = result.indicators as Record<string, unknown> | undefined;
-  const quote = Array.isArray(indicators?.quote)
-    ? (indicators.quote[0] as Record<string, unknown>)
-    : null;
-  const closes = Array.isArray(quote?.close) ? quote.close : [];
-  if (timestamps.length !== closes.length) {
-    throw new Error("Yahoo chart timestamps do not match the close count");
-  }
-  const byTs = new Map<number, { ts: number; close: number }>();
-  for (let i = 0; i < timestamps.length; i += 1) {
-    const ts = Number(timestamps[i]) * 1000;
-    const close = Number(closes[i]);
-    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0) continue;
-    byTs.set(ts, { ts, close });
-  }
-  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
-}
-
-async function fetchYahooCandles(
-  yahooSymbol: string,
-  fetcher: typeof fetch = fetch,
-): Promise<{ ts: number; close: number }[]> {
-  // range=5d (not 1d): at the start of a session 1d would supply only the
-  // new session's bars, leaving too few closes to seed MA20 and the previous
-  // W window — VIX would have no W for roughly the first half-hour. Five
-  // sessions seed them from the preceding session, the same way the
-  // count-based OKX (30) and Sina (40) requests span session boundaries.
-  // Only the newest 40 bars are needed (29 for W + headroom).
-  const url =
-    `${YAHOO_CHART_BASE_URL}/v8/finance/chart/${encodeURIComponent(yahooSymbol)}` +
-    `?range=5d&interval=1m&includePrePost=false`;
-  const response = await fetcher(url, {
-    headers: { accept: "application/json", "user-agent": YAHOO_USER_AGENT },
-  });
-  if (!response.ok) throw new Error(`Yahoo ${yahooSymbol} returned HTTP ${response.status}`);
-  return parseYahooMinuteChart(await response.json()).slice(-40);
-}
-
 function summarizeGroup(market: MaDeviationMarket, rows: MaDeviationRow[]): MaDeviationGroup {
   const withW = rows.filter((row) => row.market === market && row.w !== null);
   return {
@@ -414,7 +350,7 @@ async function mapWithConcurrency<T, R>(
 export async function loadMaDeviationBoard(
   fetcher: typeof fetch = fetch,
 ): Promise<MaDeviationBoard> {
-  const [okxRows, ashareRows, yahooRows] = await Promise.all([
+  const [okxRows, ashareRows] = await Promise.all([
     mapWithConcurrency(MA_DEVIATION_SYMBOLS, 10, async ({ symbol, instId }) => {
       try {
         const bars = await fetchOkxCandles(instId, fetcher);
@@ -424,18 +360,8 @@ export async function loadMaDeviationBoard(
       }
     }),
     loadAshareRows(fetcher),
-    Promise.all(
-      MA_DEVIATION_YAHOO_SYMBOLS.map(async ({ symbol, yahooSymbol }) => {
-        try {
-          const bars = await fetchYahooCandles(yahooSymbol, fetcher);
-          return buildRow(symbol, yahooSymbol, bars, "okx");
-        } catch {
-          return nullRow(symbol, yahooSymbol, "okx");
-        }
-      }),
-    ),
   ]);
-  const rows = [...orderGroup([...okxRows, ...yahooRows]), ...orderGroup(ashareRows)];
+  const rows = [...orderGroup(okxRows), ...orderGroup(ashareRows)];
   return {
     fetchedAt: new Date().toISOString(),
     rows,
