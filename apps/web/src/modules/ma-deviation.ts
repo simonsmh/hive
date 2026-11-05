@@ -309,14 +309,20 @@ async function fetchYahooCandles(
   yahooSymbol: string,
   fetcher: typeof fetch = fetch,
 ): Promise<{ ts: number; close: number }[]> {
+  // range=5d (not 1d): at the start of a session 1d would supply only the
+  // new session's bars, leaving too few closes to seed MA20 and the previous
+  // W window — VIX would have no W for roughly the first half-hour. Five
+  // sessions seed them from the preceding session, the same way the
+  // count-based OKX (30) and Sina (40) requests span session boundaries.
+  // Only the newest 40 bars are needed (29 for W + headroom).
   const url =
     `${YAHOO_CHART_BASE_URL}/v8/finance/chart/${encodeURIComponent(yahooSymbol)}` +
-    `?range=1d&interval=1m&includePrePost=false`;
+    `?range=5d&interval=1m&includePrePost=false`;
   const response = await fetcher(url, {
     headers: { accept: "application/json", "user-agent": YAHOO_USER_AGENT },
   });
   if (!response.ok) throw new Error(`Yahoo ${yahooSymbol} returned HTTP ${response.status}`);
-  return parseYahooMinuteChart(await response.json());
+  return parseYahooMinuteChart(await response.json()).slice(-40);
 }
 
 function summarizeGroup(market: MaDeviationMarket, rows: MaDeviationRow[]): MaDeviationGroup {

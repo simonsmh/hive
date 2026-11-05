@@ -242,7 +242,7 @@ describe("loadMaDeviationBoard", () => {
     assertNoNaN(JSON.parse(JSON.stringify(board)) as unknown);
   });
 
-  it("requests Sina with datalen=40 and OKX with limit=30, and reuses A-share rows within 30s", async () => {
+  it("requests Sina with datalen=40 and OKX with limit=30, Yahoo with range=5d, and reuses A-share rows within 30s", async () => {
     const calls: string[] = [];
     const base = mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA);
     const countingFetch = ((input: never, init?: never) => {
@@ -255,6 +255,7 @@ describe("loadMaDeviationBoard", () => {
 
     const sinaCalls = calls.filter((url) => url.includes("quotes.sina.cn"));
     const okxCalls = calls.filter((url) => url.includes("okx.com"));
+    const yahooCalls = calls.filter((url) => url.includes("query1.finance.yahoo.com"));
     // One Sina request per symbol across BOTH loads: the second load reused
     // the cached A-share rows and called Sina zero times.
     expect(sinaCalls.length).toBe(MA_DEVIATION_ASHARE_SYMBOLS.length);
@@ -262,6 +263,9 @@ describe("loadMaDeviationBoard", () => {
     // OKX is never cached: fresh on every load.
     expect(okxCalls.length).toBe(MA_DEVIATION_SYMBOLS.length * 2);
     expect(okxCalls.every((url) => url.includes("limit=30"))).toBe(true);
+    // Yahoo VIX is never cached either, and range=5d seeds MA20 at the open.
+    expect(yahooCalls.length).toBe(MA_DEVIATION_YAHOO_SYMBOLS.length * 2);
+    expect(yahooCalls.every((url) => url.includes("range=5d"))).toBe(true);
     expect(second.rows).toEqual(first.rows);
   });
 
