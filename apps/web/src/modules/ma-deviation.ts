@@ -1,7 +1,8 @@
-// OKX 1-minute MA-deviation instantaneous trend gauge.
+// Instantaneous trend gauge: 1-minute MA-deviation.
 //
-// Definition (2026-11-04, user-specified):
-//   - Bar: 1-minute OKX candle (public /api/v5/market/candles).
+// Definition (2026-11-04, user-specified), same formula for both markets:
+//   - Bar: 1-minute candle (OKX public /api/v5/market/candles; Sina
+//     CN_MarketData.getKLineData scale=1 for A-shares).
 //   - Base MA: MA20 on 1-minute closes (20-minute window).
 //   - Per-bar deviation: dev = (close - MA20) / MA20 * 100 (%).
 //   - Trend value W: time-weighted deviation over the most recent 5 bars
@@ -11,10 +12,14 @@
 //     the instantaneous trend is strengthening.
 // The newest candle is the forming bar, so its close is the live price and
 // W moves intra-bar; it is a current-state gauge, not a confirmed close.
+// A-share bars only update during trading hours (09:30-11:30, 13:00-15:00
+// Beijing); outside those hours the last session's final bars are shown.
 
 export const MA_PERIOD = 20;
 export const TREND_WINDOW = 5;
 export const TREND_WEIGHTS = [1, 2, 3, 4, 5] as const;
+
+export type MaDeviationMarket = "okx" | "ashare";
 
 export const MA_DEVIATION_SYMBOLS = [
   { symbol: "XAU", instId: "XAU-USDT-SWAP" },
@@ -37,9 +42,44 @@ export const MA_DEVIATION_SYMBOLS = [
   { symbol: "AVGO", instId: "AVGO-USDT-SWAP" },
 ] as const;
 
+/**
+ * A-share symbols (1-minute Sina candles). `symbol` is the 6-digit code
+ * shown on the panel; `instId` is the Sina code. Note 513000 is a
+ * Shanghai-listed ETF (sh513000); sz513000 returns empty from Sina.
+ */
+export const MA_DEVIATION_ASHARE_SYMBOLS = [
+  { symbol: "600487", instId: "sh600487" },
+  { symbol: "605117", instId: "sh605117" },
+  { symbol: "002463", instId: "sz002463" },
+  { symbol: "001309", instId: "sz001309" },
+  { symbol: "588170", instId: "sh588170" },
+  { symbol: "513310", instId: "sh513310" },
+  { symbol: "512400", instId: "sh512400" },
+  { symbol: "158072", instId: "sz158072" },
+  { symbol: "159915", instId: "sz159915" },
+  { symbol: "513000", instId: "sh513000" },
+  { symbol: "159941", instId: "sz159941" },
+  { symbol: "000001", instId: "sh000001" },
+  { symbol: "399001", instId: "sz399001" },
+  { symbol: "399006", instId: "sz399006" },
+  { symbol: "000688", instId: "sh000688" },
+] as const;
+
+export const SINA_REFERER = "https://finance.sina.com.cn";
+/**
+ * W only needs the newest 29 closes (MA20 seed + current 5-bar window +
+ * previous 5-bar window); 40 leaves headroom for suspended/delayed bars.
+ */
+export const SINA_MINUTE_DATALEN = 40;
+/** Same 29-bar minimum, 30 for OKX. */
+export const OKX_CANDLE_LIMIT = 30;
+/** A-share rows are cached in-process for this long (see loadMaDeviationBoard). */
+export const ASHARE_CACHE_TTL_MS = 60_000;
+
 export interface MaDeviationRow {
   symbol: string;
   instId: string;
+  market: MaDeviationMarket;
   /** Null when the instrument fetch failed; never NaN, so JSON round-trips safely. */
   lastClose: number | null;
   lastTs: number;
@@ -49,11 +89,23 @@ export interface MaDeviationRow {
   wChange: number | null;
 }
 
+export interface MaDeviationGroup {
+  market: MaDeviationMarket;
+  /** Mean W over rows with a value; null when no row in the group has one. */
+  meanW: number | null;
+  /** Share of rows with W > 0 among rows with a value; null when none. */
+  positiveShare: number | null;
+  /** Rows in the group with a W value (the denominator of the two above). */
+  count: number;
+}
+
 export interface MaDeviationBoard {
   fetchedAt: string;
   rows: MaDeviationRow[];
-  meanW: number | null;
-  positiveShare: number | null;
+  /** One entry per market. OKX (24h) and A-share (session-only) are never
+   * averaged together: their update cadences differ, so a mixed mean would
+   * compare a live price against a stale session-end value. */
+  groups: MaDeviationGroup[];
 }
 
 /** Per-bar MA20 deviation in percent; null until MA_PERIOD closes exist. */
@@ -82,6 +134,7 @@ export function buildRow(
   symbol: string,
   instId: string,
   bars: { ts: number; close: number }[],
+  market: MaDeviationMarket = "okx",
 ): MaDeviationRow {
   const closes = bars.map((bar) => bar.close);
   const deviations = computeDeviations(closes);
@@ -91,6 +144,7 @@ export function buildRow(
   return {
     symbol,
     instId,
+    market,
     lastClose: last?.close ?? null,
     lastTs: last?.ts ?? 0,
     devLatest: deviations[deviations.length - 1] ?? null,
@@ -100,11 +154,25 @@ export function buildRow(
   };
 }
 
+function nullRow(symbol: string, instId: string, market: MaDeviationMarket): MaDeviationRow {
+  return {
+    symbol,
+    instId,
+    market,
+    lastClose: null,
+    lastTs: 0,
+    devLatest: null,
+    w: null,
+    wPrev: null,
+    wChange: null,
+  };
+}
+
 async function fetchOkxCandles(
   instId: string,
   fetcher: typeof fetch = fetch,
 ): Promise<{ ts: number; close: number }[]> {
-  const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=1m&limit=100`;
+  const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=1m&limit=${OKX_CANDLE_LIMIT}`;
   const response = await fetcher(url, {
     headers: {
       "User-Agent":
@@ -122,42 +190,146 @@ async function fetchOkxCandles(
     .sort((a, b) => a.ts - b.ts);
 }
 
-export async function loadMaDeviationBoard(
+const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
+const SINA_DAY_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+
+/**
+ * Parse a Sina 1-minute K-line JSONP payload. The response is a
+ * `/*<script>...</script>*\/` comment followed by
+ * `var=([{day, open, high, low, close, volume, amount}, ...])`, where `day`
+ * is a Beijing-time string. Rows with a bad timestamp or a non-finite close
+ * are dropped; bars come back ascending by ts, deduplicated by ts.
+ */
+export function parseSinaMinuteJsonp(body: string): { ts: number; close: number }[] {
+  const start = body.indexOf("[");
+  const end = body.lastIndexOf("]");
+  if (start < 0 || end <= start) {
+    throw new Error("Sina K-line response has no JSON array");
+  }
+  let rows: unknown;
+  try {
+    rows = JSON.parse(body.slice(start, end + 1)) as unknown;
+  } catch {
+    throw new Error("Sina K-line response is not valid JSON");
+  }
+  if (!Array.isArray(rows)) throw new Error("Sina K-line response is not an array");
+  const byTs = new Map<number, { ts: number; close: number }>();
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const record = row as Record<string, unknown>;
+    const day = record.day;
+    const match = typeof day === "string" ? SINA_DAY_PATTERN.exec(day) : null;
+    if (match === null) continue;
+    const close = Number(record.close);
+    if (!Number.isFinite(close) || close <= 0) continue;
+    const [year, month, date, hour, minute, second] = match.slice(1).map(Number) as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    const ts = Date.UTC(year, month - 1, date, hour, minute, second) - BEIJING_OFFSET_MS;
+    if (Number.isNaN(ts)) continue;
+    byTs.set(ts, { ts, close });
+  }
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
+
+async function fetchSinaCandles(
+  sinaCode: string,
   fetcher: typeof fetch = fetch,
-): Promise<MaDeviationBoard> {
-  const rows = await Promise.all(
-    MA_DEVIATION_SYMBOLS.map(async ({ symbol, instId }) => {
-      try {
-        const bars = await fetchOkxCandles(instId, fetcher);
-        return buildRow(symbol, instId, bars);
-      } catch {
-        return {
-          symbol,
-          instId,
-          lastClose: null,
-          lastTs: 0,
-          devLatest: null,
-          w: null,
-          wPrev: null,
-          wChange: null,
-        } satisfies MaDeviationRow;
-      }
-    }),
-  );
-  const ranked = rows
-    .filter((row) => row.w !== null)
-    .sort((a, b) => (b.w as number) - (a.w as number));
-  const failed = rows.filter((row) => row.w === null);
-  const ordered = [...ranked, ...failed];
-  const withW = ranked;
+): Promise<{ ts: number; close: number }[]> {
+  const url =
+    `https://quotes.sina.cn/cn/api/jsonp_v2.php/var=/CN_MarketData.getKLineData` +
+    `?symbol=${sinaCode}&scale=1&ma=no&datalen=${SINA_MINUTE_DATALEN}`;
+  const response = await fetcher(url, {
+    headers: {
+      Referer: SINA_REFERER,
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    },
+  });
+  if (!response.ok) throw new Error(`Sina ${sinaCode} returned HTTP ${response.status}`);
+  return parseSinaMinuteJsonp(await response.text());
+}
+
+function summarizeGroup(market: MaDeviationMarket, rows: MaDeviationRow[]): MaDeviationGroup {
+  const withW = rows.filter((row) => row.market === market && row.w !== null);
   return {
-    fetchedAt: new Date().toISOString(),
-    rows: ordered,
+    market,
     meanW:
       withW.length > 0
         ? withW.reduce((sum, row) => sum + (row.w as number), 0) / withW.length
         : null,
     positiveShare:
       withW.length > 0 ? withW.filter((row) => (row.w as number) > 0).length / withW.length : null,
+    count: withW.length,
+  };
+}
+
+function orderGroup(rows: MaDeviationRow[]): MaDeviationRow[] {
+  const ranked = rows
+    .filter((row) => row.w !== null)
+    .sort((a, b) => (b.w as number) - (a.w as number));
+  const failed = rows.filter((row) => row.w === null);
+  return [...ranked, ...failed];
+}
+
+/**
+ * In-process cache for the A-share rows only. A 1-minute bar only appears
+ * once a minute, so re-fetching Sina on every 30-second panel refresh
+ * returns the same forming bar half the time; within the TTL the previous
+ * rows are reused and Sina is not called at all. OKX is never cached: it
+ * trades 24h and its forming bar moves every refresh. The cache is keyed by
+ * fetcher identity, so a fresh fetcher (e.g. in tests) always fetches.
+ */
+let ashareCache: { fetcher: typeof fetch; rows: MaDeviationRow[]; atMs: number } | null = null;
+
+async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> {
+  const now = Date.now();
+  if (
+    ashareCache !== null &&
+    ashareCache.fetcher === fetcher &&
+    now - ashareCache.atMs < ASHARE_CACHE_TTL_MS
+  ) {
+    return ashareCache.rows;
+  }
+  const rows = await Promise.all(
+    MA_DEVIATION_ASHARE_SYMBOLS.map(async ({ symbol, instId }) => {
+      try {
+        const bars = await fetchSinaCandles(instId, fetcher);
+        return buildRow(symbol, instId, bars, "ashare");
+      } catch {
+        return nullRow(symbol, instId, "ashare");
+      }
+    }),
+  );
+  ashareCache = { fetcher, rows, atMs: Date.now() };
+  return rows;
+}
+
+export async function loadMaDeviationBoard(
+  fetcher: typeof fetch = fetch,
+): Promise<MaDeviationBoard> {
+  const [okxRows, ashareRows] = await Promise.all([
+    Promise.all(
+      MA_DEVIATION_SYMBOLS.map(async ({ symbol, instId }) => {
+        try {
+          const bars = await fetchOkxCandles(instId, fetcher);
+          return buildRow(symbol, instId, bars, "okx");
+        } catch {
+          return nullRow(symbol, instId, "okx");
+        }
+      }),
+    ),
+    loadAshareRows(fetcher),
+  ]);
+  const rows = [...orderGroup(okxRows), ...orderGroup(ashareRows)];
+  return {
+    fetchedAt: new Date().toISOString(),
+    rows,
+    groups: [summarizeGroup("okx", rows), summarizeGroup("ashare", rows)],
   };
 }
