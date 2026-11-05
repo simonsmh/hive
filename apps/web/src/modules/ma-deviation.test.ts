@@ -143,6 +143,24 @@ describe("loadMaDeviationBoard", () => {
     assertNoNaN(JSON.parse(JSON.stringify(board)) as unknown);
   });
 
+  it("covers BTC, ETH, SOL and OKB perpetuals on the OKX side, same W caliber", async () => {
+    const board = await loadMaDeviationBoard(mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA));
+    const okx = board.rows.filter((row) => row.market === "okx");
+    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length);
+    for (const [symbol, instId] of [
+      ["BTC", "BTC-USDT-SWAP"],
+      ["ETH", "ETH-USDT-SWAP"],
+      ["SOL", "SOL-USDT-SWAP"],
+      ["OKB", "OKB-USDT-SWAP"],
+    ] as const) {
+      const row = okx.find((entry) => entry.symbol === symbol);
+      expect(row?.instId).toBe(instId);
+      // Same caliber as every other OKX row: forming-bar W from 1m closes.
+      expect(row?.w).toBeGreaterThan(7.9);
+      expect(row?.w).toBeLessThan(8.1);
+    }
+  });
+
   it("falls back to all-null A-share rows when Sina throws, and stays JSON-safe", async () => {
     const board = await loadMaDeviationBoard(mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA, "throw"));
     const ashare = board.rows.filter((row) => row.market === "ashare");
@@ -172,7 +190,7 @@ describe("loadMaDeviationBoard", () => {
     assertNoNaN(JSON.parse(JSON.stringify(board)) as unknown);
   });
 
-  it("requests Sina with datalen=40 and OKX with limit=30, and reuses A-share rows within 60s", async () => {
+  it("requests Sina with datalen=40 and OKX with limit=30, and reuses A-share rows within 30s", async () => {
     const calls: string[] = [];
     const base = mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA);
     const countingFetch = ((input: never, init?: never) => {

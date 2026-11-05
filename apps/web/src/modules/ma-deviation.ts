@@ -40,6 +40,10 @@ export const MA_DEVIATION_SYMBOLS = [
   { symbol: "TSLA", instId: "TSLA-USDT-SWAP" },
   { symbol: "AMD", instId: "AMD-USDT-SWAP" },
   { symbol: "AVGO", instId: "AVGO-USDT-SWAP" },
+  { symbol: "BTC", instId: "BTC-USDT-SWAP" },
+  { symbol: "ETH", instId: "ETH-USDT-SWAP" },
+  { symbol: "SOL", instId: "SOL-USDT-SWAP" },
+  { symbol: "OKB", instId: "OKB-USDT-SWAP" },
 ] as const;
 
 /**
@@ -73,8 +77,9 @@ export const SINA_REFERER = "https://finance.sina.com.cn";
 export const SINA_MINUTE_DATALEN = 40;
 /** Same 29-bar minimum, 30 for OKX. */
 export const OKX_CANDLE_LIMIT = 30;
-/** A-share rows are cached in-process for this long (see loadMaDeviationBoard). */
-export const ASHARE_CACHE_TTL_MS = 60_000;
+/** A-share rows are cached in-process for this long (see loadMaDeviationBoard):
+ * the TTL matches the panel's 30-second refresh. */
+export const ASHARE_CACHE_TTL_MS = 30_000;
 
 export interface MaDeviationRow {
   symbol: string;
@@ -278,12 +283,14 @@ function orderGroup(rows: MaDeviationRow[]): MaDeviationRow[] {
 }
 
 /**
- * In-process cache for the A-share rows only. A 1-minute bar only appears
- * once a minute, so re-fetching Sina on every 30-second panel refresh
- * returns the same forming bar half the time; within the TTL the previous
- * rows are reused and Sina is not called at all. OKX is never cached: it
- * trades 24h and its forming bar moves every refresh. The cache is keyed by
- * fetcher identity, so a fresh fetcher (e.g. in tests) always fetches.
+ * In-process cache for the A-share rows only. The TTL equals the panel's
+ * 30-second refresh so A-share rows can move on every poll during trading
+ * hours: Sina's forming 1-minute bar updates intra-minute, so its close —
+ * and therefore W — can change between two consecutive polls. Outside
+ * trading hours the rows are frozen at the session-end values regardless of
+ * the TTL. OKX is never cached: it trades 24h and its forming bar moves
+ * every refresh. The cache is keyed by fetcher identity, so a fresh fetcher
+ * (e.g. in tests) always fetches.
  */
 let ashareCache: { fetcher: typeof fetch; rows: MaDeviationRow[]; atMs: number } | null = null;
 
@@ -310,20 +317,41 @@ async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> 
   return rows;
 }
 
+/**
+ * Runs `fn` over `items` with at most `limit` in flight at once, preserving
+ * order. OKX's public market-data endpoints allow 20 requests per 2 seconds
+ * per IP; firing one request per symbol in a single burst (22 symbols now)
+ * risks 429s, so the OKX fan-out below is capped well under that.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length) as R[];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function loadMaDeviationBoard(
   fetcher: typeof fetch = fetch,
 ): Promise<MaDeviationBoard> {
   const [okxRows, ashareRows] = await Promise.all([
-    Promise.all(
-      MA_DEVIATION_SYMBOLS.map(async ({ symbol, instId }) => {
-        try {
-          const bars = await fetchOkxCandles(instId, fetcher);
-          return buildRow(symbol, instId, bars, "okx");
-        } catch {
-          return nullRow(symbol, instId, "okx");
-        }
-      }),
-    ),
+    mapWithConcurrency(MA_DEVIATION_SYMBOLS, 10, async ({ symbol, instId }) => {
+      try {
+        const bars = await fetchOkxCandles(instId, fetcher);
+        return buildRow(symbol, instId, bars, "okx");
+      } catch {
+        return nullRow(symbol, instId, "okx");
+      }
+    }),
     loadAshareRows(fetcher),
   ]);
   const rows = [...orderGroup(okxRows), ...orderGroup(ashareRows)];
