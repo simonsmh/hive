@@ -39,7 +39,7 @@ function summarize(market: MaDeviationMarket, rows: MaDeviationRow[]): MaDeviati
 }
 
 const MARKET_LABEL: Record<MaDeviationMarket, string> = {
-  okx: "OKX 永续（24 小时）",
+  okx: "OKX 永续 + VIX（VIX 仅美股时段更新）",
   ashare: "A 股（仅交易时段更新）",
 };
 
@@ -139,6 +139,7 @@ export function MaDeviationBoard({ initialBoard }: { initialBoard: MaDeviationBo
           读法：W 为正表示价格在 5 分钟 MA20 上方且近期偏离加权为正；W 变化为正表示瞬时趋势在加强，为负表示在走弱。
           最新一根是未收盘的形成中 K 线，W 会随盘中价格实时变动。
           A 股仅交易时段（9:30–11:30、13:00–15:00）更新，非交易时段为上一交易时段末值。
+          VIX 取自 Yahoo 1 分钟线，仅美股交易时段更新，非交易时段为上一交易时段末值。
         </p>
       </section>
 
