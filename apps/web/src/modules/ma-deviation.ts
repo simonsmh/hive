@@ -303,6 +303,12 @@ async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> 
   ) {
     return ashareCache.rows;
   }
+  // Stamp the cache at fetch start, not at completion: the panel polls on a
+  // fixed 30-second interval, so a stamp taken after a slow Sina fetch
+  // would still be fresh at the next poll and every other poll would reuse
+  // stale rows. With the start stamp, the next poll is always at least one
+  // full TTL past it and refetches.
+  const startedAtMs = Date.now();
   const rows = await Promise.all(
     MA_DEVIATION_ASHARE_SYMBOLS.map(async ({ symbol, instId }) => {
       try {
@@ -313,7 +319,7 @@ async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> 
       }
     }),
   );
-  ashareCache = { fetcher, rows, atMs: Date.now() };
+  ashareCache = { fetcher, rows, atMs: startedAtMs };
   return rows;
 }
 

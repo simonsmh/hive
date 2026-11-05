@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MA_DEVIATION_ASHARE_SYMBOLS,
   MA_DEVIATION_SYMBOLS,
@@ -211,6 +211,41 @@ describe("loadMaDeviationBoard", () => {
     expect(okxCalls.length).toBe(MA_DEVIATION_SYMBOLS.length * 2);
     expect(okxCalls.every((url) => url.includes("limit=30"))).toBe(true);
     expect(second.rows).toEqual(first.rows);
+  });
+
+  it("refetches A-share rows on the next 30s poll even when Sina takes 1s", async () => {
+    // Regression: the cache stamp is taken at fetch start, so a slow Sina
+    // fetch cannot push expiry past the next poll and make alternate polls
+    // reuse stale rows.
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const base = mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA);
+      const slowFetch = (async (input: never, init?: never) => {
+        calls.push(String(input));
+        if (String(input).includes("quotes.sina.cn")) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        return base(input, init);
+      }) as unknown as typeof fetch;
+
+      const first = loadMaDeviationBoard(slowFetch);
+      await vi.advanceTimersByTimeAsync(1000);
+      await first;
+      const sinaBefore = calls.filter((url) => url.includes("quotes.sina.cn")).length;
+      expect(sinaBefore).toBe(MA_DEVIATION_ASHARE_SYMBOLS.length);
+
+      // 29s after the first load finished = 30s after the poll started
+      // (setInterval fires on a fixed 30s cadence from poll start).
+      await vi.advanceTimersByTimeAsync(29_000);
+      const second = loadMaDeviationBoard(slowFetch);
+      await vi.advanceTimersByTimeAsync(1000);
+      await second;
+      const sinaAfter = calls.filter((url) => url.includes("quotes.sina.cn")).length;
+      expect(sinaAfter).toBe(sinaBefore + MA_DEVIATION_ASHARE_SYMBOLS.length);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
