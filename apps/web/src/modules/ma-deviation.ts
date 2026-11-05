@@ -40,7 +40,22 @@ export const MA_DEVIATION_SYMBOLS = [
   { symbol: "TSLA", instId: "TSLA-USDT-SWAP" },
   { symbol: "AMD", instId: "AMD-USDT-SWAP" },
   { symbol: "AVGO", instId: "AVGO-USDT-SWAP" },
+  { symbol: "BTC", instId: "BTC-USDT-SWAP" },
+  { symbol: "ETH", instId: "ETH-USDT-SWAP" },
+  { symbol: "SOL", instId: "SOL-USDT-SWAP" },
+  { symbol: "OKB", instId: "OKB-USDT-SWAP" },
+  { symbol: "UVXY", instId: "UVXY-USDT-SWAP" },
 ] as const;
+
+/**
+ * Yahoo-sourced rows shown in the OKX group. VIX is an index, not an OKX
+ * product, so its 1-minute bars come from Yahoo Finance's public v8 chart
+ * endpoint (^VIX) — the same source the yahoo-collector already uses.
+ * Same W caliber as the OKX rows; VIX only moves during US trading hours,
+ * so outside those hours the row is frozen at the last session close, like
+ * the A-share rows after hours.
+ */
+export const MA_DEVIATION_YAHOO_SYMBOLS = [{ symbol: "VIX", yahooSymbol: "^VIX" }] as const;
 
 /**
  * A-share symbols (1-minute Sina candles). `symbol` is the 6-digit code
@@ -66,6 +81,9 @@ export const MA_DEVIATION_ASHARE_SYMBOLS = [
 ] as const;
 
 export const SINA_REFERER = "https://finance.sina.com.cn";
+export const YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com";
+export const YAHOO_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 /**
  * W only needs the newest 29 closes (MA20 seed + current 5-bar window +
  * previous 5-bar window); 40 leaves headroom for suspended/delayed bars.
@@ -73,8 +91,9 @@ export const SINA_REFERER = "https://finance.sina.com.cn";
 export const SINA_MINUTE_DATALEN = 40;
 /** Same 29-bar minimum, 30 for OKX. */
 export const OKX_CANDLE_LIMIT = 30;
-/** A-share rows are cached in-process for this long (see loadMaDeviationBoard). */
-export const ASHARE_CACHE_TTL_MS = 60_000;
+/** A-share rows are cached in-process for this long (see loadMaDeviationBoard):
+ * the TTL matches the panel's 30-second refresh. */
+export const ASHARE_CACHE_TTL_MS = 30_000;
 
 export interface MaDeviationRow {
   symbol: string;
@@ -255,6 +274,57 @@ async function fetchSinaCandles(
   return parseSinaMinuteJsonp(await response.text());
 }
 
+/**
+ * Parse a Yahoo v8 chart payload into ascending 1-minute bars. Only the
+ * timestamp and close columns are needed here; bars with a missing or
+ * non-finite close are dropped, and bars are deduplicated by ts. The
+ * newest bar is the forming bar during market hours.
+ */
+export function parseYahooMinuteChart(payload: unknown): { ts: number; close: number }[] {
+  const chart = (payload as Record<string, unknown> | null)?.chart as
+    | Record<string, unknown>
+    | undefined;
+  const result = Array.isArray(chart?.result) ? (chart.result[0] as Record<string, unknown>) : null;
+  if (result === null || result === undefined) throw new Error("Yahoo chart response has no result");
+  const timestamps = Array.isArray(result.timestamp) ? result.timestamp : [];
+  const indicators = result.indicators as Record<string, unknown> | undefined;
+  const quote = Array.isArray(indicators?.quote)
+    ? (indicators.quote[0] as Record<string, unknown>)
+    : null;
+  const closes = Array.isArray(quote?.close) ? quote.close : [];
+  if (timestamps.length !== closes.length) {
+    throw new Error("Yahoo chart timestamps do not match the close count");
+  }
+  const byTs = new Map<number, { ts: number; close: number }>();
+  for (let i = 0; i < timestamps.length; i += 1) {
+    const ts = Number(timestamps[i]) * 1000;
+    const close = Number(closes[i]);
+    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0) continue;
+    byTs.set(ts, { ts, close });
+  }
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
+
+async function fetchYahooCandles(
+  yahooSymbol: string,
+  fetcher: typeof fetch = fetch,
+): Promise<{ ts: number; close: number }[]> {
+  // range=5d (not 1d): at the start of a session 1d would supply only the
+  // new session's bars, leaving too few closes to seed MA20 and the previous
+  // W window — VIX would have no W for roughly the first half-hour. Five
+  // sessions seed them from the preceding session, the same way the
+  // count-based OKX (30) and Sina (40) requests span session boundaries.
+  // Only the newest 40 bars are needed (29 for W + headroom).
+  const url =
+    `${YAHOO_CHART_BASE_URL}/v8/finance/chart/${encodeURIComponent(yahooSymbol)}` +
+    `?range=5d&interval=1m&includePrePost=false`;
+  const response = await fetcher(url, {
+    headers: { accept: "application/json", "user-agent": YAHOO_USER_AGENT },
+  });
+  if (!response.ok) throw new Error(`Yahoo ${yahooSymbol} returned HTTP ${response.status}`);
+  return parseYahooMinuteChart(await response.json()).slice(-40);
+}
+
 function summarizeGroup(market: MaDeviationMarket, rows: MaDeviationRow[]): MaDeviationGroup {
   const withW = rows.filter((row) => row.market === market && row.w !== null);
   return {
@@ -278,12 +348,14 @@ function orderGroup(rows: MaDeviationRow[]): MaDeviationRow[] {
 }
 
 /**
- * In-process cache for the A-share rows only. A 1-minute bar only appears
- * once a minute, so re-fetching Sina on every 30-second panel refresh
- * returns the same forming bar half the time; within the TTL the previous
- * rows are reused and Sina is not called at all. OKX is never cached: it
- * trades 24h and its forming bar moves every refresh. The cache is keyed by
- * fetcher identity, so a fresh fetcher (e.g. in tests) always fetches.
+ * In-process cache for the A-share rows only. The TTL equals the panel's
+ * 30-second refresh so A-share rows can move on every poll during trading
+ * hours: Sina's forming 1-minute bar updates intra-minute, so its close —
+ * and therefore W — can change between two consecutive polls. Outside
+ * trading hours the rows are frozen at the session-end values regardless of
+ * the TTL. OKX is never cached: it trades 24h and its forming bar moves
+ * every refresh. The cache is keyed by fetcher identity, so a fresh fetcher
+ * (e.g. in tests) always fetches.
  */
 let ashareCache: { fetcher: typeof fetch; rows: MaDeviationRow[]; atMs: number } | null = null;
 
@@ -296,6 +368,12 @@ async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> 
   ) {
     return ashareCache.rows;
   }
+  // Stamp the cache at fetch start, not at completion: the panel polls on a
+  // fixed 30-second interval, so a stamp taken after a slow Sina fetch
+  // would still be fresh at the next poll and every other poll would reuse
+  // stale rows. With the start stamp, the next poll is always at least one
+  // full TTL past it and refetches.
+  const startedAtMs = Date.now();
   const rows = await Promise.all(
     MA_DEVIATION_ASHARE_SYMBOLS.map(async ({ symbol, instId }) => {
       try {
@@ -306,27 +384,58 @@ async function loadAshareRows(fetcher: typeof fetch): Promise<MaDeviationRow[]> 
       }
     }),
   );
-  ashareCache = { fetcher, rows, atMs: Date.now() };
+  ashareCache = { fetcher, rows, atMs: startedAtMs };
   return rows;
+}
+
+/**
+ * Runs `fn` over `items` with at most `limit` in flight at once, preserving
+ * order. OKX's public market-data endpoints allow 20 requests per 2 seconds
+ * per IP; firing one request per symbol in a single burst (22 symbols now)
+ * risks 429s, so the OKX fan-out below is capped well under that.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length) as R[];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export async function loadMaDeviationBoard(
   fetcher: typeof fetch = fetch,
 ): Promise<MaDeviationBoard> {
-  const [okxRows, ashareRows] = await Promise.all([
+  const [okxRows, ashareRows, yahooRows] = await Promise.all([
+    mapWithConcurrency(MA_DEVIATION_SYMBOLS, 10, async ({ symbol, instId }) => {
+      try {
+        const bars = await fetchOkxCandles(instId, fetcher);
+        return buildRow(symbol, instId, bars, "okx");
+      } catch {
+        return nullRow(symbol, instId, "okx");
+      }
+    }),
+    loadAshareRows(fetcher),
     Promise.all(
-      MA_DEVIATION_SYMBOLS.map(async ({ symbol, instId }) => {
+      MA_DEVIATION_YAHOO_SYMBOLS.map(async ({ symbol, yahooSymbol }) => {
         try {
-          const bars = await fetchOkxCandles(instId, fetcher);
-          return buildRow(symbol, instId, bars, "okx");
+          const bars = await fetchYahooCandles(yahooSymbol, fetcher);
+          return buildRow(symbol, yahooSymbol, bars, "okx");
         } catch {
-          return nullRow(symbol, instId, "okx");
+          return nullRow(symbol, yahooSymbol, "okx");
         }
       }),
     ),
-    loadAshareRows(fetcher),
   ]);
-  const rows = [...orderGroup(okxRows), ...orderGroup(ashareRows)];
+  const rows = [...orderGroup([...okxRows, ...yahooRows]), ...orderGroup(ashareRows)];
   return {
     fetchedAt: new Date().toISOString(),
     rows,
