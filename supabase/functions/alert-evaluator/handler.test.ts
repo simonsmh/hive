@@ -303,3 +303,270 @@ Deno.test("reports rows the database skipped as duplicates of an earlier bar", a
   strictEqual(body.inserted, 0);
   strictEqual(body.duplicates, 1);
 });
+
+const MA_RULE_ID = "44444444-4444-4444-8444-444444444444";
+const CLOSE_NOW = Date.parse("2026-11-02T07:00:00.000Z");
+
+function maRule(overrides: Partial<AlertRuleRow> = {}): AlertRuleRow {
+  return {
+    id: MA_RULE_ID,
+    name: "HTGD MA5 reclaim",
+    symbol: "HTGD",
+    source: "sina",
+    kind: "ma_cross",
+    params: { period: 5, direction: "above", interval: "5m" },
+    cooldownSeconds: 1800,
+    lastTriggeredAtMs: null,
+    ...overrides,
+  };
+}
+
+/** Five daily closes averaging exactly 46, ascending, last one day before the 5m bars. */
+function dailyCloses(): Candle[] {
+  return [44, 45, 46, 47, 48].map((close, i) => bar(Date.parse("2026-10-26T00:00:00.000Z") + i * 86_400_000, close));
+}
+
+Deno.test("fires ma_cross when the latest 5m bar closes across the 5-day average, fetching the daily series too", async () => {
+  const { store, candleRequests, recorded } = fakeStore({
+    rules: [maRule()],
+    candles: {
+      "HTGD|sina|5m": series([45.9, 46.2]),
+      "HTGD|sina|1D": dailyCloses(),
+    },
+  });
+
+  const { status, body } = await run(evaluator(store));
+
+  strictEqual(status, 200);
+  strictEqual(body.fired, 1);
+  deepStrictEqual(candleRequests, [
+    { symbol: "HTGD", source: "sina", interval: "5m", limit: 2 },
+    { symbol: "HTGD", source: "sina", interval: "1D", limit: 5 },
+  ]);
+  deepStrictEqual(recorded[0]?.[0]?.payload, {
+    source: "sina",
+    symbol: "HTGD",
+    rule_id: MA_RULE_ID,
+    rule_name: "HTGD MA5 reclaim",
+    interval: "5m",
+    bar_ts: "2026-10-14T11:59:00.000Z",
+    ma: 46,
+    last_price: 46.2,
+    previous_price: 45.9,
+    period: 5,
+    close_confirmation: 0,
+  });
+});
+
+Deno.test("marks a 14:55 Shanghai trigger bar as the close confirmation", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [maRule()],
+    candles: {
+      // 14:50 and 14:55 Shanghai on 2026-11-02; the evaluator clock sits at 15:00 so both are fresh.
+      // The confirmation average is recalculated with today's close included:
+      // (45 + 46 + 47 + 48 + 47) / 5 = 46.6, so the 47.00 close reclaims it.
+      "HTGD|sina|5m": [bar(Date.parse("2026-11-02T06:50:00.000Z"), 45.9), bar(Date.parse("2026-11-02T06:55:00.000Z"), 47.0)],
+      "HTGD|sina|1D": dailyCloses(),
+    },
+  });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => CLOSE_NOW, log: () => {} });
+
+  const { body } = await run(handler);
+
+  strictEqual(body.fired, 1);
+  strictEqual(recorded[0]?.[0]?.payload.bar_ts, "2026-11-02T06:55:00.000Z");
+  strictEqual(recorded[0]?.[0]?.payload.close_confirmation, 1);
+  strictEqual(recorded[0]?.[0]?.payload.ma, 46.6);
+});
+
+Deno.test("does not confirm the reclaim when the close sits below the recalculated average", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [maRule()],
+    candles: {
+      // Same daily closes, but the 14:55 close is 46.20: the recalculated average is
+      // (45 + 46 + 47 + 48 + 46.2) / 5 = 46.44, above the close, so there is no reclaim even
+      // though 46.20 is above the average through yesterday (46).
+      "HTGD|sina|5m": [bar(Date.parse("2026-11-02T06:50:00.000Z"), 45.9), bar(Date.parse("2026-11-02T06:55:00.000Z"), 46.2)],
+      "HTGD|sina|1D": dailyCloses(),
+    },
+  });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => CLOSE_NOW, log: () => {} });
+
+  const { body } = await run(handler);
+
+  strictEqual(body.fired, 0);
+  strictEqual(body.skipped.not_fired, 1);
+  strictEqual(recorded.length, 0);
+});
+
+Deno.test("does not fire ma_cross when the previous bar is already above the average", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [maRule()],
+    candles: {
+      "HTGD|sina|5m": series([46.5, 46.2]),
+      "HTGD|sina|1D": dailyCloses(),
+    },
+  });
+
+  const { body } = await run(evaluator(store));
+
+  strictEqual(body.fired, 0);
+  strictEqual(body.skipped.not_fired, 1);
+  strictEqual(recorded.length, 0);
+});
+
+Deno.test("skips ma_cross as no data when fewer than period daily closes exist", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [maRule()],
+    candles: {
+      "HTGD|sina|5m": series([45.9, 46.2]),
+      "HTGD|sina|1D": dailyCloses().slice(1),
+    },
+  });
+
+  const { body } = await run(evaluator(store));
+
+  strictEqual(body.fired, 0);
+  strictEqual(body.skipped.no_data, 1);
+  strictEqual(recorded.length, 0);
+});
+
+const RETRACE_RULE_ID = "55555555-5555-4555-8555-555555555555";
+// 15m bars ending at the 13:45 UTC bar (21:45 Beijing), so the evaluator clock at 14:00 UTC sees them fresh.
+const RETRACE_NOW = Date.parse("2026-11-03T14:00:00.000Z");
+const RETRACE_LAST = RETRACE_NOW - 15 * 60_000;
+
+function retraceRule(overrides: Partial<AlertRuleRow> = {}): AlertRuleRow {
+  return {
+    id: RETRACE_RULE_ID,
+    name: "XAU 15m turning point 0.3%",
+    symbol: "XAU",
+    source: "okx",
+    kind: "retracement",
+    params: { interval: "15m", lookback: 20, minRetracePct: 0.3, side: "both" },
+    cooldownSeconds: 1800,
+    lastTriggeredAtMs: null,
+    ...overrides,
+  };
+}
+
+/** 15m bars with explicit high/low, newest bar opening at RETRACE_LAST. */
+function retraceBars(bars: [number, number, number, number][], lastTs = RETRACE_LAST): Candle[] {
+  return bars.map(([open, high, low, close], i) => ({
+    ts: lastTs - (bars.length - 1 - i) * 15 * 60_000,
+    open,
+    high,
+    low,
+    close,
+    volume: 10,
+    volCcy: 0,
+    confirmed: true,
+  }));
+}
+
+/** Twenty flat 4000..4010 bars, then `tail`; the last tail bar is judged against a window of exactly 4000..4010. */
+function withFlatWindow(tail: [number, number, number, number][]): Candle[] {
+  // The tail bar is the one being judged, so 20 flat bars are needed to fill a 20-bar lookback window.
+  const flat = Array.from({ length: 20 }, () => [4005, 4010, 4000, 4005] as [number, number, number, number]);
+  return retraceBars([...flat, ...tail]);
+}
+
+Deno.test("fires a suspected top when the 15m close gives back 0.3% from the window high", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [retraceRule()],
+    // The 20-bar anchor window is 4000..4010. A 3996.6 close is (4010 - 3996.6) / 4010 = 0.3342% below the high,
+    // past the 0.3% threshold, while its own 3996.4 low stays out of the window and cannot lower the anchor.
+    candles: { "XAU|okx|15m": withFlatWindow([[4005, 4010, 3996.4, 3996.6]]) },
+  });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => RETRACE_NOW, log: () => {} });
+
+  const { status, body } = await run(handler);
+
+  strictEqual(status, 200);
+  strictEqual(body.fired, 1);
+  deepStrictEqual(recorded[0]?.[0], {
+    dedup_key: `rule:${RETRACE_RULE_ID}:${RETRACE_LAST}`,
+    rule_id: RETRACE_RULE_ID,
+    symbol: "XAU",
+    kind: "retracement",
+    severity: "warning",
+    payload: {
+      source: "okx",
+      symbol: "XAU",
+      rule_id: RETRACE_RULE_ID,
+      rule_name: "XAU 15m turning point 0.3%",
+      interval: "15m",
+      bar_ts: "2026-11-03T13:45:00.000Z",
+      is_top: 1,
+      last_price: 3996.6,
+      anchor_price: 4010,
+      retrace_pct: 0.3342,
+      lookback: 20,
+      min_retrace_pct: 0.3,
+    },
+  });
+});
+
+Deno.test("fires a suspected bottom when the 15m close rebounds 0.3% off the window low", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [retraceRule({ id: "66666666-6666-4666-8666-666666666666", symbol: "CL", name: "CL 15m turning point 0.3%" })],
+    // Window low 4000: a 4013.8 close is 0.345% above it, and the bar's own high 4013.8 keeps the retracement off
+    // the 4010 window high at 0.095%. The whole bar sits above the earlier bars, so its own low sets nothing.
+    candles: { "CL|okx|15m": withFlatWindow([[4011, 4013.8, 4005, 4013.8]]) },
+  });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => RETRACE_NOW, log: () => {} });
+
+  const { body } = await run(handler);
+
+  strictEqual(body.fired, 1);
+  deepStrictEqual(recorded[0]?.[0]?.payload, {
+    source: "okx",
+    symbol: "CL",
+    rule_id: "66666666-6666-4666-8666-666666666666",
+    rule_name: "CL 15m turning point 0.3%",
+    interval: "15m",
+    bar_ts: "2026-11-03T13:45:00.000Z",
+    is_top: 0,
+    last_price: 4013.8,
+    anchor_price: 4000,
+    retrace_pct: 0.345,
+    lookback: 20,
+    min_retrace_pct: 0.3,
+  });
+});
+
+Deno.test("does not fire retracement while the close is inside the 0.3% band", async () => {
+  const { store, recorded } = fakeStore({
+    rules: [retraceRule()],
+    // 4008.5 is 0.0374% below the 4010 high and 0.2125% above the 4000 low.
+    candles: { "XAU|okx|15m": withFlatWindow([[4005, 4010, 4008, 4008.5]]) },
+  });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => RETRACE_NOW, log: () => {} });
+
+  const { body } = await run(handler);
+
+  strictEqual(body.fired, 0);
+  strictEqual(body.skipped.not_fired, 1);
+  strictEqual(recorded.length, 0);
+});
+
+Deno.test("respects the 30 minute cooldown on a fired retracement", async () => {
+  const bars = withFlatWindow([[4005, 4010, 3996.4, 3996.6]]);
+  const lastTriggeredAtMs = RETRACE_NOW - 29 * 60_000;
+  const { store, recorded } = fakeStore({ rules: [retraceRule({ lastTriggeredAtMs })], candles: { "XAU|okx|15m": bars } });
+  const handler = createAlertEvaluatorHandler({ cronSecret: SECRET, store, now: () => RETRACE_NOW, log: () => {} });
+
+  const { body } = await run(handler);
+
+  strictEqual(body.fired, 0);
+  strictEqual(body.skipped.cooldown, 1);
+  strictEqual(recorded.length, 0);
+
+  // The same rule fires again once the 1800s window has passed.
+  const later = fakeStore({ rules: [retraceRule({ lastTriggeredAtMs: RETRACE_NOW - 1800_000 })], candles: { "XAU|okx|15m": bars } });
+  const { body: after } = await run(
+    createAlertEvaluatorHandler({ cronSecret: SECRET, store: later.store, now: () => RETRACE_NOW, log: () => {} }),
+  );
+  strictEqual(after.fired, 1);
+  strictEqual(later.recorded.length, 1);
+});

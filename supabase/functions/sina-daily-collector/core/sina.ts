@@ -219,7 +219,7 @@ function parseRetryAfterMs(header: string | null): number | null {
  * limiting (Sina answers without a Referer, or under load, with 403).
  * Sends no credentials; the Referer header is the only access requirement.
  */
-export class SinaClient implements SinaMarketData {
+export class SinaClient implements SinaMarketData, SinaIntradayData {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -249,6 +249,19 @@ export class SinaClient implements SinaMarketData {
     url.searchParams.set("datalen", String(this.datalen));
     const text = await this.request(url, sinaCode);
     return parseSinaKLine(text, { nowMs: this.now() });
+  }
+
+  async getIntraday(sinaCode: string, intervalMinutes: number): Promise<SinaIntraday> {
+    // The daily path uses CN_MarketDataService.getKLineData; for minute bars
+    // the CN_MarketData.getKLineData path was verified on 2026-11-02 to serve
+    // the identical scale=5 payload, so the intraday client uses that path.
+    const url = new URL("/cn/api/jsonp_v2.php/var%20_" + encodeURIComponent(sinaCode) + "=/CN_MarketData.getKLineData", this.baseUrl);
+    url.searchParams.set("symbol", sinaCode);
+    url.searchParams.set("scale", String(intervalMinutes));
+    url.searchParams.set("ma", "no");
+    url.searchParams.set("datalen", String(SINA_INTRADAY_DATALEN));
+    const text = await this.request(url, sinaCode);
+    return parseSinaIntradayKLine(text, { nowMs: this.now(), intervalMinutes });
   }
 
   /** Reserves the next request slot so concurrent callers stay at least minIntervalMs apart. */
@@ -293,4 +306,104 @@ export class SinaClient implements SinaMarketData {
       return text;
     }
   }
+}
+
+/**
+ * How many intraday bars one fetch asks for. 120 five-minute bars cover about
+ * two and a half trading days (48 bars per day), so the first run after a
+ * weekend backfills the whole previous session plus the current morning, and
+ * every later run re-upserts its window idempotently. The candles table
+ * accumulates across runs, so this window does not cap long-term history.
+ */
+export const SINA_INTRADAY_DATALEN = 120;
+
+export interface SinaIntraday {
+  /** Ascending by ts and unique by ts. The newest bar may still be forming (confirmed = false). */
+  candles: Candle[];
+  /** Bars that had a missing or inconsistent value. */
+  rejected: number;
+}
+
+/**
+ * Sina labels minute bars by window end: the first bar of a session is
+ * 09:35 (09:30-09:35) and the morning session ends with the 11:30 bar
+ * (11:25-11:30). Hive candles are keyed by bar open time, so the stored ts
+ * is the label minus the interval. A bar is confirmed only once its window
+ * has fully ended, so the forming bar stays unconfirmed and the evaluator
+ * (confirmed bars only) never ingests a live price. The payload carries an
+ * `amount` field, but volCcy follows the daily convention and stays 0: the
+ * alert input is volume in shares, and turnover is intentionally not mixed
+ * into it.
+ */
+export function parseSinaIntradayKLine(
+  body: string,
+  options: { nowMs: number; intervalMinutes: number },
+): SinaIntraday {
+  const { nowMs, intervalMinutes } = options;
+  if (!Number.isInteger(intervalMinutes) || intervalMinutes <= 0) {
+    throw new SinaParseError("intraday interval must be a positive integer number of minutes");
+  }
+  const start = body.indexOf("[");
+  const end = body.lastIndexOf("]");
+  if (start < 0 || end <= start) throw new SinaParseError("sina k-line response has no JSON array");
+  let rows: unknown;
+  try {
+    rows = JSON.parse(body.slice(start, end + 1)) as unknown;
+  } catch {
+    throw new SinaParseError("sina k-line response is not valid JSON");
+  }
+  if (!Array.isArray(rows)) throw new SinaParseError("sina k-line response is not an array");
+
+  const byTs = new Map<number, Candle>();
+  let rejected = 0;
+  for (const row of rows) {
+    const record = asRecord(row);
+    const day = record?.day;
+    const match =
+      typeof day === "string" ? /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(day) : null;
+    if (match === null) {
+      rejected += 1;
+      continue;
+    }
+    const open = finitePositive(record?.open);
+    const high = finitePositive(record?.high);
+    const low = finitePositive(record?.low);
+    const close = finitePositive(record?.close);
+    const volume = finiteNonNegative(record?.volume);
+    if (open === null || high === null || low === null || close === null || volume === null || high < low) {
+      rejected += 1;
+      continue;
+    }
+    const [year, month, date, hour, minute, second] = match.slice(1).map(Number) as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    const windowEndMs = Date.UTC(year, month - 1, date, hour, minute, second) - BEIJING_OFFSET_MS;
+    if (Number.isNaN(windowEndMs)) {
+      rejected += 1;
+      continue;
+    }
+    const ts = windowEndMs - intervalMinutes * 60_000;
+    byTs.set(ts, {
+      ts,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      volCcy: 0,
+      confirmed: windowEndMs <= nowMs,
+    });
+  }
+  const candles = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  return { candles, rejected };
+}
+
+export interface SinaIntradayData {
+  /** Intraday bars for one Sina code, ascending in the result. */
+  getIntraday(sinaCode: string, intervalMinutes: number): Promise<SinaIntraday>;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   barConfirmed,
+  parseSinaIntradayKLine,
   parseSinaKLine,
   SinaParseError,
   toSinaCode,
@@ -109,5 +110,58 @@ describe("parseSinaKLine", () => {
     expect(() => parseSinaKLine("/*<script>location.href='//sina.com';</script>*/", { nowMs: AFTER_CLOSE })).toThrow(
       SinaParseError,
     );
+  });
+});
+
+/** Real 2026-11-02 morning 5m rows for 513310, as served by Sina. */
+const INTRADAY_ROWS = [
+  `{"day":"2026-11-02 11:20:00","open":"3.818","high":"3.847","low":"3.813","close":"3.833","volume":"184183336","amount":"705490030.7011"}`,
+  `{"day":"2026-11-02 11:25:00","open":"3.832","high":"3.879","low":"3.832","close":"3.868","volume":"257495900","amount":"993636083.6906"}`,
+  `{"day":"2026-11-02 11:30:00","open":"3.868","high":"3.887","low":"3.861","close":"3.872","volume":"224677235","amount":"868000000.0000"}`,
+].join(",");
+
+describe("parseSinaIntradayKLine", () => {
+  it("keys bars by window open (label minus 5 minutes) in UTC", () => {
+    const parsed = parseSinaIntradayKLine(klineBody(INTRADAY_ROWS), {
+      nowMs: Date.parse("2026-11-02T04:00:00Z"),
+      intervalMinutes: 5,
+    });
+    expect(parsed.rejected).toBe(0);
+    expect(parsed.candles.map((c) => c.ts)).toEqual([
+      Date.UTC(2026, 10, 2, 3, 15),
+      Date.UTC(2026, 10, 2, 3, 20),
+      Date.UTC(2026, 10, 2, 3, 25),
+    ]);
+    expect(parsed.candles[2]).toMatchObject({ close: 3.872, volume: 224677235, volCcy: 0, confirmed: true });
+  });
+
+  it("leaves the forming bar unconfirmed until its window has ended", () => {
+    // 2026-11-02 11:27 Beijing = 03:27 UTC: the 11:25 bar has ended, the 11:30 bar has not.
+    const parsed = parseSinaIntradayKLine(klineBody(INTRADAY_ROWS), {
+      nowMs: Date.parse("2026-11-02T03:27:00Z"),
+      intervalMinutes: 5,
+    });
+    expect(parsed.candles.map((c) => c.confirmed)).toEqual([true, true, false]);
+  });
+
+  it("counts malformed rows as rejected instead of aborting the response", () => {
+    const parsed = parseSinaIntradayKLine(
+      klineBody(
+        [
+          `{"day":"2026-11-02 11:20:00","open":"3.818","high":"3.847","low":"3.813","close":"3.833","volume":"184183336"}`,
+          `{"day":"2026-11-02","open":"3.818","high":"3.847","low":"3.813","close":"3.833","volume":"184183336"}`,
+          `{"day":"2026-11-02 11:30:00","open":"3.868","high":"3.861","low":"3.887","close":"3.872","volume":"224677235"}`,
+        ].join(","),
+      ),
+      { nowMs: Date.parse("2026-11-02T04:00:00Z"), intervalMinutes: 5 },
+    );
+    expect(parsed.rejected).toBe(2);
+    expect(parsed.candles).toHaveLength(1);
+  });
+
+  it("throws on a non-positive interval", () => {
+    expect(() =>
+      parseSinaIntradayKLine(klineBody(INTRADAY_ROWS), { nowMs: Date.parse("2026-11-02T04:00:00Z"), intervalMinutes: 0 }),
+    ).toThrow(SinaParseError);
   });
 });

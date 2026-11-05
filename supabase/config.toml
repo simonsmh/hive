@@ -50,6 +50,10 @@ verify_jwt = false
 [functions.strategy-evaluator]
 verify_jwt = false
 
+# strategy-executor is invoked by pg_cron (EDGE_CRON_SECRET), not by a Supabase JWT.
+[functions.strategy-executor]
+verify_jwt = false
+
 # order-sync is invoked by pg_cron (EDGE_CRON_SECRET), not by a Supabase JWT.
 [functions.order-sync]
 verify_jwt = false
@@ -60,4 +64,8 @@ verify_jwt = false
 
 # push-notify is invoked by pg_cron (EDGE_CRON_SECRET bearer), not by a Supabase JWT.
 [functions.push-notify]
+verify_jwt = false
+
+# telegram-dispatcher is invoked by pg_cron (EDGE_CRON_SECRET), not by a Supabase JWT.
+[functions.telegram-dispatcher]
 verify_jwt = false

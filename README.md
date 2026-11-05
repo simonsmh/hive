@@ -730,6 +730,7 @@ pnpm --filter @hive/web dev
 | `long_wick` | `interval`、`minWickRatio`（默认 0.6）、`side`（`upper`/`lower`/`any`） | 最新 K 线影线占振幅的比例达到阈值 |
 | `pullback` | `interval`、`lookback`（默认 20）、`minDropPct` | 最新收盘价较窗口最高价下跌 ≥ `minDropPct`% |
 | `pct_move` | `interval`、`lookback`（1–500）、`minAbsPct`（> 0） | 见下文 |
+| `retracement` | `interval`、`lookback`（默认 20）、`minRetracePct`（> 0）、`side`（`top`/`bottom`/`both`，默认 `both`） | 拐点信号：最新收盘价相对窗口锚（顶锚 = 之前 `lookback` 根最高价，底锚 = 最低价）反向回吐 ≥ `minRetracePct`%。只报信号，不含买卖建议 |
 
 **`pct_move`（区间涨跌幅）**：以同一 `interval` 下最新已确认 K 线的收盘价 `last`，与其之前第 `lookback` 根的收盘价 `earlier` 比较，`pct = (last − earlier) / earlier × 100`。当 `|pct| ≥ minAbsPct` 时触发。缺少足够的 K 线或 `earlier ≤ 0` 时不触发。只使用已确认 K 线，正在形成的 K 线不参与计算。
 

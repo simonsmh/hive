@@ -35,6 +35,7 @@ export const ALERT_KIND_LABELS: Record<string, string> = {
   volume_spike: "放量",
   long_wick: "长影线",
   pullback: "回调",
+  retracement: "拐点",
 };
 
 export const SEVERITY_LABELS: Record<string, string> = {

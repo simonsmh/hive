@@ -102,6 +102,13 @@ function groupRequests(rules: EvaluatedRule[]): Map<string, CandleRequest> {
     const key = seriesKey(rule.symbol, rule.source, interval);
     const limit = Math.max(ruleBarsNeeded(params), requests.get(key)?.limit ?? 0);
     requests.set(key, { symbol: rule.symbol, source: rule.source, interval, limit });
+    // ma_cross reads its average off the same source's daily closes, so the
+    // daily series is fetched alongside the intraday one, once per symbol.
+    if (params.kind === "ma_cross") {
+      const dailyKey = seriesKey(rule.symbol, rule.source, "1D");
+      const dailyLimit = Math.max(params.period, requests.get(dailyKey)?.limit ?? 0);
+      requests.set(dailyKey, { symbol: rule.symbol, source: rule.source, interval: "1D", limit: dailyLimit });
+    }
   }
   return requests;
 }
@@ -192,7 +199,25 @@ export function createAlertEvaluatorHandler(deps: EvaluatorDeps): (request: Requ
         skipped.stale += 1;
         continue;
       }
-      const evaluation = evaluateRule(params, bars);
+      // ma_cross needs its daily closes as well; a missing daily series is a
+      // fetch failure, fewer than `period` closes is simply not enough data.
+      // The freshness gate above still applies to the intraday bar only: daily
+      // closes are completed days by construction, so they carry no freshness.
+      let evaluation: RuleEvaluation | null;
+      if (params.kind === "ma_cross") {
+        const daily = series.get(seriesKey(rule.symbol, rule.source, "1D"));
+        if (!daily) {
+          skipped.candle_failed += 1;
+          continue;
+        }
+        if (daily.length < params.period) {
+          skipped.no_data += 1;
+          continue;
+        }
+        evaluation = evaluateRule(params, bars, daily);
+      } else {
+        evaluation = evaluateRule(params, bars);
+      }
       if (!evaluation) {
         skipped.not_fired += 1;
         continue;
