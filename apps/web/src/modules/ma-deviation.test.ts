@@ -2,19 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MA_DEVIATION_ASHARE_SYMBOLS,
   MA_DEVIATION_SYMBOLS,
-  MA_DEVIATION_YAHOO_SYMBOLS,
   buildRow,
   computeDeviations,
   loadMaDeviationBoard,
   parseSinaMinuteJsonp,
-  parseYahooMinuteChart,
   weightedDeviation,
 } from "./ma-deviation";
 
 /** 25 flat bars then a 5-bar jump: W > 0, W_prev == 0 (deviations are 0 until the jump). */
 const FLAT_THEN_JUMP_OKX = [...Array.from({ length: 25 }, () => 100), ...Array.from({ length: 5 }, () => 110)];
 const FLAT_THEN_JUMP_SINA = [...Array.from({ length: 25 }, () => 10), ...Array.from({ length: 5 }, () => 11)];
-const FLAT_THEN_JUMP_YAHOO = [...Array.from({ length: 25 }, () => 20), ...Array.from({ length: 5 }, () => 22)];
 
 function okxResponse(closes: number[]) {
   // OKX returns newest-first rows: [ts, open, high, low, close, ...].
@@ -53,37 +50,14 @@ function sinaJsonp(closes: number[]): string {
   return `/*<script>location.href='//sina.com';</script>*/\nvar=(${JSON.stringify(bars)})`;
 }
 
-function yahooResponse(closes: number[]) {
-  // Yahoo v8 chart: { chart: { result: [{ timestamp (seconds), indicators:
-  // { quote: [{ close }] } }] } }. Timestamps ascend; closes align by index.
-  const start = Date.UTC(2026, 10, 5, 13, 30, 0) / 1000;
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({
-      chart: {
-        result: [
-          {
-            timestamp: closes.map((_, i) => start + i * 60),
-            indicators: { quote: [{ close: closes }] },
-          },
-        ],
-      },
-    }),
-    text: async () => "",
-  };
-}
-
 function mockFetch(
   okxCloses: number[],
   sinaCloses: number[],
   sinaFailure: "throw" | "http500" | null = null,
-  yahooCloses: number[] = FLAT_THEN_JUMP_YAHOO,
 ): typeof fetch {
   return (async (input: unknown) => {
     const url = String(input);
     if (url.includes("okx.com")) return okxResponse(okxCloses);
-    if (url.includes("query1.finance.yahoo.com")) return yahooResponse(yahooCloses);
     if (url.includes("quotes.sina.cn")) {
       if (sinaFailure === "throw") throw new Error("sina down");
       if (sinaFailure === "http500") {
@@ -115,11 +89,7 @@ describe("loadMaDeviationBoard", () => {
       throw new Error("network down");
     }) as unknown as typeof fetch;
     const board = await loadMaDeviationBoard(failingFetch);
-    expect(board.rows.length).toBe(
-      MA_DEVIATION_SYMBOLS.length +
-        MA_DEVIATION_ASHARE_SYMBOLS.length +
-        MA_DEVIATION_YAHOO_SYMBOLS.length,
-    );
+expect(board.rows.length).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_ASHARE_SYMBOLS.length);
     expect(board.rows.every((row) => row.lastClose === null)).toBe(true);
     expect(board.groups.every((group) => group.meanW === null && group.count === 0)).toBe(true);
     const roundTripped = JSON.parse(JSON.stringify(board)) as typeof board;
@@ -129,11 +99,7 @@ describe("loadMaDeviationBoard", () => {
 
   it("loads A-share rows via Sina with market 'ashare' and a correct W", async () => {
     const board = await loadMaDeviationBoard(mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA));
-    expect(board.rows.length).toBe(
-      MA_DEVIATION_SYMBOLS.length +
-        MA_DEVIATION_ASHARE_SYMBOLS.length +
-        MA_DEVIATION_YAHOO_SYMBOLS.length,
-    );
+expect(board.rows.length).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_ASHARE_SYMBOLS.length);
 
     const ashare = board.rows.filter((row) => row.market === "ashare");
     expect(ashare.length).toBe(MA_DEVIATION_ASHARE_SYMBOLS.length);
@@ -156,13 +122,13 @@ describe("loadMaDeviationBoard", () => {
     expect(first?.lastTs).toBe(Date.UTC(2026, 10, 5, 10, 0, 0) - 8 * 60 * 60_000);
 
     const okx = board.rows.filter((row) => row.market === "okx");
-    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length);
+    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length);
     expect(okx.every((row) => row.w !== null && row.w > 0)).toBe(true);
 
     // Per-market stats are never mixed.
     const okxGroup = board.groups.find((group) => group.market === "okx");
     const ashareGroup = board.groups.find((group) => group.market === "ashare");
-    expect(okxGroup?.count).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length);
+    expect(okxGroup?.count).toBe(MA_DEVIATION_SYMBOLS.length);
     expect(ashareGroup?.count).toBe(MA_DEVIATION_ASHARE_SYMBOLS.length);
     expect(okxGroup?.meanW).toBeCloseTo(8.0236, 3);
     expect(ashareGroup?.meanW).toBeCloseTo(8.0236, 3);
@@ -171,34 +137,28 @@ describe("loadMaDeviationBoard", () => {
 
     // Rows are grouped by market, each ranked by W (all equal here, so the
     // OKX block simply precedes the A-share block).
-    const okxBlock = MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length;
+    const okxBlock = MA_DEVIATION_SYMBOLS.length;
     const markets = board.rows.map((row) => row.market);
     expect(markets.slice(0, okxBlock).every((m) => m === "okx")).toBe(true);
     expect(markets.slice(okxBlock).every((m) => m === "ashare")).toBe(true);
     assertNoNaN(JSON.parse(JSON.stringify(board)) as unknown);
   });
 
-  it("covers UVXY perpetual and VIX (Yahoo) in the OKX group, same W caliber", async () => {
+  it("covers the UVXY perpetual in the OKX group, same W caliber", async () => {
     const board = await loadMaDeviationBoard(mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA));
     const okx = board.rows.filter((row) => row.market === "okx");
-    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length);
+    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length);
 
     const uvxy = okx.find((row) => row.symbol === "UVXY");
     expect(uvxy?.instId).toBe("UVXY-USDT-SWAP");
     expect(uvxy?.w).toBeGreaterThan(7.9);
     expect(uvxy?.w).toBeLessThan(8.1);
-
-    // VIX is an index, not an OKX product: its 1m bars come from Yahoo.
-    const vix = okx.find((row) => row.symbol === "VIX");
-    expect(vix?.instId).toBe("^VIX");
-    expect(vix?.w).toBeGreaterThan(7.9);
-    expect(vix?.w).toBeLessThan(8.1);
   });
 
   it("covers BTC, ETH, SOL and OKB perpetuals on the OKX side, same W caliber", async () => {
     const board = await loadMaDeviationBoard(mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA));
     const okx = board.rows.filter((row) => row.market === "okx");
-    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length);
+    expect(okx.length).toBe(MA_DEVIATION_SYMBOLS.length);
     for (const [symbol, instId] of [
       ["BTC", "BTC-USDT-SWAP"],
       ["ETH", "ETH-USDT-SWAP"],
@@ -225,7 +185,7 @@ describe("loadMaDeviationBoard", () => {
     ).toBe(true);
     // OKX rows are unaffected.
     expect(board.rows.filter((row) => row.market === "okx" && row.w !== null).length).toBe(
-      MA_DEVIATION_SYMBOLS.length + MA_DEVIATION_YAHOO_SYMBOLS.length,
+      MA_DEVIATION_SYMBOLS.length,
     );
     const ashareGroup = board.groups.find((group) => group.market === "ashare");
     expect(ashareGroup?.meanW).toBeNull();
@@ -242,7 +202,7 @@ describe("loadMaDeviationBoard", () => {
     assertNoNaN(JSON.parse(JSON.stringify(board)) as unknown);
   });
 
-  it("requests Sina with datalen=40 and OKX with limit=30, Yahoo with range=5d, and reuses A-share rows within 30s", async () => {
+  it("requests Sina with datalen=40 and OKX with limit=30, and reuses A-share rows within 30s", async () => {
     const calls: string[] = [];
     const base = mockFetch(FLAT_THEN_JUMP_OKX, FLAT_THEN_JUMP_SINA);
     const countingFetch = ((input: never, init?: never) => {
@@ -255,7 +215,6 @@ describe("loadMaDeviationBoard", () => {
 
     const sinaCalls = calls.filter((url) => url.includes("quotes.sina.cn"));
     const okxCalls = calls.filter((url) => url.includes("okx.com"));
-    const yahooCalls = calls.filter((url) => url.includes("query1.finance.yahoo.com"));
     // One Sina request per symbol across BOTH loads: the second load reused
     // the cached A-share rows and called Sina zero times.
     expect(sinaCalls.length).toBe(MA_DEVIATION_ASHARE_SYMBOLS.length);
@@ -263,9 +222,6 @@ describe("loadMaDeviationBoard", () => {
     // OKX is never cached: fresh on every load.
     expect(okxCalls.length).toBe(MA_DEVIATION_SYMBOLS.length * 2);
     expect(okxCalls.every((url) => url.includes("limit=30"))).toBe(true);
-    // Yahoo VIX is never cached either, and range=5d seeds MA20 at the open.
-    expect(yahooCalls.length).toBe(MA_DEVIATION_YAHOO_SYMBOLS.length * 2);
-    expect(yahooCalls.every((url) => url.includes("range=5d"))).toBe(true);
     expect(second.rows).toEqual(first.rows);
   });
 
@@ -327,30 +283,6 @@ describe("parseSinaMinuteJsonp", () => {
   });
 });
 
-describe("parseYahooMinuteChart", () => {
-  it("parses v8 timestamps + closes into ascending bars, dropping null closes", () => {
-    const payload = {
-      chart: {
-        result: [
-          {
-            timestamp: [1762400000, 1762400060, 1762400120],
-            indicators: { quote: [{ close: [20.5, null, 21.0] }] },
-          },
-        ],
-      },
-    };
-    const bars = parseYahooMinuteChart(payload);
-    expect(bars).toEqual([
-      { ts: 1762400000000, close: 20.5 },
-      { ts: 1762400120000, close: 21 },
-    ]);
-  });
-
-  it("throws when the payload has no result", () => {
-    expect(() => parseYahooMinuteChart({})).toThrow();
-    expect(() => parseYahooMinuteChart({ chart: { result: [] } })).toThrow();
-  });
-});
 
 describe("computeDeviations", () => {
   it("returns null until 20 closes, then (close - MA20) / MA20 in percent", () => {
