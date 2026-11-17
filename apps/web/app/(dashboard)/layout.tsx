@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
+import { DashboardBrand } from "@/src/components/dashboard/DashboardBrand";
 import { DashboardNav } from "@/src/components/dashboard/DashboardNav";
 import { LiveStatus } from "@/src/components/dashboard/LiveStatus";
 import { InstallPrompt } from "@/src/components/pwa/InstallPrompt";
@@ -19,7 +20,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   return (
     <div className="app-shell">
       <header className="topbar">
-        <span className="brand">Hive</span>
+        <DashboardBrand />
         <span className="topbar-actions">
           <LiveStatus />
           <form action={logoutAction}>
@@ -30,7 +31,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
         </span>
       </header>
       <aside className="sidebar">
-        <span className="brand">Hive</span>
+        <DashboardBrand />
         <LiveStatus />
         <DashboardNav items={items} variant="sidebar" />
         <form action={logoutAction} className="sidebar-foot">

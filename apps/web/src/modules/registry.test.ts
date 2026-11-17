@@ -24,9 +24,9 @@ describe("PANELS registry", () => {
 describe("getNavItems", () => {
   it("orders entries by their order field regardless of declaration order", () => {
     const shuffled: PanelRegistration[] = [
-      { id: "b", title: "B", icon: "chart", href: "/b", order: 20 },
-      { id: "a", title: "A", icon: "pulse", href: "/a", order: 10 },
-      { id: "c", title: "C", icon: "news", href: "/c", order: 30 },
+      { id: "b", title: "B", icon: "chart", href: "/b", order: 20, summary: "B panel" },
+      { id: "a", title: "A", icon: "pulse", href: "/a", order: 10, summary: "A panel" },
+      { id: "c", title: "C", icon: "news", href: "/c", order: 30, summary: "C panel" },
     ];
     expect(getNavItems(shuffled).map((p) => p.id)).toEqual(["a", "b", "c"]);
   });
@@ -47,14 +47,14 @@ describe("requirePanel", () => {
 });
 
 describe("getDefaultHref", () => {
-  it("points at the first nav entry, and falls back to /login for an empty registry", () => {
-    expect(getDefaultHref()).toBe("/health");
+  it("points at the feature catalog, and falls back to /login for an empty registry", () => {
+    expect(getDefaultHref()).toBe("/");
     expect(getDefaultHref([])).toBe("/login");
   });
 });
 
 describe("validateRegistry", () => {
-  const valid: PanelRegistration = { id: "news", title: "新闻", icon: "news", href: "/news", order: 1 };
+  const valid: PanelRegistration = { id: "news", title: "新闻", icon: "news", href: "/news", order: 1, summary: "按首次发布时间浏览最近新闻事件" };
 
   it("reports duplicate ids, hrefs and orders", () => {
     const errors = validateRegistry([valid, { ...valid, href: "/news-2", order: 1 }]);
@@ -66,15 +66,17 @@ describe("validateRegistry", () => {
     expect(validateRegistry([{ ...valid, href: "/other" }]).join("\n")).toMatch(/href must be "\/news"/);
   });
 
-  it("rejects malformed ids, empty titles, unknown icons and non-integer orders", () => {
+  it("rejects malformed ids, empty titles, empty summaries, unknown icons and non-integer orders", () => {
     const errors = validateRegistry([
       { ...valid, id: "Bad Id", href: "/Bad Id" },
       { ...valid, id: "x2", href: "/x2", title: "  " },
+      { ...valid, id: "x5", href: "/x5", summary: "  " },
       { ...valid, id: "x3", href: "/x3", icon: "rocket" as PanelRegistration["icon"] },
       { ...valid, id: "x4", href: "/x4", order: 1.5 },
     ]).join("\n");
     expect(errors).toMatch(/lowercase letters/);
     expect(errors).toMatch(/title is empty/);
+    expect(errors).toMatch(/summary is empty/);
     expect(errors).toMatch(/unknown icon "rocket"/);
     expect(errors).toMatch(/order must be an integer/);
   });
