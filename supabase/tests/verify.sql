@@ -61,10 +61,10 @@ begin
   -- Queue and cron job exist.
   select count(*) into queue_count from pgmq.list_queues() where queue_name = 'hive_deliveries';
   if queue_count <> 1 then raise exception 'pgmq queue hive_deliveries missing'; end if;
-  perform 1 from cron.job where jobname = 'hive-health-check' and schedule = '* * * * *';
-  if not found then raise exception 'pg_cron job hive-health-check (every minute) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-health-check' and schedule = '*/2 * * * *';
+  if not found then raise exception 'pg_cron job hive-health-check (every two minutes) missing'; end if;
 
-  -- The per-minute hive-health-check cron may already have fired while migrations
+  -- The hive-health-check cron may already have fired while migrations
   -- were being applied, pre-creating stale-source alerts and making the health
   -- check counts below nondeterministic. Freeze the job now that its schedule is
   -- verified, and clear anything it already wrote so the assertions start clean.
@@ -178,8 +178,8 @@ begin
     raise exception 'service_role must be able to execute the collector RPCs';
   end if;
 
-  perform 1 from cron.job where jobname = 'hive-okx-collector' and schedule = '30 seconds';
-  if not found then raise exception 'pg_cron job hive-okx-collector with 30 second schedule missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-okx-collector' and schedule = '*/2 * * * *';
+  if not found then raise exception 'pg_cron job hive-okx-collector (every two minutes) missing'; end if;
   perform 1 from cron.job where jobname = 'hive-retention' and schedule = '17 3 * * *';
   if not found then raise exception 'pg_cron job hive-retention missing'; end if;
 
@@ -555,15 +555,15 @@ begin
   end;
 
   -- Schedules for the new jobs.
-  perform 1 from cron.job where jobname = 'hive-jin10-poller' and schedule = '30 seconds';
-  if not found then raise exception 'pg_cron job hive-jin10-poller (30 seconds) missing'; end if;
-  perform 1 from cron.job where jobname = 'hive-webhook-dispatch' and schedule = '30 seconds';
-  if not found then raise exception 'pg_cron job hive-webhook-dispatch (30 seconds) missing'; end if;
-  perform 1 from cron.job where jobname = 'hive-okx-news-poller' and schedule = '* * * * *';
+  perform 1 from cron.job where jobname = 'hive-jin10-poller' and schedule = '*/2 * * * *';
+  if not found then raise exception 'pg_cron job hive-jin10-poller (every two minutes) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-webhook-dispatch' and schedule = '*/2 * * * *';
+  if not found then raise exception 'pg_cron job hive-webhook-dispatch (every two minutes) missing'; end if;
+  perform 1 from cron.job where jobname = 'hive-okx-news-poller' and schedule = '*/2 * * * *';
   if not found then raise exception 'pg_cron job hive-okx-news-poller (every minute) missing'; end if;
   perform 1 from cron.job where jobname = 'hive-blockbeats-poller' and schedule = '*/5 * * * *';
   if not found then raise exception 'pg_cron job hive-blockbeats-poller (every 5 minutes) missing'; end if;
-  perform 1 from cron.job where jobname = 'hive-order-sync' and schedule = '*/3 * * * *';
+  perform 1 from cron.job where jobname = 'hive-order-sync' and schedule = '*/5 * * * *';
   if not found then raise exception 'pg_cron job hive-order-sync (every 3 minutes) missing'; end if;
 
   v_result := public.hive_prune_news_and_webhooks();
@@ -597,7 +597,7 @@ begin
      and params = '{"interval":"1m","lookback":10,"minAbsPct":1}'::jsonb;
   if v_count <> 3 then raise exception 'expected 3 seeded pct_move rules for SNDK, MU and SKHY, got %', v_count; end if;
 
-  perform 1 from cron.job where jobname = 'hive-alert-evaluator' and schedule = '* * * * *';
+  perform 1 from cron.job where jobname = 'hive-alert-evaluator' and schedule = '*/2 * * * *';
   if not found then raise exception 'pg_cron job hive-alert-evaluator (every minute) missing'; end if;
 
   if has_function_privilege('anon', 'public.hive_alert_evaluator_record(jsonb)', 'EXECUTE')
@@ -636,7 +636,7 @@ declare
   v_price numeric;
   v_rows integer;
 begin
-  perform 1 from cron.job where jobname = 'hive-yahoo-collector' and schedule = '*/2 * * * *'
+  perform 1 from cron.job where jobname = 'hive-yahoo-collector' and schedule = '*/5 * * * *'
      and command like '%yahoo-collector%';
   if not found then raise exception 'pg_cron job hive-yahoo-collector (every 2 minutes, yahoo-collector) missing'; end if;
 
@@ -810,7 +810,7 @@ begin
 
   -- Schedules: collector every two minutes in the UTC window, and the nightly prune.
   select schedule, command into v_schedule, v_command from cron.job where jobname = 'hive-ths-collector';
-  if v_schedule is distinct from '*/2 1-7 * * 1-5' or v_command not like '%hive_invoke_edge_function(''ths-collector'')%' then
+  if v_schedule is distinct from '*/5 1-7 * * 1-5' or v_command not like '%hive_invoke_edge_function(''ths-collector'')%' then
     raise exception 'pg_cron job hive-ths-collector missing or misconfigured (schedule %)', v_schedule;
   end if;
   select schedule into v_schedule from cron.job where jobname = 'hive-ths-prune';
@@ -1067,7 +1067,7 @@ begin
 
   perform 1 from public.risk_limits where mode = 'live' and enabled and name = 'live-default';
   if not found then raise exception 'live-default risk_limits row must exist and be enabled'; end if;
-  perform 1 from cron.job where jobname = 'hive-position-manager' and schedule = '*/3 * * * *';
+  perform 1 from cron.job where jobname = 'hive-position-manager' and schedule = '*/5 * * * *';
   if not found then raise exception 'pg_cron job hive-position-manager (*/3) missing'; end if;
 
   -- No symbol list: QQQ is accepted exactly like BTC.
