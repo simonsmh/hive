@@ -27,5 +27,13 @@ create index if not exists news_events_earliest_item_id_idx
   on public.news_events (earliest_item_id);
 
 -- Requires a role that can create objects in the cron schema.
-create index if not exists job_run_details_end_time_idx
-  on cron.job_run_details (end_time);
+-- CI and some roles are not the owner of cron.job_run_details; skip in that case
+-- so the news_events indexes can still be applied.
+do $$
+begin
+  execute 'create index if not exists job_run_details_end_time_idx on cron.job_run_details (end_time)';
+exception
+  when insufficient_privilege then
+    raise notice 'skip job_run_details_end_time_idx: current role cannot index cron.job_run_details';
+end
+$$;
