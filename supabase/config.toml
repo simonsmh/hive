@@ -25,6 +25,10 @@ verify_jwt = false
 [functions.yahoo-collector]
 verify_jwt = false
 
+# gold-api-collector is invoked by pg_cron (EDGE_CRON_SECRET).
+[functions.gold-api-collector]
+verify_jwt = false
+
 [functions.ths-collector]
 verify_jwt = false
 

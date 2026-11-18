@@ -10,6 +10,7 @@ import {
   ruleBarsNeeded,
   ruleInterval,
 } from "./core/alerts.ts";
+import { evaluateSnapshotCross, isFreshQuote } from "./core/snapshot-cross.ts";
 import type { Candle, Interval } from "./core/types.ts";
 
 export interface AlertRuleRow {
@@ -22,6 +23,13 @@ export interface AlertRuleRow {
   cooldownSeconds: number;
   /** Epoch milliseconds of the last inserted alert for this rule, or null. */
   lastTriggeredAtMs: number | null;
+  lastQuotePrice: number | null;
+  lastQuoteTsMs: number | null;
+}
+
+export interface QuoteRow {
+  price: number;
+  ts: number;
 }
 
 export interface CandleRequest {
@@ -38,6 +46,8 @@ export interface AlertInsert {
   kind: string;
   severity: "info" | "warning" | "critical";
   payload: Record<string, unknown>;
+  /** When true, hive_alert_evaluator_record disables the rule after a successful insert. */
+  disable_rule?: boolean;
 }
 
 export interface RecordResult {
@@ -49,6 +59,8 @@ export interface EvaluatorStore {
   listEnabledRules(): Promise<AlertRuleRow[]>;
   /** Most recent `limit` confirmed bars, ascending by ts. */
   confirmedCandles(request: CandleRequest): Promise<Candle[]>;
+  latestQuote(symbol: string, source: string): Promise<QuoteRow | null>;
+  observeQuote(ruleId: string, price: number, ts: number): Promise<void>;
   recordAlerts(alerts: AlertInsert[]): Promise<RecordResult>;
 }
 
@@ -98,6 +110,7 @@ function seriesKey(symbol: string, source: string, interval: Interval): string {
 function groupRequests(rules: EvaluatedRule[]): Map<string, CandleRequest> {
   const requests = new Map<string, CandleRequest>();
   for (const { rule, params } of rules) {
+    if (params.kind === "snapshot_cross") continue;
     const interval = ruleInterval(params);
     const key = seriesKey(rule.symbol, rule.source, interval);
     const limit = Math.max(ruleBarsNeeded(params), requests.get(key)?.limit ?? 0);
@@ -114,18 +127,27 @@ function groupRequests(rules: EvaluatedRule[]): Map<string, CandleRequest> {
 }
 
 function buildAlert(rule: AlertRuleRow, params: RuleParams, evaluation: RuleEvaluation): AlertInsert {
+  const isSnapshot = params.kind === "snapshot_cross";
   return {
     dedup_key: alertDedupKey(rule.id, evaluation.barTs),
     rule_id: rule.id,
     symbol: rule.symbol,
     kind: rule.kind,
     severity: "warning",
+    disable_rule: isSnapshot && params.once,
     payload: {
       source: rule.source,
       symbol: rule.symbol,
       rule_id: rule.id,
       rule_name: rule.name,
-      interval: ruleInterval(params),
+      ...(isSnapshot
+        ? {
+            quote_type: "spot_snapshot",
+            unit: "USD_per_troy_oz",
+            quote_ts: new Date(evaluation.barTs).toISOString(),
+            once: params.once,
+          }
+        : { interval: ruleInterval(params) }),
       bar_ts: new Date(evaluation.barTs).toISOString(),
       ...evaluation.details,
     },
@@ -184,6 +206,47 @@ export function createAlertEvaluatorHandler(deps: EvaluatorDeps): (request: Requ
     const alerts: AlertInsert[] = [];
     const nowMs = now();
     for (const { rule, params } of parsed) {
+      if (params.kind === "snapshot_cross") {
+        try {
+          const quote = await deps.store.latestQuote(rule.symbol, rule.source);
+          if (!quote) {
+            skipped.no_data += 1;
+            continue;
+          }
+          if (!isFreshQuote(quote.ts, params.maxQuoteAgeSeconds, nowMs)) {
+            skipped.stale += 1;
+            continue;
+          }
+          const previous =
+            rule.lastQuoteTsMs === null || rule.lastQuotePrice === null || !Number.isFinite(rule.lastQuotePrice)
+              ? null
+              : { price: rule.lastQuotePrice, ts: rule.lastQuoteTsMs };
+          if (previous !== null && !(quote.ts > previous.ts)) {
+            skipped.not_fired += 1;
+            continue;
+          }
+          const fired = evaluateSnapshotCross(params, previous, quote);
+          if (!fired) {
+            await deps.store.observeQuote(rule.id, quote.price, quote.ts);
+            skipped.not_fired += 1;
+            continue;
+          }
+          if (isCooldownActive(rule.lastTriggeredAtMs, rule.cooldownSeconds, nowMs)) {
+            skipped.cooldown += 1;
+            continue;
+          }
+          alerts.push(
+            buildAlert(rule, params, {
+              barTs: quote.ts,
+              details: { last_price: quote.price, previous_price: previous!.price, level: params.level },
+            }),
+          );
+        } catch (error) {
+          skipped.candle_failed += 1;
+          failures.push(`snapshot ${rule.symbol}|${rule.source}: ${describeError(error)}`);
+        }
+        continue;
+      }
       const interval = ruleInterval(params);
       const bars = series.get(seriesKey(rule.symbol, rule.source, interval));
       if (!bars) {

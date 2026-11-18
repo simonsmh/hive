@@ -1,5 +1,6 @@
 // Generated from packages/core/src by scripts/sync-edge-core.mjs. Do not edit by hand.
 import { INTERVALS, type Candle, type Interval } from "./types.ts";
+import { parseSnapshotCrossParams, type SnapshotCrossParams } from "./snapshot-cross.ts";
 
 export const RULE_KINDS = [
   "price_cross",
@@ -11,6 +12,7 @@ export const RULE_KINDS = [
   "ma_cross",
   "retracement",
   "price_run",
+  "snapshot_cross",
 ] as const;
 export type RuleKind = (typeof RULE_KINDS)[number];
 
@@ -30,7 +32,8 @@ export type RuleParams =
   | { kind: "pct_move"; interval: Interval; lookback: number; minAbsPct: number }
   | { kind: "ma_cross"; period: number; direction: Direction; interval: Interval }
   | { kind: "retracement"; interval: Interval; lookback: number; minRetracePct: number; side: RetraceSide }
-  | { kind: "price_run"; interval: Interval; minBars: number; minMovePct: number; side: PriceRunSide; skipSessionOpenBars?: number; maxBarShare?: number };
+  | { kind: "price_run"; interval: Interval; minBars: number; minMovePct: number; side: PriceRunSide; skipSessionOpenBars?: number; maxBarShare?: number }
+  | SnapshotCrossParams;
 
 const MAX_BAR_LOOKBACK = 500;
 /** A rule stops evaluating when its newest confirmed bar is older than this many intervals. */
@@ -211,6 +214,8 @@ export function parseRuleParams(kind: string, raw: unknown): RuleParams {
         ...(maxBarShare !== undefined ? { maxBarShare } : {}),
       };
     }
+    case "snapshot_cross":
+      return parseSnapshotCrossParams(obj);
     default:
       throw new AlertRuleError(`unknown rule kind "${kind}"`);
   }
@@ -578,7 +583,8 @@ export function evaluatePriceRun(
  * latest 1m closes.
  */
 export function ruleInterval(params: RuleParams): Interval {
-  return params.kind === "price_cross" ? "1m" : params.interval;
+  if (params.kind === "price_cross" || params.kind === "snapshot_cross") return "1m";
+  return params.interval;
 }
 
 /** Number of confirmed bars the evaluator needs for a rule (the most recent bars, ascending). */
@@ -601,6 +607,8 @@ export function ruleBarsNeeded(params: RuleParams): number {
       return params.lookback + 1;
     case "price_run":
       return params.minBars;
+    case "snapshot_cross":
+      return 0;
   }
 }
 
@@ -704,6 +712,9 @@ export function evaluateRule(
         },
       };
     }
+    case "snapshot_cross":
+      // Evaluated against quotes_latest, not candles.
+      return null;
   }
 }
 

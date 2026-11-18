@@ -1360,3 +1360,81 @@ begin
 end
 $$;
 rollback;
+
+-- gold-api XAUUSD snapshot_cross once-only watch and grokbot-market filters.
+begin;
+do $$
+declare
+  v_kinds text[];
+  v_symbols text[];
+  v_priority text;
+  v_params jsonb;
+  v_okx_id text;
+begin
+  perform 1 from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+   where t.typname = 'market_source' and e.enumlabel = 'gold-api';
+  if not found then raise exception 'market_source is missing gold-api'; end if;
+
+  perform 1 from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+   where t.relname = 'alert_rules'
+     and c.conname = 'alert_rules_kind_check'
+     and pg_get_constraintdef(c.oid) like '%snapshot_cross%';
+  if not found then raise exception 'alert_rules_kind_check missing snapshot_cross'; end if;
+
+  select okx_inst_id into v_okx_id from public.symbol_map where symbol = 'XAU';
+  if v_okx_id is distinct from 'XAU-USDT-SWAP' then
+    raise exception 'existing XAU okx mapping must stay XAU-USDT-SWAP, got %', v_okx_id;
+  end if;
+
+  perform 1 from public.symbol_map
+   where symbol = 'XAUUSD' and enabled and okx_inst_id is null and yahoo_symbol is null;
+  if not found then raise exception 'XAUUSD symbol_map row missing or mixed with another venue'; end if;
+
+  perform 1 from public.source_health where source = 'gold-api' and enabled and session_only = false;
+  if not found then raise exception 'gold-api source_health not enabled'; end if;
+
+  select params into v_params from public.alert_rules
+   where kind = 'snapshot_cross' and symbol = 'XAUUSD' and source = 'gold-api' and enabled;
+  if v_params is null then raise exception 'enabled XAUUSD snapshot_cross rule missing'; end if;
+  if v_params->>'level' is distinct from '3720' or v_params->>'direction' is distinct from 'below'
+     or (v_params->>'once')::boolean is distinct from true then
+    raise exception 'snapshot_cross params must be 3720 below once, got %', v_params;
+  end if;
+
+  select array(select jsonb_array_elements_text(filters->'alert_kinds') order by 1),
+         array(select jsonb_array_elements_text(filters->'symbols') order by 1)
+    into v_kinds, v_symbols
+    from public.webhook_subscriptions
+   where agent_name = 'grokbot-market';
+  if v_kinds is null or not ('snapshot_cross' = any (v_kinds)) then
+    raise exception 'grokbot-market filters must include snapshot_cross';
+  end if;
+  if not ('price_run' = any (v_kinds)) or not ('volume_spike' = any (v_kinds)) then
+    raise exception 'grokbot-market must keep existing A-share kinds';
+  end if;
+  if v_symbols is null or not ('XAUUSD' = any (v_symbols)) then
+    raise exception 'grokbot-market filters must include XAUUSD';
+  end if;
+  if not ('SH000688' = any (v_symbols)) then
+    raise exception 'grokbot-market must keep SH000688';
+  end if;
+
+  perform 1 from public.webhook_subscriptions
+   where agent_name = 'grokbot-news' and event_types = array['news']::text[];
+  if not found then raise exception 'grokbot-news must remain news-only'; end if;
+
+  select priority into v_priority from public.hive_delivery_policy('alert', 'snapshot_cross');
+  if v_priority is distinct from 'critical' then
+    raise exception 'snapshot_cross should use critical delivery policy, got %', v_priority;
+  end if;
+
+  if has_function_privilege('anon', 'public.hive_alert_evaluator_observe_quote(uuid,numeric,bigint)', 'EXECUTE') then
+    raise exception 'anon must not execute hive_alert_evaluator_observe_quote';
+  end if;
+
+  raise notice 'verify.sql: xauusd snapshot_cross checks passed';
+end
+$$;
+rollback;
