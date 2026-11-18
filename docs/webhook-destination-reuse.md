@@ -88,3 +88,14 @@ Then, using `created_at` (indexed), check `webhook_deliveries` for that `event_k
 ## Deploy baseline note
 
 Production already ran sina-intraday-collector and a retracement/ma_cross-capable alert-evaluator ahead of `origin/main`. Further function deploys for this feature must start from the live function source, change only the whitelist / `skipSessionOpenBars` behaviour, and must not redeploy those functions from an older `main` tree.
+
+## Production state 2026-11-18 (Asia/Shanghai)
+
+- Migration `20261118024102` (`ashare_index_alerts_and_webhook_clone`) is applied.
+- `grokbot-market` id `55aca2ce-9db8-4d5d-87a5-8eba6ff3a080` was cloned from `grokbot-news`; the news row's `updated_at` was left unchanged.
+- TEST fixture: alert `1460`, `event_key` `alert:1460`, delivery `13358` to `grokbot-market`, HTTP 200 at 10:42:02. Payload has `test` and `fixture` true. Not a market signal.
+- `alert-evaluator` v15 deployed 10:43:46 (`skipSessionOpenBars` on volume_spike).
+- `sina-intraday-collector` v5 deployed 10:44:46. Whitelist is SH513310, HTGD, SZ159915, SH000300, SH000688, SZ399006.
+- 10:45 cron: `cycle ok sina=6 failed=0 dbErrors=0`; `source_health` sina last success 10:45:11. Last confirmed 5m bars for the three indices were 10:40 (bar-open timestamps).
+- 10:46 evaluator: `rules=13 fired=0`, `no_data=0` (the new index rules have candles; that bar did not meet the 2x / 0.3% thresholds).
+- Git: `0daa9e3` on `feat/ashare-index-volume-alerts`. Do not redeploy these two functions from an older `main` tree. Production remains ahead of `origin/main` for unpublished collectors.
