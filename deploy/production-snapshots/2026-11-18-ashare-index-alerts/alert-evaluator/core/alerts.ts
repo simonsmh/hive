@@ -10,6 +10,7 @@ export const RULE_KINDS = [
   "pct_move",
   "ma_cross",
   "retracement",
+  "price_run",
 ] as const;
 export type RuleKind = (typeof RULE_KINDS)[number];
 
@@ -17,6 +18,8 @@ export type Direction = "above" | "below";
 export type WickSide = "upper" | "lower" | "any";
 /** Anchor a retracement rule measures from: the window high ("top"), the window low ("bottom"), or either. */
 export type RetraceSide = "top" | "bottom" | "both";
+/** Direction a price_run rule may fire on. "both" allows either completed run. */
+export type PriceRunSide = "up" | "down" | "both";
 
 export type RuleParams =
   | { kind: "price_cross"; level: number; direction: Direction }
@@ -26,7 +29,8 @@ export type RuleParams =
   | { kind: "pullback"; interval: Interval; lookback: number; minDropPct: number }
   | { kind: "pct_move"; interval: Interval; lookback: number; minAbsPct: number }
   | { kind: "ma_cross"; period: number; direction: Direction; interval: Interval }
-  | { kind: "retracement"; interval: Interval; lookback: number; minRetracePct: number; side: RetraceSide };
+  | { kind: "retracement"; interval: Interval; lookback: number; minRetracePct: number; side: RetraceSide }
+  | { kind: "price_run"; interval: Interval; minBars: number; minMovePct: number; side: PriceRunSide; skipSessionOpenBars?: number; maxBarShare?: number };
 
 const MAX_BAR_LOOKBACK = 500;
 /** A rule stops evaluating when its newest confirmed bar is older than this many intervals. */
@@ -181,6 +185,32 @@ export function parseRuleParams(kind: string, raw: unknown): RuleParams {
         minRetracePct: requireFiniteNumber(obj, "minRetracePct", { positive: true }),
         side: requireRetraceSide(obj),
       };
+    case "price_run": {
+      const side = obj.side ?? "both";
+      if (side !== "up" && side !== "down" && side !== "both") {
+        throw new AlertRuleError('side must be "up", "down" or "both"');
+      }
+      const skipSessionOpenBars = obj.skipSessionOpenBars;
+      if (skipSessionOpenBars !== undefined) {
+        optionalInteger(obj, "skipSessionOpenBars", 0, 0, 6);
+      }
+      const maxBarShare = obj.maxBarShare;
+      if (
+        maxBarShare !== undefined &&
+        (typeof maxBarShare !== "number" || !Number.isFinite(maxBarShare) || maxBarShare <= 0 || maxBarShare > 1)
+      ) {
+        throw new AlertRuleError("maxBarShare must be a number in (0, 1]");
+      }
+      return {
+        kind,
+        interval: requireInterval(obj),
+        minBars: requiredInteger(obj, "minBars", 3, 20),
+        minMovePct: requireFiniteNumber(obj, "minMovePct", { positive: true }),
+        side,
+        ...(skipSessionOpenBars !== undefined ? { skipSessionOpenBars: skipSessionOpenBars as number } : {}),
+        ...(maxBarShare !== undefined ? { maxBarShare } : {}),
+      };
+    }
     default:
       throw new AlertRuleError(`unknown rule kind "${kind}"`);
   }
@@ -325,6 +355,15 @@ export function isSessionOpenSkipBar(barTs: number, interval: Interval, skipCoun
   return false;
 }
 
+/** First 5m/15m/1H bar of the A-share afternoon session (13:00 Asia/Shanghai). 1D never matches.
+ * price_run rejects this bar so a lunch gap is not treated as a continuous run. */
+export function isAsharesResumptionBar(barTs: number, interval: Interval): boolean {
+  if (interval === "1D") return false;
+  const stepMinutes = INTERVAL_MS[interval] / 60_000;
+  if (!Number.isInteger(stepMinutes) || stepMinutes <= 0) return false;
+  return shanghaiMinutes(barTs) === 13 * 60;
+}
+
 /** Calendar date ("YYYY-MM-DD") in Asia/Shanghai. Fixed +8h offset, as above. */
 function shanghaiDateKey(ts: number): string {
   const shifted = new Date(ts + 8 * 3_600_000);
@@ -461,6 +500,80 @@ export function evaluateRetracement(
 }
 
 /**
+ * A session-contiguous run of `minBars` confirmed bars in one direction, with no volume requirement.
+ * The window is always the most recent `minBars` bars ending at the latest candle (no lookahead).
+ * It does not fire when:
+ * - any bar is the 09:30 open (if skipSessionOpenBars > 0) or the 13:00 lunch resumption
+ * - bars are not exactly one interval apart (cross-lunch and cross-day gaps fail)
+ * - closes are not strictly monotonic in the run direction
+ * - the last bar does not make a higher high and higher low (up) or lower low and lower high (down)
+ *   versus the earlier bars in the window
+ * - |last.close - first.open| / first.open * 100 is below minMovePct
+ * - maxBarShare is set and the largest single-bar leg (first bar uses |close-open|, later bars
+ *   use |close-close|) exceeds that fraction of the net move (a one-bar pulse plus drift)
+ * This is not the dashboard 1m MA20 W gauge, and it is not a pct_move net-change rule.
+ */
+export interface PriceRunMeasure {
+  side: "up" | "down";
+  netMovePct: number;
+  maxBarShare: number;
+  startTs: number;
+  barCount: number;
+}
+
+export function measurePriceRun(
+  params: Extract<RuleParams, { kind: "price_run" }>,
+  candles: readonly Candle[],
+): PriceRunMeasure | null {
+  if (candles.length < params.minBars) return null;
+  const window = candles.slice(candles.length - params.minBars);
+  const last = window[window.length - 1];
+  const first = window[0];
+  if (!last || !first) return null;
+  const skipOpen = params.skipSessionOpenBars ?? 0;
+  const step = INTERVAL_MS[params.interval];
+  for (let i = 0; i < window.length; i += 1) {
+    const bar = window[i]!;
+    if (isSessionOpenSkipBar(bar.ts, params.interval, skipOpen)) return null;
+    if (isAsharesResumptionBar(bar.ts, params.interval)) return null;
+    if (i > 0 && bar.ts - window[i - 1]!.ts !== step) return null;
+  }
+  if (!(first.open > 0)) return null;
+  const net = last.close - first.open;
+  const netMovePct = (net / first.open) * 100;
+  if (Math.abs(netMovePct) < params.minMovePct) return null;
+
+  const prior = window.slice(0, -1);
+  const up =
+    net > 0 &&
+    window.every((bar, i) => i === 0 || bar.close > window[i - 1]!.close) &&
+    last.high > Math.max(...prior.map((bar) => bar.high)) &&
+    last.low > Math.min(...prior.map((bar) => bar.low));
+  const down =
+    net < 0 &&
+    window.every((bar, i) => i === 0 || bar.close < window[i - 1]!.close) &&
+    last.low < Math.min(...prior.map((bar) => bar.low)) &&
+    last.high < Math.max(...prior.map((bar) => bar.high));
+  const side = up ? "up" : down ? "down" : null;
+  if (side === null) return null;
+  if (params.side !== "both" && params.side !== side) return null;
+
+  const legs = window.map((bar, i) =>
+    i === 0 ? Math.abs(bar.close - bar.open) : Math.abs(bar.close - window[i - 1]!.close),
+  );
+  const maxBarShare = Math.max(...legs) / Math.abs(net);
+  if (params.maxBarShare !== undefined && maxBarShare > params.maxBarShare) return null;
+  return { side, netMovePct, maxBarShare, startTs: first.ts, barCount: params.minBars };
+}
+
+export function evaluatePriceRun(
+  params: Extract<RuleParams, { kind: "price_run" }>,
+  candles: readonly Candle[],
+): boolean {
+  return measurePriceRun(params, candles) !== null;
+}
+
+/**
  * Interval whose confirmed bars a rule reads. price_cross has no interval parameter, so it compares the two
  * latest 1m closes.
  */
@@ -486,6 +599,8 @@ export function ruleBarsNeeded(params: RuleParams): number {
     case "retracement":
       // lookback anchor bars plus the bar being judged against them.
       return params.lookback + 1;
+    case "price_run":
+      return params.minBars;
   }
 }
 
@@ -572,6 +687,23 @@ export function evaluateRule(
       return evaluateMaCross(params, candles, dailyCloses);
     case "retracement":
       return evaluateRetracement(params, candles);
+    case "price_run": {
+      const measured = measurePriceRun(params, candles);
+      if (measured === null) return null;
+      return {
+        barTs,
+        details: {
+          last_price: last.close,
+          /** 1 = up run, -1 = down run. */
+          side: measured.side === "up" ? 1 : -1,
+          net_move_pct: round4(measured.netMovePct),
+          max_bar_share: round4(measured.maxBarShare),
+          min_move_pct: params.minMovePct,
+          min_bars: params.minBars,
+          start_ts: measured.startTs,
+        },
+      };
+    }
   }
 }
 

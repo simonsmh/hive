@@ -33,6 +33,7 @@ export const ALERT_KIND_LABELS: Record<string, string> = {
   price_cross: "价格穿越",
   candle_close_break: "K 线收盘突破",
   volume_spike: "放量",
+  price_run: "价格续跑",
   long_wick: "长影线",
   pullback: "回调",
 };

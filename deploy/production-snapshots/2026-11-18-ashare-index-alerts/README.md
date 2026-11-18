@@ -12,12 +12,14 @@ Times are Asia/Shanghai.
 
 | Function | Version | Deployed at | `verify_jwt` | `ezbr_sha256` |
 | --- | --- | --- | --- | --- |
-| `alert-evaluator` | v15 | 2026-11-18 10:43:46 | false | `3096d31d8e1520db9dba74bdc4cfed9cde955f883eae1cd5767f69ce44c3dc44` |
+| `alert-evaluator` | v16 | 2026-11-18 11:02:35 | false | `d6471b94912b9db624000c0ecb15b1344d63fe2bf62818ddb5f3c8362bf0cdef` |
+| `alert-evaluator` (prior baseline) | v15 | 2026-11-18 10:43:46 | false | `3096d31d8e1520db9dba74bdc4cfed9cde955f883eae1cd5767f69ce44c3dc44` |
 | `sina-intraday-collector` | v5 | 2026-11-18 10:44:46 | false | `55f621a5dbc8212ab573d900bfccb7cc07c60c42a0ff63d5fa8bc34cf5277b9c` |
 
 This patch, on top of the then-live production baselines (evaluator v14, collector v4):
 
-- `alert-evaluator/core/alerts.ts`: `volume_spike` gains `skipSessionOpenBars` (0–6). The first N bars from 09:30 Asia/Shanghai in the rule interval are ignored. 1D rules and a skip of 0 never skip. Lunch 13:00 is not skipped.
+- `alert-evaluator/core/alerts.ts` (v16): adds `price_run` (4 confirmed 5m bars, 0.8% net, HH/HL, skip open/lunch, max bar share 0.7) on top of v15.
+- `alert-evaluator/core/alerts.ts` (v15): `volume_spike` gains `skipSessionOpenBars` (0–6). The first N bars from 09:30 Asia/Shanghai in the rule interval are ignored. 1D rules and a skip of 0 never skip. Lunch 13:00 is not skipped.
 - `sina-intraday-collector/handler.ts`: `INTRADAY_WHITELIST` is SH513310, HTGD, SZ159915, SH000300, SH000688, SZ399006. The last three are the indices themselves (Sina constituent volume), not ETF proxies.
 - `sina-intraday-collector/core/types.ts` is included because the deployed store/handler type-import it. It matches the evaluator types file and is type-only at runtime.
 

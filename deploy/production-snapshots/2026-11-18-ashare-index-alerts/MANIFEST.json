@@ -2,15 +2,15 @@
   "title": "Production edge snapshot for A-share index volume alerts",
   "captured_at_shanghai": "2026-11-18 10:50:00 Asia/Shanghai",
   "project_id": "ifupefthwtdutjzsqsnw",
-  "note": "Exact sources deployed 2026-11-18. Do not redeploy from older origin/main. This directory is a snapshot, not a merge of unpublished WIP into supabase/functions on main.",
+  "note": "Exact sources aligned with the functions last deployed. alert-evaluator v16 (price_run) and sina-intraday-collector v5. Do not redeploy from older origin/main.",
   "functions": {
     "alert-evaluator": {
-      "version": 15,
-      "updated_at_shanghai": "2026-11-18 10:43:46 Asia/Shanghai",
+      "version": 16,
+      "updated_at_shanghai": "2026-11-18 11:02:35 Asia/Shanghai",
       "verify_jwt": false,
-      "ezbr_sha256": "3096d31d8e1520db9dba74bdc4cfed9cde955f883eae1cd5767f69ce44c3dc44",
+      "ezbr_sha256": "d6471b94912b9db624000c0ecb15b1344d63fe2bf62818ddb5f3c8362bf0cdef",
       "id": "d56cc111-86e8-4dc1-958c-3decdcb65e45",
-      "patch": "skipSessionOpenBars on volume_spike, on top of the live v14 baseline (ma_cross/retracement/minMovePct already present in production, not on origin/main)."
+      "patch": "price_run on top of the live v15 baseline (which already had skipSessionOpenBars). sina-intraday-collector remains v5."
     },
     "sina-intraday-collector": {
       "version": 5,
@@ -24,8 +24,8 @@
   "files": [
     {
       "path": "alert-evaluator/core/alerts.ts",
-      "sha256": "e3e44040c8d7645530776e8191d9d042d0fa2bde28d0de480eda9694938e99bf",
-      "bytes": 25754
+      "sha256": "baa9ea3df15195d83f4b80dda45aaaccced5e013fa9518e9e9740b4467cc6374",
+      "bytes": 31471
     },
     {
       "path": "alert-evaluator/core/auth.ts",

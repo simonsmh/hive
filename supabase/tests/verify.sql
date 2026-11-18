@@ -1315,3 +1315,48 @@ end
 $$;
 
 rollback;
+
+-- price_run kind, index rules, grokbot-market filter, bulk delivery policy.
+begin;
+do $$
+declare
+  v_count int;
+  v_kinds text[];
+  v_priority text;
+begin
+  perform 1 from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+   where t.relname = 'alert_rules'
+     and c.conname = 'alert_rules_kind_check'
+     and pg_get_constraintdef(c.oid) like '%price_run%';
+  if not found then raise exception 'alert_rules_kind_check missing price_run'; end if;
+
+  select count(*) into v_count from public.alert_rules
+   where kind = 'price_run' and source = 'sina' and enabled
+     and symbol in ('SH000688','SZ399006','SH000300');
+  if v_count < 6 then raise exception 'expected 6 index price_run rules, got %', v_count; end if;
+
+  select array(select jsonb_array_elements_text(filters->'alert_kinds') order by 1)
+    into v_kinds
+    from public.webhook_subscriptions
+   where agent_name = 'grokbot-market';
+  if v_kinds is null or not ('price_run' = any (v_kinds)) then
+    raise exception 'grokbot-market filters must include price_run';
+  end if;
+  if not ('volume_spike' = any (v_kinds)) then
+    raise exception 'grokbot-market must keep volume_spike';
+  end if;
+
+  perform 1 from public.webhook_subscriptions
+   where agent_name = 'grokbot-news' and event_types = array['news']::text[];
+  if not found then raise exception 'grokbot-news must remain news-only'; end if;
+
+  select priority into v_priority from public.hive_delivery_policy('alert', 'price_run');
+  if v_priority is distinct from 'bulk' then
+    raise exception 'price_run should use bulk delivery policy, got %', v_priority;
+  end if;
+
+  raise notice 'verify.sql: price_run alerts checks passed';
+end
+$$;
+rollback;

@@ -103,3 +103,7 @@ The exact `alert-evaluator` v15 and `sina-intraday-collector` v5 sources, file d
 - 10:45 cron: `cycle ok sina=6 failed=0 dbErrors=0`; `source_health` sina last success 10:45:11. Last confirmed 5m bars for the three indices were 10:40 (bar-open timestamps).
 - 10:46 evaluator: `rules=13 fired=0`, `no_data=0` (the new index rules have candles; that bar did not meet the 2x / 0.3% thresholds).
 - Git: `0daa9e3` on `feat/ashare-index-volume-alerts`. Do not redeploy these two functions from an older `main` tree. Production remains ahead of `origin/main` for unpublished collectors.
+## price_run kind
+
+Independent 5m structure wakes (`price_run`) are documented in `docs/price-run-alerts.md`. Add that kind to `grokbot-market` `alert_kinds` (already done in production) and to the receiving routine. Do not treat a TEST fixture as a market signal.
+
