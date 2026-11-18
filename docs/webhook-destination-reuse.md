@@ -89,6 +89,10 @@ Then, using `created_at` (indexed), check `webhook_deliveries` for that `event_k
 
 Production already ran sina-intraday-collector and a retracement/ma_cross-capable alert-evaluator ahead of `origin/main`. Further function deploys for this feature must start from the live function source, change only the whitelist / `skipSessionOpenBars` behaviour, and must not redeploy those functions from an older `main` tree.
 
+## Function source snapshot
+
+The exact `alert-evaluator` v15 and `sina-intraday-collector` v5 sources, file digests, redeploy notes, and local tests live in `deploy/production-snapshots/2026-11-18-ashare-index-alerts/`. They were taken from the copies that were uploaded, not from older `origin/main`. Do not redeploy those two functions from `main`. Do not treat that directory as a merge of unpublished WIP into `supabase/functions`.
+
 ## Production state 2026-11-18 (Asia/Shanghai)
 
 - Migration `20261118024102` (`ashare_index_alerts_and_webhook_clone`) is applied.

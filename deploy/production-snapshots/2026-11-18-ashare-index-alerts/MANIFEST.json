@@ -1,0 +1,106 @@
+{
+  "title": "Production edge snapshot for A-share index volume alerts",
+  "captured_at_shanghai": "2026-11-18 10:50:00 Asia/Shanghai",
+  "project_id": "ifupefthwtdutjzsqsnw",
+  "note": "Exact sources deployed 2026-11-18. Do not redeploy from older origin/main. This directory is a snapshot, not a merge of unpublished WIP into supabase/functions on main.",
+  "functions": {
+    "alert-evaluator": {
+      "version": 15,
+      "updated_at_shanghai": "2026-11-18 10:43:46 Asia/Shanghai",
+      "verify_jwt": false,
+      "ezbr_sha256": "3096d31d8e1520db9dba74bdc4cfed9cde955f883eae1cd5767f69ce44c3dc44",
+      "id": "d56cc111-86e8-4dc1-958c-3decdcb65e45",
+      "patch": "skipSessionOpenBars on volume_spike, on top of the live v14 baseline (ma_cross/retracement/minMovePct already present in production, not on origin/main)."
+    },
+    "sina-intraday-collector": {
+      "version": 5,
+      "updated_at_shanghai": "2026-11-18 10:44:46 Asia/Shanghai",
+      "verify_jwt": false,
+      "ezbr_sha256": "55f621a5dbc8212ab573d900bfccb7cc07c60c42a0ff63d5fa8bc34cf5277b9c",
+      "id": "2f606c2d-9495-4112-8666-5b4eb6b268c6",
+      "patch": "INTRADAY_WHITELIST adds SH000300, SH000688, SZ399006 (indices, not ETF proxies) on top of the live v4 baseline. core/types.ts is included because store/handler import the type; it is type-only and matches the evaluator types file."
+    }
+  },
+  "files": [
+    {
+      "path": "alert-evaluator/core/alerts.ts",
+      "sha256": "e3e44040c8d7645530776e8191d9d042d0fa2bde28d0de480eda9694938e99bf",
+      "bytes": 25754
+    },
+    {
+      "path": "alert-evaluator/core/auth.ts",
+      "sha256": "a8cf209d9fa57a6c076c4a963529813118722df979c065cbe4cf531a3e7d1845",
+      "bytes": 938
+    },
+    {
+      "path": "alert-evaluator/core/types.ts",
+      "sha256": "7ba60ffb61b36af0ded8792147f7d00f1a571c5c24eabffd90d4428f1138eed1",
+      "bytes": 546
+    },
+    {
+      "path": "alert-evaluator/handler.ts",
+      "sha256": "74e9ece40ded4d846062424dcfb15c18d29208701f959ff4e81ac5b19a73a31a",
+      "bytes": 8439
+    },
+    {
+      "path": "alert-evaluator/index.ts",
+      "sha256": "16198a9c7b22eb0f9e9a716549679cc03e99d0a27c5cfde220f76b5d1fb82d18",
+      "bytes": 655
+    },
+    {
+      "path": "alert-evaluator/store.ts",
+      "sha256": "9a6d4664fa8fa574b8d0d64a361483845bded7398278eaeeaf02c05d33ee64ef",
+      "bytes": 3995
+    },
+    {
+      "path": "sina-intraday-collector/core/auth.ts",
+      "sha256": "a8cf209d9fa57a6c076c4a963529813118722df979c065cbe4cf531a3e7d1845",
+      "bytes": 938
+    },
+    {
+      "path": "sina-intraday-collector/core/collector.ts",
+      "sha256": "77952522b6c57ccd02be9efecc7b16bf3e61736d4193a1b58ac270d1ceebff4f",
+      "bytes": 7205
+    },
+    {
+      "path": "sina-intraday-collector/core/okx.ts",
+      "sha256": "1c16271b9b7957397898f47b34d6c3a1bb52ec194468ff3e28fbdceb4c8d344e",
+      "bytes": 10101
+    },
+    {
+      "path": "sina-intraday-collector/core/sina-intraday-cycle.ts",
+      "sha256": "e8980cb941054292bfa49b2b82a8914a54e2dde18e3abf06d832657a316bff95",
+      "bytes": 6453
+    },
+    {
+      "path": "sina-intraday-collector/core/sina.ts",
+      "sha256": "7ca36d0e1538090be6816e41621cc6be064c55c86f267555087d5403516030db",
+      "bytes": 15778
+    },
+    {
+      "path": "sina-intraday-collector/core/symbols.ts",
+      "sha256": "78770885e9ba159855cae194d51347eedb35a8e345cc7e74eb5b2d0988e74157",
+      "bytes": 3854
+    },
+    {
+      "path": "sina-intraday-collector/core/types.ts",
+      "sha256": "7ba60ffb61b36af0ded8792147f7d00f1a571c5c24eabffd90d4428f1138eed1",
+      "bytes": 546
+    },
+    {
+      "path": "sina-intraday-collector/handler.ts",
+      "sha256": "ebfa41a1c9873c28b900e08d0223f89827bd7efae1380a72a1570f58c4a10e5a",
+      "bytes": 7164
+    },
+    {
+      "path": "sina-intraday-collector/index.ts",
+      "sha256": "7fa2c7c7e9c01d08d49a42b000f737b4c9fb2f74e2a3bf0f6607f848664d2288",
+      "bytes": 1296
+    },
+    {
+      "path": "sina-intraday-collector/store.ts",
+      "sha256": "c15db9ce33b720380b066353948a8cbfd8facb10f9a673c88c88a8450bc571e0",
+      "bytes": 3749
+    }
+  ]
+}
