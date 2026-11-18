@@ -1242,4 +1242,76 @@ begin
 end
 $$;
 
+
+-- A-share index volume_spike rules and secret-safe webhook destination clone (20261118024102).
+do $$
+declare
+  v_from uuid;
+  v_clone uuid;
+  v_from_secret uuid;
+  v_clone_secret uuid;
+  v_from_url text;
+  v_clone_url text;
+  v_count integer;
+begin
+  v_from := public.hive_upsert_webhook_subscription(
+    null, 'verify-clone-src', 'https://clone-src.example.com/hook',
+    'clone-src-secret-0123456789abcdef0123',
+    array['news']::text[], '{}'::jsonb, true,
+    'clone-src-bearer-0123456789abcdef', false
+  );
+  v_clone := public.hive_clone_webhook_destination(
+    'verify-clone-src',
+    'verify-clone-dst',
+    array['alert']::text[],
+    '{"alert_kinds":["volume_spike"],"symbols":["SH000688"]}'::jsonb,
+    true
+  );
+  if v_clone is null or v_clone = v_from then
+    raise exception 'clone should insert a new subscription id';
+  end if;
+  select s.url, s.secret_id into v_from_url, v_from_secret from public.webhook_subscriptions s where s.id = v_from;
+  select s.url, s.secret_id into v_clone_url, v_clone_secret from public.webhook_subscriptions s where s.id = v_clone;
+  if v_from_url is distinct from v_clone_url then raise exception 'cloned destination url should match the source'; end if;
+  if v_clone_secret is null or v_clone_secret = v_from_secret then
+    raise exception 'cloned signing secret should be a new vault row';
+  end if;
+  perform 1 from public.webhook_subscriptions s
+   where s.id = v_clone and s.agent_name = 'verify-clone-dst'
+     and s.event_types = array['alert']::text[]
+     and s.filters = '{"alert_kinds":["volume_spike"],"symbols":["SH000688"]}'::jsonb
+     and s.enabled = true
+     and s.auth_token_secret_id is not null;
+  if not found then raise exception 'cloned subscription row missing expected event_types or filters'; end if;
+
+  begin
+    perform public.hive_clone_webhook_destination('verify-clone-src', 'verify-clone-dst', array['alert']::text[], '{}'::jsonb, true);
+    raise exception 'clone should reject a duplicate agent_name';
+  exception
+    when unique_violation then null;
+  end;
+
+  if not public.hive_delete_webhook_subscription(v_clone) then raise exception 'clone delete failed'; end if;
+  perform 1 from public.webhook_subscriptions where id = v_from;
+  if not found then raise exception 'deleting the clone must not remove the source subscription'; end if;
+  if not public.hive_delete_webhook_subscription(v_from) then raise exception 'source delete failed'; end if;
+
+  perform 1 from public.symbol_map where symbol = 'SH000688' and ths_code = '000688.SH' and ths_kind = 'index' and enabled;
+  if not found then raise exception 'SH000688 symbol_map row missing'; end if;
+  perform 1 from public.symbol_map where symbol = 'SZ399006' and ths_code = '399006.SZ' and ths_kind = 'index' and enabled;
+  if not found then raise exception 'SZ399006 symbol_map row missing'; end if;
+  select count(*) into v_count from public.alert_rules
+   where kind = 'volume_spike' and source = 'sina'
+     and symbol in ('SH000688','SZ399006','SH000300')
+     and enabled;
+  if v_count < 3 then raise exception 'expected 3 index volume_spike rules, got %', v_count; end if;
+
+  if has_function_privilege('anon', 'public.hive_clone_webhook_destination(text,text,text[],jsonb,boolean)', 'EXECUTE') then
+    raise exception 'anon must not execute hive_clone_webhook_destination';
+  end if;
+
+  raise notice 'verify.sql: ashare index alerts and webhook clone checks passed';
+end
+$$;
+
 rollback;
