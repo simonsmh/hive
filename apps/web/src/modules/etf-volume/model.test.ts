@@ -7,6 +7,7 @@ describe('same-time cumulative turnover',()=>{
  it('ratio of sums, not arithmetic mean of ratios',()=>{const b=buildBoard(cat,captures(),ts);expect(b.total.ratio).toBe(1.25);expect(b.total.up).toBe(1);expect(b.total.down).toBe(1);});
  it('missing baseline is null not 0/1',()=>{expect(buildBoard(cat,captures().slice(0,1),ts).total.ratio).toBeNull();});
  it('does not divide half-day by full-day',()=>{const c=captures();c[1]!.payload.items.forEach(x=>x.ts+=5*3600000);expect(buildBoard(cat,c,ts).total.comparable).toBe(0);});
+ it('absent matched baseline amounts stay null',()=>{const b=buildBoard(cat,captures().slice(0,1),ts);expect(b.total.current).toBeNull();expect(b.total.baseline).toBeNull();});
  it('zero turnover cannot create division by zero',()=>{const c=captures();c[1]!.payload.items.forEach(x=>x.turnover=0);expect(buildBoard(cat,c,ts).total.ratio).toBeNull();});
  it('uses source timestamps, stale quotes excluded',()=>{expect(buildBoard(cat,captures(),ts+20*60000).total.comparable).toBe(0);});
  it('explicit transparent volume thresholds',()=>{expect(volumeLabel(1.1)).toBe('放量');expect(volumeLabel(.9)).toBe('缩量');expect(volumeLabel(1)).toBe('持平');});
