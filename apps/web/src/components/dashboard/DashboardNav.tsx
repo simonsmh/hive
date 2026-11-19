@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState, useTransition } from "react";
+import { activePanel, groupNavItems } from "@/src/modules/registry";
 import type { PanelIcon, PanelRegistration } from "@/src/modules/registry";
 
 const ICON_PATHS: Record<PanelIcon, string[]> = {
@@ -31,34 +33,59 @@ function NavIcon({ name }: { name: PanelIcon }) {
   );
 }
 
-/**
- * One navigation model, two presentations: a bottom tab bar on phones and tablets,
- * a side rail on desktop. CSS decides which one is visible at each breakpoint.
- */
-export function DashboardNav({
-  items,
-  variant,
-}: {
+export function DashboardNav({ items, variant }: {
   items: readonly PanelRegistration[];
   variant: "tabbar" | "sidebar";
 }) {
   const pathname = usePathname();
-  return (
-    <nav className={variant === "sidebar" ? "sidenav" : "tabbar"} aria-label="主导航">
-      {items.map((item) => {
-        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-        return (
-          <Link
-            key={item.id}
-            href={item.href}
-            className={variant === "sidebar" ? "side-tab" : "tab"}
-            aria-current={active ? "page" : undefined}
-          >
-            <NavIcon name={item.icon} />
-            <span>{item.title}</span>
-          </Link>
-        );
-      })}
-    </nav>
-  );
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [target, setTarget] = useState("");
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, []);
+  const current = activePanel(pathname, items);
+  const groups = groupNavItems(items);
+  const links = <>
+    <Link href="/" className="side-tab" aria-current={pathname === "/" ? "page" : undefined} onClick={event => { if(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return; event.preventDefault(); setOpen(false); setTarget("功能总览"); startTransition(() => router.push("/")); }}>功能总览</Link>
+    {groups.map(group => <section className="nav-group" key={group.id} aria-label={group.title}>
+      <h2>{group.title}</h2>
+      {group.items.map(item => <Link key={item.id} href={item.href} className="side-tab"
+        aria-current={current?.id === item.id ? "page" : undefined}
+        onClick={event => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+          event.preventDefault(); setOpen(false); setTarget(item.title);
+          startTransition(() => router.push(item.href));
+        }}><NavIcon name={item.icon}/><span>{item.title}</span></Link>)}
+    </section>)}
+  </>;
+  return <>
+    {variant === "sidebar" ? <nav className="sidenav" aria-label="主导航">{links}</nav> :
+      <div className="mobile-navigation">
+        <button className="module-switch" aria-expanded={open} aria-controls="mobile-modules" onClick={() => setOpen(!open)}>
+          <span>模块 / {current?.title ?? "功能总览"}</span><span>{open ? "收起 ×" : "全部模块 ▾"}</span>
+        </button>
+        {open && <nav id="mobile-modules" className="mobile-modules" aria-label="主导航">{links}</nav>}
+      </div>}
+    {pending && <div className={`navigation-pending pending-${variant}`} role="status">正在打开{target}… 当前内容仍为上一页面，请以各模块数据时间为准。</div>}
+  </>;
+}
+
+export function DashboardContext() {
+  const pathname = usePathname();
+  const panel = activePanel(pathname);
+  const group = groupNavItems().find(group => group.items.some(item => item.id === panel?.id));
+  return <div className="workspace-context"><span>工作台 / {group?.title ?? "总览"} / <strong>{panel?.title ?? "功能总览"}</strong></span><span>数据时间与可用性见模块内标注</span></div>;
+}
+
+export function ModuleLink({href, children, className}: {href: string; children: React.ReactNode; className?: string}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  return <><Link href={href} className={className} onClick={event => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    event.preventDefault(); startTransition(() => router.push(href));
+  }}>{children}</Link>{pending && <div className="navigation-pending" role="status">正在打开模块… 当前仍为上一页面，数据尚未更新。</div>}</>;
 }

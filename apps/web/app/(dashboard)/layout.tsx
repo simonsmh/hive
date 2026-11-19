@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import { DashboardBrand } from "@/src/components/dashboard/DashboardBrand";
-import { DashboardNav } from "@/src/components/dashboard/DashboardNav";
+import { DashboardNav, DashboardContext } from "@/src/components/dashboard/DashboardNav";
 import { LiveStatus } from "@/src/components/dashboard/LiveStatus";
 import { InstallPrompt } from "@/src/components/pwa/InstallPrompt";
 import { logoutAction } from "@/src/modules/auth/actions";
@@ -19,6 +19,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   const items = getNavItems();
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到内容</a>
       <header className="topbar">
         <DashboardBrand />
         <span className="topbar-actions">
@@ -30,6 +31,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           </form>
         </span>
       </header>
+      <DashboardNav items={items} variant="tabbar" />
       <aside className="sidebar">
         <DashboardBrand />
         <LiveStatus />
@@ -40,8 +42,8 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           </button>
         </form>
       </aside>
-      <div className="content">{children}</div>
-      <DashboardNav items={items} variant="tabbar" />
+      <div className="content"><DashboardContext /><main id="main-content">{children}</main></div>
+
       <InstallPrompt />
     </div>
   );

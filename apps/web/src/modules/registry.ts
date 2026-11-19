@@ -71,3 +71,18 @@ export function validateRegistry(panels: readonly PanelRegistration[]): string[]
   }
   return errors;
 }
+
+export const NAV_GROUPS = [
+  { id: "market", title: "行情", panels: ["quotes", "market"] },
+  { id: "observe", title: "观察", panels: ["ma-deviation", "etf-volume", "news"] },
+  { id: "alerts", title: "告警", panels: ["alerts"] },
+  { id: "manage", title: "管理", panels: ["health", "symbols", "orders", "trend", "settings"] },
+] as const;
+
+export function groupNavItems(items: readonly PanelRegistration[] = PANELS) {
+  return NAV_GROUPS.map(group => ({ ...group, items: items.filter(item => (group.panels as readonly string[]).includes(item.id)) }));
+}
+
+export function activePanel(pathname: string, items: readonly PanelRegistration[] = PANELS) {
+  return items.find(item => pathname === item.href || pathname.startsWith(`${item.href}/`));
+}

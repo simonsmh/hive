@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { ModuleLink as Link } from "@/src/components/dashboard/DashboardNav";
 import { EmptyState, ErrorState, PanelFrame } from "@/src/components/dashboard/PanelFrame";
 import { loadSourceHealth } from "@/src/modules/health/query";
 import { buildHomeOverview, type HomeHealthView } from "@/src/modules/home/overview";
 import { loadPanelData } from "@/src/modules/panel-data";
-import { getNavItems } from "@/src/modules/registry";
+import { getNavItems, groupNavItems } from "@/src/modules/registry";
 import { sourceLabel } from "@/src/modules/sources";
 
 export const metadata: Metadata = { title: "功能目录" };
@@ -20,17 +20,12 @@ export default async function DashboardHome() {
       subtitle="进入已有的行情、新闻、健康与告警等面板。上方状态只来自数据源健康记录，不使用示例数据。"
     >
       <HomeHealthSection health={overview.health} />
-      <h2>全部面板</h2>
-      <ul className="catalog">
-        {overview.panels.map((panel) => (
-          <li key={panel.id}>
-            <Link href={panel.href} className="catalog-card">
-              <strong>{panel.title}</strong>
-              <span>{panel.summary}</span>
-            </Link>
-          </li>
-        ))}
-      </ul>
+      {groupNavItems(getNavItems()).map(group => <section key={group.id} className="catalog-group" aria-label={group.title}>
+        <h2>{group.title}</h2>
+        <ul className="catalog">{group.items.map(panel => <li key={panel.id}>
+          <Link href={panel.href} className="catalog-card"><strong>{panel.title}</strong><span>{panel.summary}</span></Link>
+        </li>)}</ul>
+      </section>)}
     </PanelFrame>
   );
 }
