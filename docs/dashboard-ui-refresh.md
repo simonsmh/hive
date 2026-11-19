@@ -36,3 +36,17 @@ Acceptance paths:
 Not covered by this preview: authenticated data arrival speed, live SSE, native notification permission, production business forms and sensitive order/strategy actions. Existing unit tests/build cover compilation but do not replace that integration coverage.
 
 No push/deploy before parent browser approval. Rollback: revert UI commit, no migration or persistent state rollback needed.
+
+## 390px ETF overflow follow-up
+
+The mobile media query changed the group grid to bare `1fr` (automatic min-content minimum). Inside it, table cells deliberately use `white-space: nowrap`; their min-content width could therefore size the group wider than the viewport before the inner scroller was constrained. This was a grid sizing/scroll-container containment issue, not a reason to hide overflow on the page.
+
+Fix: zero-minimum `minmax(0,1fr)` tracks at every ETF grid breakpoint, `min-width:0` on group/stat/coverage items, and a bounded inner table scroll region. Header description can wrap; ratio remains intact. No global `overflow-x:hidden` or column removal. The inner table is keyboard-focusable and has a mobile horizontal-scroll hint.
+
+Parent browser recheck at 390 CSS px (also 320/768/1440):
+- document.documentElement.scrollWidth <= document.documentElement.clientWidth
+- board/group rectangles stay inside the content column
+- `.etf-scroll` alone may have scrollWidth > clientWidth; horizontal swipe must reveal all columns
+- collapsed/expanded rows, mobile navigation open/closed, and long actual ETF names remain readable
+
+Preview refreshed at the same port3108. HTTP200 is a smoke test only, not evidence of browser geometry; final pixel-width acceptance is intentionally delegated to parent browser review.
