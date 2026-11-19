@@ -19,7 +19,8 @@ export function buildBoard(catalog:Etf[], captures:Capture[], now=Date.now()){
  function aggregate(items:typeof rows){
   const paired=items.filter(x=>x.ratio!==null); const a=paired.reduce((n,x)=>n+x.quote!.turnover!,0), b=paired.reduce((n,x)=>n+x.baseline!.turnover!,0);
   const ratio=b>0?a/b:null; const quoted=items.filter(x=>x.quote&&x.fresh);
-  return {ratio,label:volumeLabel(ratio),comparable:paired.length,current:paired.length?a:null,baseline:paired.length?b:null,coverage:quoted.length,count:items.length,up:quoted.filter(x=>x.quote!.pct!==null&&x.quote!.pct!>0).length,down:quoted.filter(x=>x.quote!.pct!==null&&x.quote!.pct!<0).length,flat:quoted.filter(x=>x.quote!.pct===0).length,turnover:quoted.length?quoted.reduce((n,x)=>n+(x.quote!.turnover??0),0):null};
+  const priced=quoted.filter(x=>x.quote!.pct!==null&&(x.quote!.turnover??0)>0); const priceWeight=priced.reduce((n,x)=>n+x.quote!.turnover!,0);
+  return {pricePct:priceWeight>0?priced.reduce((n,x)=>n+x.quote!.turnover!*x.quote!.pct!,0)/priceWeight:null,ratio,label:volumeLabel(ratio),comparable:paired.length,current:paired.length?a:null,baseline:paired.length?b:null,coverage:quoted.length,count:items.length,up:quoted.filter(x=>x.quote!.pct!==null&&x.quote!.pct!>0).length,down:quoted.filter(x=>x.quote!.pct!==null&&x.quote!.pct!<0).length,flat:quoted.filter(x=>x.quote!.pct===0).length,turnover:quoted.length?quoted.reduce((n,x)=>n+(x.quote!.turnover??0),0):null};
  }
  return {date:latest?.date??null,previousDate,slot:latest?.slot??null,fetchedAt:latest?.payload.fetchedAt??null,errors:latest?.payload.errors??0,archived:!!latest&&latest.date!==day(now),total:aggregate(rows),rows,groups:[...new Set(catalog.map(e=>e.group))].map(name=>({name,...aggregate(rows.filter(e=>e.group===name)),rows:rows.filter(e=>e.group===name)}))};
 }
